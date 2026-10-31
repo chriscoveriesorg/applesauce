@@ -11,6 +11,8 @@ on:
 
 jobs:
   release-plz:
+    # Forks must not inherit upstream's crate-publishing automation.
+    if: github.repository == 'Dr-Emann/applesauce'
     name: Release-plz
     concurrency:
       group: release-plz-${{ github.ref }}

@@ -152,10 +152,12 @@ reason and fall back to native LZFSE, not an unsafe new decmpfs ID.
 
 ## Current repository state
 
-The local checkout already contains `modern-compression-probe.swift`,
-`apfs-type-probe.c`, and the manual GitHub Actions workflow. This roadmap and
-the 27.2-only local runner are present as uncommitted local changes. **None of
-this is published to the user's public GitHub fork yet.**
+The probe, manual GitHub Actions workflow, roadmap and local 27.2 test launcher
+are published in [our fork's experiment branch](https://github.com/chriscoveriesorg/applesauce/tree/experiment/macos27-lzraven-mesh),
+under [PR #1](https://github.com/chriscoveriesorg/applesauce/pull/1).
+Swift codec and APFS private-framework tests still require a macOS runner.
+The companion cold-chatlog frontend lives in
+[our compress-agent-sessions fork](https://github.com/chriscoveriesorg/compress-agent-sessions).
 
 ## Sources
 
