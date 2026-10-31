@@ -10,6 +10,15 @@ algorithms used by HFS+/APFS: LZFSE, LZVN, and ZLIB.
 
 ![compression example](https://github.com/user-attachments/assets/3f78a011-7db4-4e7f-9cc9-89781ed78609)
 
+## Related tools for agents
+
+Companion projects in the same tooling family. They are separate tools; links do
+not install or run anything automatically:
+
+- **[Foldy](https://github.com/chriscoveries/foldy)** *(private; access required)*: local-first filesystem indexing, duplicate review and disk-space reporting.
+- **[compress-agent-sessions](https://github.com/chriscoveriesorg/compress-agent-sessions)** : macOS agent-session JSONL review and optional transparent compression using Applesauce.
+- **[ZGX](https://github.com/chriscoveriesorg/zgx)** *(private; access required)*: agent-oriented local metasearch across literal, indexed and optional semantic sources.
+
 ## Installation
 
 ### Install via Homebrew
