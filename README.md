@@ -1,5 +1,12 @@
 # Applesauce
 
+**Fork focus: experimental LZRAVEN support on macOS 27+.** This fork is
+investigating how to use Apple's LZRAVEN codec for compression, ideally with
+native transparent APFS reads. It currently provides guarded codec/filesystem
+probes and a [LZRAVEN roadmap](hack/roadmap-lzraven.md); **LZRAVEN is not yet a
+supported transparent-compression mode**. The Homebrew and prebuilt-release
+commands below install upstream Applesauce, not this fork's experiments.
+
 Applesauce is a command-line interface (CLI) program written in Rust that
 compresses, decompresses, and prints information about compressed files for
 HFS+/APFS transparent compression on macOS. It is based on
