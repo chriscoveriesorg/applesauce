@@ -250,6 +250,7 @@ pub(crate) fn capabilities(args: &Capabilities) -> io::Result<()> {
 #[serde(rename_all = "kebab-case")]
 enum Layout {
     WholeBuffer,
+    #[serde(rename = "independent-64k")]
     Independent64k,
 }
 
@@ -535,6 +536,18 @@ mod tests {
         assert_eq!(
             json["native_decmpfs"]["decmpfs_types"],
             serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn benchmark_layout_labels_are_stable() {
+        assert_eq!(
+            serde_json::to_value(Layout::WholeBuffer).unwrap(),
+            "whole-buffer"
+        );
+        assert_eq!(
+            serde_json::to_value(Layout::Independent64k).unwrap(),
+            "independent-64k"
         );
     }
 
