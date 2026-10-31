@@ -74,8 +74,11 @@ fn type14_uses_absolute_offsets_and_handles_a_stored_last_block() {
     input.push(b'x');
     let (_, fork) = round_trip(&input, 14);
     let offsets: Vec<u32> = fork[..12]
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .copied()
+        .map(u32::from_le_bytes)
         .collect();
     assert_eq!(offsets[0], 12);
     assert_eq!(offsets[2] as usize, fork.len());
