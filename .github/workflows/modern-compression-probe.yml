@@ -1,11 +1,30 @@
 name: Probe macOS 27 compression codecs
 
-# Manual button: use a disposable APFS image for the private filesystem test.
+# Automatic runs use generated in-memory fixtures only. Private APFS trials
+# require an explicit workflow_dispatch opt-in and are NEVER run on PR/push.
 on:
+  pull_request:
+    paths:
+      - 'Cargo.*'
+      - 'crates/**'
+      - 'hack/*probe*'
+      - '.github/workflows/modern-compression-probe.yml'
+  push:
+    branches: [main, 'modern-compression/**', 'experimental/**']
+    paths:
+      - 'Cargo.*'
+      - 'crates/**'
+      - 'hack/*probe*'
+      - '.github/workflows/modern-compression-probe.yml'
   workflow_dispatch:
     inputs:
       probe_filesystem:
-        description: 'Try private decmpfs types on a disposable APFS image (macOS 27.2+ only)'
+        description: 'Accept host-kernel-panic risk: private APFS controls 12/14 on a disposable image (27.2+)'
+        type: boolean
+        default: false
+        required: true
+      probe_candidates:
+        description: 'Also request types 15–22 after controls pass (requires probe_filesystem; NOT Raven/Mesh IDs)'
         type: boolean
         default: false
         required: true
@@ -13,61 +32,183 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: modern-compression-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
   probe:
     runs-on: xcode-27
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: Identify OS and SDK
-        run: |
-          sw_vers
-          xcodebuild -version
-          uname -m
-          printf '## Runner environment\n\n' >> "$GITHUB_STEP_SUMMARY"
-          printf '| Item | Value |\n| --- | --- |\n' >> "$GITHUB_STEP_SUMMARY"
-          printf '| macOS | `%s` |\n' "$(sw_vers -productVersion)" >> "$GITHUB_STEP_SUMMARY"
-          printf '| Xcode | `%s` |\n' "$(xcodebuild -version | /usr/bin/head -n 1)" >> "$GITHUB_STEP_SUMMARY"
-          printf '| Architecture | `%s` |\n\n' "$(uname -m)" >> "$GITHUB_STEP_SUMMARY"
-      - name: Report installed filesystem compressor components (read-only)
-        run: |
-          /usr/bin/kmutil showloaded | /usr/bin/grep -E 'AppleFSCompression|decmpfs' || true
-          /usr/sbin/ioreg -l -w 0 -p IOService | /usr/bin/grep -E 'AppleFSCompression|providesType' | /usr/bin/head -n 40 || true
-      - name: Compile and exercise Compression.framework codecs
+      - uses: actions/checkout@v6
+      - name: Identify exact OS, build, SDK, and toolchain
         run: |
           set -euo pipefail
-          xcrun swiftc -O hack/modern-compression-probe.swift -o "$RUNNER_TEMP/modern-compression-probe"
-          printf '## Compression.framework buffer codecs\n\n' >> "$GITHUB_STEP_SUMMARY"
-          printf '```text\n' >> "$GITHUB_STEP_SUMMARY"
-          "$RUNNER_TEMP/modern-compression-probe" | tee -a "$GITHUB_STEP_SUMMARY"
-          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
-      - name: Test private AppleFSCompression on disposable APFS image (27.2+ only)
-        if: ${{ inputs.probe_filesystem }}
+          PROBE_RESULTS="$RUNNER_TEMP/modern-compression-results"
+          printf 'PROBE_RESULTS=%s\n' "$PROBE_RESULTS" >> "$GITHUB_ENV"
+          mkdir -p "$PROBE_RESULTS"
+          {
+            printf 'Commit: %s\n' "$GITHUB_SHA"
+            printf 'UTC: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            sw_vers
+            uname -srm
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun swiftc --version
+            xcrun clang --version
+          } 2>&1 | tee "$PROBE_RESULTS/environment.txt"
+          {
+            printf '## Exact runner environment\n\n```text\n'
+            cat "$PROBE_RESULTS/environment.txt"
+            printf '```\n\nBuffer success does not establish transparent APFS support.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Report filesystem compressor components (read-only, not a support test)
+        run: |
+          {
+            /usr/bin/kmutil showloaded 2>&1 | /usr/bin/grep -E 'AppleFSCompression|decmpfs' || true
+            /usr/sbin/ioreg -l -w 0 -p IOService | /usr/bin/grep -E 'AppleFSCompression|providesType' | /usr/bin/head -n 40 || true
+          } | tee "$PROBE_RESULTS/filesystem-components.txt"
+      - name: Compile and exercise SDK buffer codecs (no APFS conversion)
         run: |
           set -euo pipefail
-          # The hosted xcode-27 image currently runs macOS 27.0.1. Keep
-          # undocumented filesystem-format tests off older patch releases.
-          VERSION="$(sw_vers -productVersion)"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-          if (( MAJOR < 27 || (MAJOR == 27 && MINOR < 2) )); then
-            printf '## APFS filesystem trial skipped\n\n' >> "$GITHUB_STEP_SUMMARY"
-            printf 'Host macOS `%s` is older than 27.2. The buffer codec test above remains valid.\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
-            printf 'Run `hack/run-local-apfs-probe.sh` on a macOS 27.2+ machine for the isolated native trial.\n' >> "$GITHUB_STEP_SUMMARY"
+          xcrun swiftc -O hack/modern-compression-probe.swift -o "$RUNNER_TEMP/modern-compression-probe" \
+            2>&1 | tee "$PROBE_RESULTS/swift-build.log"
+          "$RUNNER_TEMP/modern-compression-probe" --json \
+            2> >(tee "$PROBE_RESULTS/swift-buffer.stderr.log" >&2) | tee "$PROBE_RESULTS/swift-buffer.json"
+          python3 - "$PROBE_RESULTS/swift-buffer.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              report = json.load(handle)
+          assert report["schemaVersion"] == 1
+          assert report["kernelSupportTested"] is False
+          assert report["kind"] == "compression-buffer-probe"
+          results = report["results"]
+          assert len(results) == 12
+          for fixture in {result["input"] for result in results}:
+              rows = [result for result in results if result["input"] == fixture]
+              assert {row["codec"] for row in rows} == {"LZFSE", "LZRAVEN", "LZMESH"}
+              assert all(row["verified"] is True and row["compressedBytes"] > 0 for row in rows)
+          PY
+          {
+            printf '## SDK buffer round-trips\n\n'
+            printf 'LZFSE, LZRAVEN, and LZMESH passed byte-for-byte checks on generated JSONL, high-entropy, one-byte, and 64 KiB + 1 byte inputs.\n\n'
+            printf 'Machine-readable measurements are in `swift-buffer.json`; these are single-run smoke timings, not benchmarks.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Compile private helper without executing it
+        run: |
+          set -euo pipefail
+          xcrun clang -std=c11 -Wall -Wextra -Werror -framework CoreFoundation \
+            hack/apfs-type-probe.c -o "$RUNNER_TEMP/apfs-type-probe" \
+            2>&1 | tee "$PROBE_RESULTS/private-helper-build.log"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test Rust buffer implementation
+        run: |
+          set -euo pipefail
+          { rustc --version; cargo --version; } | tee "$PROBE_RESULTS/rust-toolchain.txt"
+          cargo test --locked -p applesauce-core --all-features apple_buffer::tests:: \
+            2>&1 | tee "$PROBE_RESULTS/rust-buffer-tests.log"
+          cargo test --locked -p applesauce-cli --features lzbitmap codecs::tests:: \
+            2>&1 | tee "$PROBE_RESULTS/rust-cli-tests.log"
+      - name: Exercise read-only Rust capabilities and generated buffer benchmark
+        run: |
+          set -euo pipefail
+          cargo run --locked -p applesauce-cli -- capabilities --json \
+            | tee "$PROBE_RESULTS/rust-capabilities.json"
+          cargo run --locked -p applesauce-cli --features lzbitmap -- capabilities --json \
+            | tee "$PROBE_RESULTS/rust-capabilities-lzbitmap.json"
+          cargo run --locked -p applesauce-cli -- benchmark-codecs --json \
+            | tee "$PROBE_RESULTS/rust-buffer.json"
+          for codec in lzraven lzmesh; do
+            if cargo run --locked -p applesauce-cli -- capabilities --json --require-native "$codec" \
+              > "$PROBE_RESULTS/rust-require-$codec.json" \
+              2> "$PROBE_RESULTS/rust-require-$codec.stderr.log"; then
+              printf 'ERROR: %s must not be advertised as a native writer.\n' "$codec" >&2
+              exit 1
+            else
+              status=$?
+              if [[ $status != 1 ]]; then
+                printf 'Unexpected failure status %s for %s capability guard.\n' "$status" "$codec" >&2
+                exit 1
+              fi
+            fi
+          done
+          python3 - "$PROBE_RESULTS" <<'PY'
+          import itertools
+          import json
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          public_buffers = {"zlib", "lzfse", "lzbitmap", "lzmesh", "lzraven"}
+          for filename, bitmap_enabled in (
+              ("rust-capabilities.json", False),
+              ("rust-capabilities-lzbitmap.json", True),
+              ("rust-require-lzraven.json", False),
+              ("rust-require-lzmesh.json", False),
+          ):
+              report = json.loads((root / filename).read_text())
+              assert report["schema_version"] == 1
+              assert report["host"]["os"] == "macos"
+              assert int(report["host"]["macos_version"].split(".")[0]) >= 27
+              assert report["host"]["macos_build"]
+              codecs = {codec["name"]: codec for codec in report["codecs"]}
+              assert set(codecs) == public_buffers | {"lzvn"}
+              for name in public_buffers:
+                  assert codecs[name]["apple_buffer"]["available"] is True
+                  assert codecs[name]["apple_buffer"]["verified_roundtrip"] is True
+              for name in ("lzmesh", "lzraven"):
+                  assert codecs[name]["native_decmpfs"]["writable"] is False
+                  assert codecs[name]["native_decmpfs"]["decmpfs_types"] == []
+              assert codecs["lzbitmap"]["native_decmpfs"]["writable"] is bitmap_enabled
+          benchmark = json.loads((root / "rust-buffer.json").read_text())
+          assert benchmark["schema_version"] == 1
+          rows = benchmark["results"]
+          assert rows and all(row["status"] == "ok" for row in rows)
+          assert all(row["verified_roundtrip"] is True and row["encoded_bytes"] > 0 for row in rows)
+          expected = set(itertools.product(
+              public_buffers,
+              {row["input"] for row in rows},
+              {"whole-buffer", "independent-64k"},
+          ))
+          actual = {(row["codec"], row["input"], row["layout"]) for row in rows}
+          assert actual == expected and len(rows) == len(expected)
+          print("PASS: Rust codec round-trips, benchmark layouts, JSON schema, and native fail-closed guards.")
+          PY
+          printf '## Rust integration contract\n\nBuffer tests and JSON contract checks passed, including whole-buffer/independent-64KiB layouts and rejection of native Raven/Mesh requests.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Private APFS trial (explicit manual opt-in only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe_filesystem }}
+        env:
+          PROBE_CANDIDATES: ${{ inputs.probe_candidates }}
+        run: |
+          set -euo pipefail
+          version="$(sw_vers -productVersion)"
+          IFS='.' read -r major minor patch <<< "$version"
+          minor=${minor:-0}
+          if (( 10#$major < 27 || (10#$major == 27 && 10#$minor < 2) )); then
+            printf 'APFS trial skipped on macOS %s: project policy requires 27.2+.\n' "$version" \
+              | tee "$PROBE_RESULTS/private-trial-skipped.txt" >> "$GITHUB_STEP_SUMMARY"
+            printf 'The 27.2 gate is a safety policy, not evidence of codec or kernel support.\n' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          xcrun clang -std=c11 -Wall -Wextra -Werror -framework CoreFoundation \
-            hack/apfs-type-probe.c -o "$RUNNER_TEMP/apfs-type-probe"
-
-          TEMP_IMAGE_DIR="$(mktemp -d "$RUNNER_TEMP/applesauce-probe.XXXXXX")"
-          IMAGE="$TEMP_IMAGE_DIR/apfs.sparseimage"
-          MOUNT="$TEMP_IMAGE_DIR/mount"
-          mkdir "$MOUNT"
-          /usr/bin/hdiutil create -size 128m -fs APFS -type SPARSE \
-            -volname ApplesauceProbe "$IMAGE"
-          /usr/bin/hdiutil attach -nobrowse -mountpoint "$MOUNT" "$IMAGE"
-          trap '/usr/bin/hdiutil detach "$MOUNT" -quiet || true' EXIT
-          touch "$MOUNT/.applesauce-disposable-image"
-
-          printf '## APFS filesystem type candidates\n\n' >> "$GITHUB_STEP_SUMMARY"
-          printf 'This test uses a fresh 128 MiB APFS disk image. Type 12 is the LZFSE control; types 15–22 are unverified candidates. Success means an APFS file passed transparent readback, and does not yet identify its algorithm.\n\n' >> "$GITHUB_STEP_SUMMARY"
-          "$RUNNER_TEMP/apfs-type-probe" "$MOUNT" | tee -a "$GITHUB_STEP_SUMMARY"
+          args=(--acknowledge-kernel-panic-risk)
+          if [[ "$PROBE_CANDIDATES" == 'true' ]]; then args+=(--candidates); fi
+          printf '## Explicit private APFS trial\n\nA disposable image does not isolate the host kernel. Results require detach, read-only reattach, and exact-byte verification. Matching IDs do not identify LZRAVEN/LZMESH.\n\n' >> "$GITHUB_STEP_SUMMARY"
+          TMPDIR="$PROBE_RESULTS" bash hack/run-local-apfs-probe.sh "${args[@]}" \
+            2>&1 | tee "$PROBE_RESULTS/private-trial.log"
+          printf 'Private-trial TSV and mount logs are included in the result artifact. Disk images are retained on the runner but not uploaded.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain reports even when a test fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: modern-compression-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/modern-compression-results/**/*.json
+            ${{ runner.temp }}/modern-compression-results/**/*.tsv
+            ${{ runner.temp }}/modern-compression-results/**/*.log
+            ${{ runner.temp }}/modern-compression-results/**/*.txt
+          if-no-files-found: warn
+          retention-days: 30

@@ -17,6 +17,8 @@ default = ["zlib", "lzfse", "lzvn"]
 zlib = ["applesauce-core/zlib"]
 lzfse = ["applesauce-core/lzfse"]
 lzvn = ["applesauce-core/lzvn"]
+# Opt-in transparent decmpfs types 13/14 on macOS 12+.
+lzbitmap = ["applesauce-core/lzbitmap"]
 
 # If specified, takes preceidence over lzfse feature
 system-lzfse = ["lzfse", "applesauce-core/system-lzfse"]

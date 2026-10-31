@@ -1,3 +1,4 @@
+pub mod apple_buffer;
 pub mod compressor;
 pub mod decmpfs;
 pub mod reader;

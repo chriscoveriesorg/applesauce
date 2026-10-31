@@ -1,8 +1,7 @@
-use crate::compressor::CompressorImpl;
+use crate::compressor::{lz_table, CompressorImpl};
 use crate::decmpfs::BlockInfo;
 use std::alloc;
 use std::io;
-use std::io::SeekFrom;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
@@ -82,7 +81,7 @@ impl<I: Impl> Drop for Lz<I> {
 
 impl<I: Impl> CompressorImpl for Lz<I> {
     fn header_size(block_count: u64) -> u64 {
-        (block_count + 1) * size_of::<u32>() as u64
+        lz_table::header_size(block_count)
     }
 
     fn compress(&mut self, dst: &mut [u8], src: &[u8], _level: u32) -> io::Result<usize> {
@@ -140,137 +139,13 @@ impl<I: Impl> CompressorImpl for Lz<I> {
     }
 
     fn read_block_info<R: io::Read + io::Seek>(
-        mut reader: R,
+        reader: R,
         orig_file_size: u64,
     ) -> io::Result<Vec<BlockInfo>> {
-        reader.rewind()?;
-        let block_count = crate::num_blocks(orig_file_size);
-
-        let blocks_start = u32::try_from(Self::header_size(block_count)).unwrap();
-        let mut result = Vec::with_capacity(
-            block_count
-                .try_into()
-                .map_err(|_| io::ErrorKind::InvalidInput)?,
-        );
-
-        let mut buf = [0; size_of::<u32>()];
-
-        reader.read_exact(&mut buf)?;
-        let mut last_offset = u32::from_le_bytes(buf);
-        if last_offset != blocks_start {
-            return Err(io::Error::other("unexpected first block offset"));
-        }
-
-        // LZ stores an offset before every block, and an extra for the end, we've
-        //  read one offset, so we can read block_count more
-        for _ in 0..block_count {
-            reader.read_exact(&mut buf)?;
-            let next_offset = u32::from_le_bytes(buf);
-            let compressed_size = next_offset
-                .checked_sub(last_offset)
-                .ok_or_else(|| io::Error::other("compressed block overlap"))?;
-            result.push(BlockInfo {
-                offset: last_offset,
-                compressed_size,
-            });
-            last_offset = next_offset;
-        }
-
-        // Check that the last offset is the end of the file
-        let end_pos = reader.seek(SeekFrom::End(0))?;
-        if end_pos != u64::from(last_offset) {
-            return Err(io::Error::other("last block does not end resource fork"));
-        }
-
-        Ok(result)
+        lz_table::read_block_info(reader, orig_file_size)
     }
 
-    fn finish<W: io::Write + io::Seek>(mut writer: W, block_sizes: &[u32]) -> io::Result<()> {
-        let block_count = u32::try_from(block_sizes.len()).unwrap();
-        let mut offset = u32::try_from(Self::header_size(block_count.into())).unwrap();
-
-        writer.rewind()?;
-
-        for &size in block_sizes {
-            writer.write_all(&u32::to_le_bytes(offset))?;
-
-            offset = offset
-                .checked_add(size)
-                .ok_or_else(|| io::Error::other("Unable to represent offset in 32 bits"))?;
-        }
-        // Write the final offset
-        writer.write_all(&u32::to_le_bytes(offset))?;
-
-        writer.flush()?;
-
-        // This is logically a non-modifying operation, even if it takes &mut self, and can fail
-        #[allow(clippy::debug_assert_with_mut_call)]
-        {
-            debug_assert_eq!(
-                writer.stream_position()?,
-                Self::header_size(block_count.into())
-            );
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::BLOCK_SIZE;
-    use std::io::{Cursor, Write};
-
-    struct FakeLzImpl;
-
-    // SAFETY: We don't uphold any guarantees because we just panic everywhere
-    unsafe impl Impl for FakeLzImpl {
-        fn scratch_size() -> usize {
-            unimplemented!()
-        }
-
-        unsafe fn encode(_: &mut [u8], _: &[u8], _: NonNull<u8>) -> usize {
-            unimplemented!()
-        }
-
-        unsafe fn decode(_: &mut [u8], _: &[u8], _: NonNull<u8>) -> usize {
-            unimplemented!()
-        }
-    }
-
-    #[test]
-    fn finish() {
-        let mut cursor = Cursor::new(Vec::<u8>::new());
-        let block_sizes = &[10, 20, 30, 40, 10];
-        let blocks_start = Lz::<FakeLzImpl>::header_size(block_sizes.len() as u64);
-        let data_end = 110 + blocks_start as u32;
-        cursor.set_position(data_end.into());
-        // Ensure file is extended to size
-        let _ = cursor.write(&[]).unwrap();
-
-        Lz::<FakeLzImpl>::finish(&mut cursor, block_sizes).unwrap();
-        let len = cursor.get_ref().len() as u64;
-        assert_eq!(
-            len,
-            110 + Lz::<FakeLzImpl>::header_size(block_sizes.len() as u64)
-                + Lz::<FakeLzImpl>::trailer_size()
-        );
-
-        cursor.set_position(0);
-        let block_info =
-            Lz::<FakeLzImpl>::read_block_info(&mut cursor, (block_sizes.len() * BLOCK_SIZE) as u64)
-                .unwrap();
-        let expected_block_info: Vec<BlockInfo> = block_sizes
-            .iter()
-            .scan(blocks_start as u32, |acc, &size| {
-                let offset = *acc;
-                *acc += size;
-                Some(BlockInfo {
-                    offset,
-                    compressed_size: size,
-                })
-            })
-            .collect();
-        assert_eq!(block_info, expected_block_info);
+    fn finish<W: io::Write + io::Seek>(writer: W, block_sizes: &[u32]) -> io::Result<()> {
+        lz_table::finish(writer, block_sizes)
     }
 }

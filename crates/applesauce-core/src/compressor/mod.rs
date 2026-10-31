@@ -1,8 +1,10 @@
-#[cfg(feature = "lzvn")]
-use self::lzvn::Lzvn;
+#[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+use self::lzbitmap::Lzbitmap;
 // Enable if feature lzfse or system-lzfse is enabled:
 #[cfg(any(feature = "lzfse", feature = "system-lzfse"))]
 use self::lzfse::Lzfse;
+#[cfg(feature = "lzvn")]
+use self::lzvn::Lzvn;
 #[cfg(feature = "zlib")]
 use self::zlib::Zlib;
 use crate::decmpfs::BlockInfo;
@@ -10,6 +12,14 @@ use std::{fmt, io};
 
 #[cfg(any(feature = "lzfse", feature = "lzvn"))]
 mod lz;
+#[cfg(any(
+    feature = "lzfse",
+    feature = "lzvn",
+    all(target_os = "macos", feature = "lzbitmap")
+))]
+mod lz_table;
+#[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+mod lzbitmap;
 #[cfg(feature = "lzfse")]
 mod lzfse;
 #[cfg(feature = "lzvn")]
@@ -59,6 +69,16 @@ impl Compressor {
         Self(Data::Lzvn(Lzvn::new()))
     }
 
+    /// Construct the opt-in native LZBitmap compressor when this host supports it.
+    ///
+    /// This checks macOS availability and a cached buffer-codec round trip. It
+    /// does not establish that an arbitrary target volume supports decmpfs.
+    #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+    #[must_use]
+    pub fn lzbitmap() -> Option<Self> {
+        Lzbitmap::new().map(|compressor| Self(Data::Lzbitmap(compressor)))
+    }
+
     #[must_use]
     pub fn kind(&self) -> Kind {
         match self.0 {
@@ -68,6 +88,8 @@ impl Compressor {
             Data::Lzfse(_) => Kind::Lzfse,
             #[cfg(feature = "lzvn")]
             Data::Lzvn(_) => Kind::Lzvn,
+            #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+            Data::Lzbitmap(_) => Kind::Lzbitmap,
         }
     }
 }
@@ -79,6 +101,8 @@ enum Data {
     Lzfse(Lzfse),
     #[cfg(feature = "lzvn")]
     Lzvn(Lzvn),
+    #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+    Lzbitmap(Lzbitmap),
 }
 
 impl Compressor {
@@ -95,6 +119,8 @@ impl Compressor {
             Data::Lzfse(ref mut i) => i.compress(dst, src, level),
             #[cfg(feature = "lzvn")]
             Data::Lzvn(ref mut i) => i.compress(dst, src, level),
+            #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+            Data::Lzbitmap(ref mut i) => i.compress(dst, src, level),
         }
     }
 
@@ -106,6 +132,8 @@ impl Compressor {
             Data::Lzfse(ref mut i) => i.decompress(dst, src),
             #[cfg(feature = "lzvn")]
             Data::Lzvn(ref mut i) => i.decompress(dst, src),
+            #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+            Data::Lzbitmap(ref mut i) => i.decompress(dst, src),
         }
     }
 
@@ -124,6 +152,8 @@ pub enum Kind {
     Zlib = 0,
     Lzvn,
     Lzfse,
+    /// Native decmpfs types 13/14; enabling it requires the `lzbitmap` feature.
+    Lzbitmap,
 }
 
 impl fmt::Display for Kind {
@@ -133,18 +163,24 @@ impl fmt::Display for Kind {
 }
 
 impl Kind {
+    /// Every recognized codec, including codecs unavailable in this build.
+    ///
+    /// The order agrees with the discriminants used by compressor worker caches.
+    pub const ALL: [Self; 4] = [Self::Zlib, Self::Lzvn, Self::Lzfse, Self::Lzbitmap];
+
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Kind::Zlib => "ZLIB",
             Kind::Lzvn => "LZVN",
             Kind::Lzfse => "LZFSE",
+            Kind::Lzbitmap => "LZBITMAP",
         }
     }
 
     #[must_use]
     #[inline]
-    pub const fn supported(self) -> bool {
+    pub fn supported(self) -> bool {
         // Clippy falsely sees these arms as identical:
         //   https://github.com/rust-lang/rust-clippy/issues/9775
         #[allow(clippy::match_same_arms)]
@@ -152,6 +188,16 @@ impl Kind {
             Kind::Zlib => cfg!(feature = "zlib"),
             Kind::Lzvn => cfg!(feature = "lzvn"),
             Kind::Lzfse => cfg!(feature = "lzfse"),
+            Kind::Lzbitmap => {
+                #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+                {
+                    Lzbitmap::supported()
+                }
+                #[cfg(not(all(target_os = "macos", feature = "lzbitmap")))]
+                {
+                    false
+                }
+            }
         }
     }
 
@@ -164,6 +210,8 @@ impl Kind {
             Kind::Lzfse => Data::Lzfse(Lzfse::new()),
             #[cfg(feature = "lzvn")]
             Kind::Lzvn => Data::Lzvn(Lzvn::new()),
+            #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+            Kind::Lzbitmap => Data::Lzbitmap(Lzbitmap::new()?),
             #[allow(unreachable_patterns)]
             _ => return None,
         };
@@ -179,6 +227,8 @@ impl Kind {
             Kind::Lzvn => Lzvn::header_size(block_count),
             #[cfg(feature = "lzfse")]
             Kind::Lzfse => Lzfse::header_size(block_count),
+            #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+            Kind::Lzbitmap => Lzbitmap::header_size(block_count),
             #[allow(unreachable_patterns)]
             _ => panic!("Unsupported compression kind {self}"),
         }
@@ -196,6 +246,8 @@ impl Kind {
             Kind::Lzvn => Lzvn::read_block_info(reader, orig_file_size),
             #[cfg(feature = "lzfse")]
             Kind::Lzfse => Lzfse::read_block_info(reader, orig_file_size),
+            #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+            Kind::Lzbitmap => Lzbitmap::read_block_info(reader, orig_file_size),
             #[allow(unreachable_patterns)]
             _ => panic!("Unsupported compression kind {self}"),
         }
@@ -209,6 +261,8 @@ impl Kind {
             Kind::Lzvn => Lzvn::finish(writer, block_sizes),
             #[cfg(feature = "lzfse")]
             Kind::Lzfse => Lzfse::finish(writer, block_sizes),
+            #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+            Kind::Lzbitmap => Lzbitmap::finish(writer, block_sizes),
             #[allow(unreachable_patterns)]
             _ => panic!("Unsupported compression kind {self}"),
         }
@@ -233,6 +287,20 @@ mod tests {
     use super::*;
 
     const PLAINTEXT: &[u8] = include_bytes!("mod.rs");
+
+    #[test]
+    fn recognized_kinds_have_dense_cache_indices() {
+        for (index, kind) in Kind::ALL.into_iter().enumerate() {
+            assert_eq!(kind as usize, index);
+        }
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "lzbitmap")))]
+    #[test]
+    fn lzbitmap_is_unavailable_without_native_opt_in() {
+        assert!(!Kind::Lzbitmap.supported());
+        assert!(Kind::Lzbitmap.compressor().is_none());
+    }
 
     pub(super) fn compressor_round_trip<C: CompressorImpl>(c: &mut C) {
         let mut buf = vec![0u8; PLAINTEXT.len() * 2];

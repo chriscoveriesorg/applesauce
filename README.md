@@ -1,19 +1,19 @@
 # Applesauce
 
-**Fork focus: experimental LZRAVEN support on macOS 27+.** This fork is
-investigating how to use Apple's LZRAVEN codec for compression, ideally with
-native transparent APFS reads. It currently provides guarded codec/filesystem
-probes and a [LZRAVEN roadmap](hack/roadmap-lzraven.md); **LZRAVEN is not yet a
-supported transparent-compression mode**. The Homebrew and prebuilt-release
-commands below install upstream Applesauce, not this fork's experiments.
+**Fork focus: modern Apple compression, especially LZRAVEN and LZMESH.**
+This fork adds Rust buffer codecs, read-only capability/benchmark commands,
+an opt-in native LZBitmap writer, and guarded filesystem research. **LZRAVEN
+and LZMESH are not yet native transparent-compression modes.** Follow the
+[implementation roadmap](hack/roadmap-lzraven.md) and
+[capability contract](hack/modern-compression.md).
 
 Applesauce is a command-line interface (CLI) program written in Rust that
 compresses, decompresses, and prints information about compressed files for
 HFS+/APFS transparent compression on macOS. It is based on
 [afsctool](https://github.com/RJVB/afsctool) and offers several key
 improvements, including better performance, improved multithreading (even for a
-single file), and reduced memory usage. Applesauce supports all three compression
-algorithms used by HFS+/APFS: LZFSE, LZVN, and ZLIB.
+single file), and reduced memory usage. Its default native writers are LZFSE,
+LZVN, and ZLIB; this fork also offers experimental LZBitmap behind a build flag.
 
 ![compression example](https://github.com/user-attachments/assets/3f78a011-7db4-4e7f-9cc9-89781ed78609)
 
@@ -23,10 +23,39 @@ Companion projects in the same tooling family. They are separate tools; links do
 not install or run anything automatically:
 
 - **[Foldy](https://github.com/chriscoveries/foldy)** *(private; access required)*: local-first filesystem indexing, duplicate review and disk-space reporting.
-- **[compress-agent-sessions](https://github.com/chriscoveriesorg/compress-agent-sessions)** : macOS agent-session JSONL review and optional transparent compression using Applesauce.
-- **[ZGX](https://github.com/chriscoveriesorg/zgx)** *(private; access required)*: agent-oriented local metasearch across literal, indexed and optional semantic sources.
+- **[compress-agent-sessions](https://github.com/chriscoveriesorg/compress-agent-sessions)**: cold-session selection and optional transparent compression. Its [modern-codec integration](https://github.com/chriscoveriesorg/compress-agent-sessions/blob/main/docs/experimental-lzraven.md) uses Applesauce's fail-closed native capability gate.
+- **[ZGX](https://github.com/chriscoveriesorg/zgx)** *(private; access required)*: agent-oriented local metasearch. [Integration tracking](https://github.com/chriscoveriesorg/zgx/issues/504) checks unchanged logical bytes, search hits and byte spans after compression.
 
 ## Installation
+
+### Build this fork and run read-only diagnostics
+
+On macOS with Rust and Xcode Command Line Tools:
+
+```sh
+git clone https://github.com/chriscoveriesorg/applesauce.git
+cd applesauce
+cargo build --locked --release -p applesauce-cli
+./target/release/applesauce capabilities --json
+./target/release/applesauce benchmark-codecs --json
+```
+
+LZRAVEN and LZMESH buffer APIs require macOS **27.0+**, including 27.0.1.
+They do not require 27.2. The benchmark uses generated JSONL and high-entropy
+data unless you explicitly supply `--file /path/to/STABLE-COPY.jsonl` (64 MiB
+maximum). It never compresses that file on disk, changes xattrs, or uploads it.
+Results compare whole buffers with independent 64 KiB buffers; these are raw
+payload measurements, not APFS allocation savings.
+
+For the optional native LZBitmap writer, build with
+`cargo build --locked --release -p applesauce-cli --features lzbitmap`.
+Then check `./target/release/applesauce capabilities --json --require-native lzbitmap`
+before trying `compress -c lzbitmap --verify` on a **disposable copy**. This
+backend requires macOS 12+ with a working codec and a compatible volume;
+it is not enabled by default. Verification is forced before atomic replacement.
+
+The Homebrew and prebuilt-release commands below install **upstream Applesauce**,
+not this fork's new commands or optional backend.
 
 ### Install via Homebrew
 
@@ -62,6 +91,8 @@ To use Applesauce, run the following command:
 
 ```console
 applesauce [compress|decompress|info] file/directory
+applesauce capabilities [--json] [--require-native CODEC]
+applesauce benchmark-codecs [--codec lzfse,lzmesh,lzraven] [--file COPY.jsonl] [--json]
 ```
 
 The options are as follows:
@@ -79,17 +110,21 @@ applesauce compress -c ZLIB example.txt
 
 ## Experimental macOS 27 codec investigation
 
-This fork includes a [manual GitHub Actions probe](.github/workflows/modern-compression-probe.yml)
-for LZMESH and LZRAVEN. From the **Actions** tab, select **Probe macOS 27
-compression codecs**, then **Run workflow**. The result summary compares the
-new Compression.framework buffer codecs. An optional, isolated APFS filesystem
-trial requires macOS 27.2 or newer; GitHub's currently hosted `xcode-27` image
-is older. See [methods and safety notes](hack/modern-compression.md) and the
-[LZRAVEN implementation roadmap](hack/roadmap-lzraven.md).
+The [codec workflow](.github/workflows/modern-compression-probe.yml) runs
+generated-data buffer tests and CLI contract checks on relevant pull requests
+and pushes. It also has an **Actions → Probe macOS 27 compression codecs →
+Run workflow** button. Reports retain exact OS/build/SDK versions and JSON
+measurements. Standard CI separately checks the opt-in LZBitmap native writer
+on generated temporary files.
 
-LZMESH and LZRAVEN are **experimental investigations**, not selectable
-Applesauce transparent-compression modes. The experiment does not alter personal
-files or write guessed `decmpfs` type IDs to existing volumes.
+Private APFS trials are manual-only, default off, and require macOS 27.2+
+as a project safety policy. They use disposable disk images and verify after
+detach/read-only reattach. Additional type requests require a second opt-in.
+An image does not isolate the host kernel from crashes. See
+[methods and safety notes](hack/modern-compression.md).
+
+`compress -c lzraven` and `compress -c lzmesh` intentionally remain unavailable:
+buffer support does not establish a native `decmpfs` decoder or on-disk format.
 
 ## Features
 

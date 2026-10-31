@@ -40,6 +40,12 @@ pub struct Writer<O: Open> {
 
 impl<O: Open> Writer<O> {
     pub fn new(kind: compressor::Kind, uncompressed_size: u64, open: O) -> io::Result<Self> {
+        if !kind.supported() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("{kind} is unavailable in this build or on this host"),
+            ));
+        }
         let block_count = crate::num_blocks(uncompressed_size);
         let state = if block_count > 1 {
             let mut resource_fork = open.open_resource_fork()?;

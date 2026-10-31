@@ -17,6 +17,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
+mod codecs;
 mod progress;
 
 #[derive(Debug, clap::Parser)]
@@ -60,6 +61,12 @@ enum Commands {
 
     /// Get info about compression for file(s)
     Info(Info),
+
+    /// Report buffer codecs and native filesystem writers separately (read-only)
+    Capabilities(codecs::Capabilities),
+
+    /// Compare Apple buffer codecs on generated data or one file (read-only)
+    BenchmarkCodecs(codecs::Benchmark),
 }
 
 #[derive(Debug, clap::Args)]
@@ -132,6 +139,8 @@ struct Info {
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum, PartialEq, Eq)]
 enum Compression {
+    #[cfg(all(feature = "lzbitmap", target_os = "macos"))]
+    Lzbitmap,
     #[cfg(feature = "lzfse")]
     Lzfse,
     #[cfg(feature = "zlib")]
@@ -143,6 +152,8 @@ enum Compression {
 impl From<Compression> for Kind {
     fn from(c: Compression) -> Self {
         match c {
+            #[cfg(all(feature = "lzbitmap", target_os = "macos"))]
+            Compression::Lzbitmap => Kind::Lzbitmap,
             #[cfg(feature = "zlib")]
             Compression::Zlib => Kind::Zlib,
             #[cfg(feature = "lzfse")]
@@ -188,6 +199,28 @@ fn chrome_tracing_file(path: Option<&Path>) -> Option<impl io::Write> {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Diagnostics never start the file-mutating pipeline or create trace files.
+    let diagnostic = match &cli.command {
+        Commands::Capabilities(_) | Commands::BenchmarkCodecs(_)
+            if cli.chrome_tracing.is_some() =>
+        {
+            Some(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--chrome-tracing is not supported for read-only codec diagnostics",
+            )))
+        }
+        Commands::Capabilities(args) => Some(codecs::capabilities(args)),
+        Commands::BenchmarkCodecs(args) => Some(codecs::benchmark(args)),
+        _ => None,
+    };
+    if let Some(result) = diagnostic {
+        if let Err(error) = result {
+            eprintln!("applesauce: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let verbosity = cli.verbosity();
 
     let mut _chrome_guard = None;
@@ -222,6 +255,9 @@ fn main() {
         .init();
 
     match cli.command {
+        Commands::Capabilities(_) | Commands::BenchmarkCodecs(_) => {
+            unreachable!("handled before tracing")
+        }
         Commands::Compress(Compress {
             paths,
             compression,
@@ -230,6 +266,12 @@ fn main() {
             verify,
         }) => {
             let kind: Kind = compression.into();
+            if !kind.supported() {
+                eprintln!("applesauce: {kind} is unavailable in this build or on this host");
+                std::process::exit(1);
+            }
+            // Experimental native encoders must verify before atomic replacement.
+            let verify = verify || kind == Kind::Lzbitmap;
 
             if kind != Kind::Zlib && level != 5 {
                 tracing::warn!("Compression level is ignored for non-zlib compression");

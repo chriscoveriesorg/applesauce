@@ -1,170 +1,139 @@
-# Roadmap: LZRAVEN for cold macOS chat logs
+# Roadmap: modern compression in our Applesauce fork
 
-Status: design and discovery. **Native transparent APFS LZRAVEN is not proven.**
-Target: macOS 27.2 or newer. Work is opt-in and must not touch personal
-session files until readback, allocation, and recovery tests pass.
+Main engineering repository: [chriscoveriesorg/applesauce](https://github.com/chriscoveriesorg/applesauce).
+The goal is safe, measurable compression of cold agent logs while preserving
+ordinary app/search reads. **Native transparent LZRAVEN/LZMESH remains an
+unproven capability, not a released mode.**
 
-## What counts as transparent?
+## Current implementation
 
-1. **Native APFS / decmpfs:** any app opens the same file path; the kernel
-   decodes it, and no extra service or mount is required. This requires a
-   registered filesystem decompressor *and* an identified on-disk format.
-2. **FSKit-mounted archive:** an app opens the logical path **inside a mounted
-   RavenFS volume** and sees the original bytes; the backing file is stored
-   using LZRAVEN. Apps must access the mount path. This is not native decmpfs.
-3. **Apple Archive:** LZRAVEN compression exists now, but extracting or using
-   an application-aware reader is required. It is not transparent to ordinary
-   `open()` calls on a JSONL file.
+- Rust Apple buffer codecs: LZFSE/ZLIB controls, LZBitmap, LZMESH and LZRAVEN.
+- Runtime OS gates, positive round-trip availability tests, bounded allocations,
+  and exact-size decode checks with overflow detection.
+- `applesauce capabilities --json [--require-native CODEC]`: the shared,
+  fail-closed contract for companion tools.
+- `applesauce benchmark-codecs`: generated or explicitly selected local data,
+  whole-buffer and independent-64-KiB comparisons, byte verification and JSON.
+- Default-off native LZBitmap writer: known decmpfs 13/14 framing, raw-block
+  fallback, runtime self-test, forced verification and atomic replacement.
+- Portable format tests, native generated-file tests, automatic macOS buffer
+  CI, and manually opted-in private filesystem probes with remount verification.
 
-Apple only documents `COMPRESSION_LZRAVEN` and `COMPRESSION_LZMESH` for the
-Compression framework's **buffer** encode/decode APIs. Neither algorithm
-selector is a `com.apple.decmpfs` type number. Therefore adding a codec name
-to the Applesauce CLI cannot by itself deliver native transparent reads.
+The default transparent writers remain LZFSE, LZVN and ZLIB. Modern buffer
+support never upgrades a codec to a native file writer automatically.
+See [the exact implementation/JSON contract](modern-compression.md).
 
-## Which tools contribute what?
+## Stage 1: qualify this implementation
 
-| Project | Use | Do not assume |
+1. Pass the normal CI feature matrix, including generated-file LZBitmap tests:
+   actual stored type, full and random logical reads, metadata preservation,
+   and manual restore. Test supported OS/build/architecture combinations.
+2. Pass Rust and Swift reference buffer round trips on macOS 27+; retain exact
+   OS/build/SDK and machine-readable measurements. 27.0.1 is sufficient for
+   the documented buffer APIs; 27.2 is not a buffer prerequisite.
+3. Run the explicit disposable-image trial on a backed-up 27.2+ test Mac.
+   Prove controls survive detach/read-only reattach. The 27.2 gate is project
+   risk policy, not proof of any filesystem decoder.
+4. Benchmark stable local copies of representative agent JSONL. Keep log
+   contents local. Report encoded payload bytes separately from actual disk
+   allocation. Compare whole-file savings against 64-KiB dictionary resets;
+   Raven's larger dictionary may not benefit small independent blocks.
+5. Keep LZBitmap opt-in until remount, backup/restore, interrupted operation,
+   and app resume/rewrite behavior have been qualified. Never test on the only
+   copy of session history.
+
+## Stage 2: resolve the native Raven/Mesh question
+
+A native filesystem codec needs a registered kernel decompressor **and** a
+verified on-disk framing/type mapping. Public Compression API selectors
+0xD05/0xE05 are not decmpfs IDs.
+
+The private AppleFSCompression queue can accept a numeric request and silently
+write a different codec. Our probe records actual type and flags, then verifies
+exact logical bytes after remount. Even matching type plus readable bytes is
+insufficient until the compressed payload is independently identified.
+
+New research to use, with attribution and independent verification:
+
+| Project | Useful evidence / role | Limit |
 | --- | --- | --- |
-| [Applesauce](https://github.com/Dr-Emann/applesauce) | Native decmpfs CLI, filesystem framing, Rust integration and tests | A new kernel decoder can be added by changing Rust alone |
-| [fscmp](https://github.com/Siguza/fscmp) | Research API for `AppleFSCompression.framework`; known LZBitmap types 13/14 | Private ABI stability or LZRAVEN support |
-| [SocketDev/decmpfs](https://github.com/SocketDev/decmpfs) | Reference for guarded atomic writes, explicit outcomes, clone-preserving copy, and readback/rollback | Cross-platform abstractions solve macOS codec registration |
-| [DiskPress](https://diskpress.app/faq/) | UX: scheduling, size accounting, compression plus APFS clones | DiskPress's existing LZFSE writes are LZRAVEN |
-| [compress-agent-sessions](https://github.com/ariccio/compress-agent-sessions) | Cold session discovery, age-based eligibility and launchd scheduling | It adds a new decmpfs decoder |
-| [Apple FSKit passthrough sample](https://developer.apple.com/documentation/fskit/building-a-passthrough-file-system) | Fallback mounted filesystem implementation | It transparently intercepts arbitrary paths outside its mount |
+| [Siguza/fscmp](https://github.com/Siguza/fscmp) | Reconstructed private queue API, named LZBitmap 13/14 | Private ABI is not stable or a Raven support guarantee |
+| [deploymenttheory/go-apfs-v2](https://github.com/deploymenttheory/go-apfs-v2/blob/main/docs/compression-writer.md) | Native type/framing fixtures, queue fallback and lifecycle qualification | Its results do not replace tests of our writer |
+| [gregordinary/apfs-probes](https://github.com/gregordinary/apfs-probes) | Raven/Mesh/LZ4 buffer-to-type/layout sweep, positive/negative controls and remount method | Methodology is not proof of a successful mapping |
+| [SocketDev/decmpfs](https://github.com/SocketDev/decmpfs) | Alternative Rust implementation and safety/recovery approaches | API abstraction cannot register a missing kernel decoder |
+| [Apple XNU](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/decmpfs.c) | Decoder registration/lookup and error behavior | Private codec implementations are not all in open-source XNU |
 
-## Milestone 0: decide native APFS support (1-2 days)
+In particular, go-apfs-v2 identifies **15/16 as Apple-framed LZ4 on macOS 27**,
+not Raven/Mesh. Never assign those numbers based on their position after 13/14.
+This is a possible later native backend, separate from the Raven objective.
 
-**On macOS 27+ (including the GitHub Actions xcode-27 runner):**
+**Native GO:** demonstrate actual new stored type(s), independently identified
+Raven/Mesh payload/framing, exact kernel reads after full remount, negative
+controls that reject wrong codecs/corrupt data, random reads and recovery on
+recorded builds. Only then add `Kind`, decmpfs mapping, opt-in writer and native
+capability permission. Validate cloning/copying/backups and an older host's
+failure behavior before recommending real logs.
+
+**Native blocked:** if no compatible kernel type/framing is established, keep
+`native_decmpfs.writable=false`. A finite sweep is not proof that every possible
+format is unsupported, but it is sufficient reason not to expose a writer.
+Do not load custom kernel code or alter production xattrs to guess.
+
+## Stage 3: make the companion tools work together
+
+### compress-agent-sessions
+
+[Our frontend fork](https://github.com/chriscoveriesorg/compress-agent-sessions)
+owns age/grace-period eligibility, open-handle exclusions, protected-path checks,
+dry runs, scheduling and restore. It calls:
 
 ```sh
-swift hack/modern-compression-probe.swift
-swift hack/modern-compression-probe.swift --file /path/to/LOCAL-COPY.jsonl
+applesauce capabilities --json --require-native lzraven
 ```
 
-The probe compares LZFSE, LZMESH and LZRAVEN with byte-for-byte decode checks.
-Real logs must stay local; CI only uses generated inputs. Its timing is a
-single-run sanity check, not a release-quality benchmark.
+for an explicit Raven request, and likewise for Mesh/Bitmap. Nonzero exit
+refuses before scanning/mutation and never falls back to another codec/tool.
+The existing LZFSE default and restore paths stay compatible with old upstream
+Applesauce. Its estimator uses a different backend and must not treat a raw
+buffer ratio as proof of native support.
 
-**On macOS 27.2+ only:**
+[Integration details](https://github.com/chriscoveriesorg/compress-agent-sessions/blob/main/docs/experimental-lzraven.md).
 
-```sh
-bash hack/run-local-apfs-probe.sh
-```
+### ZGX and Foldy
 
-The script creates and mounts a **fresh disposable APFS disk image**, runs the
-private API probe, checks the known filesystem type 12 (LZFSE), also tries 14
-(LZBitmap), and checks unverified candidate IDs 15-22. It verifies stored
-`com.apple.decmpfs` type, the `UF_COMPRESSED` flag and exact readback. The image
-is detached but retained for inspection. The script never targets user files.
-Because the filesystem decoder lives in the host kernel, an isolated image
-cannot eliminate the risk of a kernel crash. Use a backed-up test Mac.
+[ZGX](https://github.com/chriscoveriesorg/zgx) and its
+[private acceptance issue #504](https://github.com/chriscoveriesorg/zgx/issues/504)
+cover the search side. Native transparent APFS needs no search codec decoder:
+content, path, hit ordering, byte spans and snippets should remain stable.
+Physical metadata, timings and cache receipts may change. Do not require
+byte-identical entire receipts or blanket re-embedding for storage-only changes.
 
-GitHub's hosted `xcode-27` image currently runs **macOS 27.0.1**. Our manual
-workflow thus defaults the native trial *off* and refuses to run it on hosts
-older than 27.2. It can still perform buffer round-trips on the hosted runner.
+[Foldy](https://github.com/chriscoveries/foldy) remains a separate private
+indexing/space-reporting companion. Cross-links do not install, run, or alter
+any companion automatically; no private implementation is copied into this fork.
 
-**Native GO condition:** an OS-accepted new filesystem ID, verified transparent
-readback, and positive identification of the compressed payload as LZRAVEN
-(or LZMESH) using independent decode, including verification after volume
-remount. A passing unknown type alone is insufficient.
+## Stage 4: mounted fallback, only if needed
 
-**Native NO-GO condition:** no registered compatible filesystem type, or no
-identified compatible framing after this bounded discovery pass. Do not set
-arbitrary `com.apple.decmpfs` type bytes on real files or try to load custom
-kernel code. Proceed to FSKit instead.
+If native mapping remains blocked, build a **separate FSKit mounted filesystem**
+using [Apple's passthrough sample](https://developer.apple.com/documentation/fskit/building-a-passthrough-file-system)
+and the new buffer core. This would expose unchanged logical JSONL bytes under
+an explicit mounted root backed by versioned compressed chunks. It is not a
+transparent change to arbitrary existing APFS paths.
 
-## Milestone 1: shared codec and trustworthy benchmarks (2-4 days)
+Start read-only. Prove signing/entitlements and mount lifecycle before storage
+engineering. Then qualify chunk sizes (256 KiB, 1 MiB, 4 MiB, 8 MiB), checksums,
+indexes, random reads, decoded-cache limits, metadata and crash recovery. Keep
+originals until verified publication. Point ZGX at the logical mounted root,
+never at backing chunks. Active sessions remain ordinary files.
 
-- Wrap Apple's Compression.framework **buffer API** in a small macOS-only
-  Rust codec module. Runtime-gate LZRAVEN/LZMESH to macOS 27+. Do not re-create
-  Apple's codec or conflate a buffer algorithm selector with a decmpfs ID.
-- Round-trip randomized, highly repetitive, real JSONL, empty, tiny, and
-  incompressible data. Exercise corruption detection and failure outcomes.
-- Compare LZFSE, LZMESH and LZRAVEN: compressed bytes, actual allocated disk
-  bytes where applicable, encode/decode throughput, and partial-read latency.
-- Test indexed chunk sizes of 256 KiB, 1 MiB, 4 MiB and 8 MiB for the FSKit
-  branch. LZRAVEN's documented 8 MB dictionary makes blindly adopting the
-  64 KiB chunk size of older decmpfs resource forks questionable. Measure it.
-- Select policies based on evidence: LZMESH for read-heavy files if its speed
-  wins; LZRAVEN for cold logs only when extra savings justify CPU cost.
+Apple Archive's public Raven option is another possible export path, but
+requires extraction or an archive-aware reader. Neither fallback is currently
+implemented or silently enabled by this fork.
 
-## Milestone 2A: native path, **only if GO** (estimated 1-2 weeks)
+## Release gate
 
-1. Introduce verified filesystem kind IDs and documented resource-fork framing
-   in `crates/applesauce-core/src/decmpfs.rs` and its compressor modules.
-2. Add an opt-in `--experimental-lzraven` (and optionally `--experimental-lzmesh`)
-   CLI selection. If a macOS build lacks the decoder, fail before changing a file.
-3. Use a same-volume temporary file and atomic replacement; verify full
-   byte-for-byte kernel reads and logical metadata before replacement. Preserve
-   rollback material on any failure. Borrow safety patterns from SocketDev's
-   MIT-licensed project with attribution where copied.
-4. Validate across remount, reboot, clone/copy/restore, Xcode process restarts,
-   app reads, backup tools, and cases where a file is opened for writing.
-5. Enable only on positively tested OS builds. Keep LZFSE the stable fallback.
-
-This is the **only** branch that gives existing APFS file paths genuine kernel
-transparent LZRAVEN without a mounted filesystem service.
-
-## Milestone 2B: RavenFS, **if native NO-GO**
-
-Prototype estimate: ~1 week; hardened release estimate: ~3-6 weeks.
-
-Build a separate FSKit-based volume, while reusing the codec/benchmark core:
-
-1. Adapt Apple's official FSKit passthrough sample. Prove a mounted volume can
-   list files, perform random reads and return exact bytes from a read-only
-   LZRAVEN chunk store. Verify entitlement, signing and mount behavior first.
-2. Define a versioned backing format: path metadata, original size, chunk
-   offsets/lengths, integrity checksums, and per-chunk codec selection. Store
-   chunks at the sizes justified by benchmark results; cache decoded chunks.
-3. Keep active sessions as ordinary files. Archive only closed sessions, with
-   atomic publication and a recoverable original until validation is complete.
-4. Handle directory trees, `stat`, seek, reads, xattrs, symlinks, permissions,
-   concurrent readers, Spotlight behavior and crash recovery. Add write support
-   only after the read-only implementation is reliable.
-5. Make the mount/path transition explicit. Existing session applications
-   will not see RavenFS unless they read the mounted location (or a carefully
-   configured path alias). Never silently redirect live session storage.
-
-Apple Archive's public LZRAVEN option is a usable *nontransparent* interim
-export format if FSKit packaging takes longer than expected.
-
-## Milestone 3: cold-chatlog product and release gate (3-7 days after backend)
-
-- Reuse `compress-agent-sessions` policy: preview and select only dormant
-  Claude/Codex/Gemini JSONL sessions, with an adjustable age threshold.
-- Exclude actively written files, symlinks and protected paths; confirm the
-  file did not change between scan, compression and publication.
-- Provide `scan --dry-run`, `compress --cold-only`, `verify`, `restore`, and
-  `status` commands; show logical size vs **allocated** bytes, and estimates
-  separately from verified savings.
-- Preserve original bytes, permissions, timestamps and required extended
-  attributes. Do not touch the user's session history without an explicit
-  selected path, dry run, and successful recovery tests.
-- Demonstrate lossless reads with `cat`, `tail`, an editor, and actual agent
-  session viewers. Exercise resume/rewrite after compression.
-
-Release criteria: every tested file has identical original/readback hashes;
-crash interruption leaves an accessible original or valid compressed copy;
-random reads and restarts work; observed disk allocation improves on real
-sessions; no unexplained decoder or metadata failures. On failure, report the
-reason and fall back to native LZFSE, not an unsafe new decmpfs ID.
-
-## Current repository state
-
-The probe, manual GitHub Actions workflow, roadmap and local 27.2 test launcher
-are published in [our fork's experiment branch](https://github.com/chriscoveriesorg/applesauce/tree/experiment/macos27-lzraven-mesh),
-under [PR #1](https://github.com/chriscoveriesorg/applesauce/pull/1).
-Swift codec and APFS private-framework tests still require a macOS runner.
-The companion cold-chatlog frontend lives in
-[our compress-agent-sessions fork](https://github.com/chriscoveriesorg/compress-agent-sessions).
-
-## Sources
-
-- <https://developer.apple.com/documentation/compression/compression_lzraven>
-- <https://developer.apple.com/documentation/compression/compression_lzmesh>
-- <https://developer.apple.com/documentation/compression/compression_algorithm>
-- <https://developer.apple.com/documentation/applearchive/archivecompression>
-- <https://developer.apple.com/documentation/fskit/building-a-passthrough-file-system>
-- <https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/decmpfs.c>
-- <https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md>
+Default-enable nothing on the strength of an algorithm name or buffer ratio.
+Require verified bytes, native allocation benefit on representative cold logs,
+restart/remount/restore behavior, preserved metadata, and recoverable failure
+paths. Until Raven/Mesh satisfy the native gate, explicit requests fail with a
+clear reason; users may separately choose the existing LZFSE path.

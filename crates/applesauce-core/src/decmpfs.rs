@@ -67,6 +67,8 @@ impl CompressionType {
             (compressor::Kind::Lzvn, Storage::ResourceFork) => 8,
             (compressor::Kind::Lzfse, Storage::Xattr) => 11,
             (compressor::Kind::Lzfse, Storage::ResourceFork) => 12,
+            (compressor::Kind::Lzbitmap, Storage::Xattr) => 13,
+            (compressor::Kind::Lzbitmap, Storage::ResourceFork) => 14,
         };
         Self(val)
     }
@@ -81,6 +83,8 @@ impl CompressionType {
             8 => Some((compressor::Kind::Lzvn, Storage::ResourceFork)),
             11 => Some((compressor::Kind::Lzfse, Storage::Xattr)),
             12 => Some((compressor::Kind::Lzfse, Storage::ResourceFork)),
+            13 => Some((compressor::Kind::Lzbitmap, Storage::Xattr)),
+            14 => Some((compressor::Kind::Lzbitmap, Storage::ResourceFork)),
             _ => None,
         }
     }
@@ -233,5 +237,52 @@ impl BlockInfo {
         assert!(writer.is_empty());
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lzbitmap_types_are_identifiable_without_enabling_the_codec() {
+        for (raw, storage) in [(13, Storage::Xattr), (14, Storage::ResourceFork)] {
+            let kind = compressor::Kind::Lzbitmap;
+            let compression_type = CompressionType::new(kind, storage);
+            assert_eq!(compression_type.raw_type(), raw);
+            assert_eq!(
+                CompressionType::from_raw_type(raw).compression_storage(),
+                Some((kind, storage))
+            );
+        }
+    }
+
+    #[test]
+    fn lzbitmap_headers_round_trip_with_native_type_numbers() {
+        for (raw, storage) in [(13u32, Storage::Xattr), (14, Storage::ResourceFork)] {
+            let value = Value {
+                compression_type: CompressionType::new(compressor::Kind::Lzbitmap, storage),
+                uncompressed_size: 65537,
+                extra_data: &[],
+            };
+            let mut bytes = Vec::new();
+            value.write_to(&mut bytes).unwrap();
+            assert_eq!(&bytes[..4], b"fpmc");
+            assert_eq!(&bytes[4..8], &raw.to_le_bytes());
+            assert_eq!(&bytes[8..16], &65537u64.to_le_bytes());
+            let decoded = Value::from_data(&bytes).unwrap();
+            assert_eq!(decoded.compression_type, value.compression_type);
+            assert_eq!(decoded.uncompressed_size, value.uncompressed_size);
+        }
+    }
+
+    #[test]
+    fn public_buffer_codec_identifiers_are_not_decmpfs_types() {
+        for raw in [0x702, 0xd05, 0xe05] {
+            assert_eq!(
+                CompressionType::from_raw_type(raw).compression_storage(),
+                None
+            );
+        }
     }
 }
