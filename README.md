@@ -61,6 +61,20 @@ For example, to compress a file named `example.txt` using the ZLIB compression a
 applesauce compress -c ZLIB example.txt
 ```
 
+## Experimental macOS 27 codec investigation
+
+This fork includes a [manual GitHub Actions probe](.github/workflows/modern-compression-probe.yml)
+for LZMESH and LZRAVEN. From the **Actions** tab, select **Probe macOS 27
+compression codecs**, then **Run workflow**. The result summary compares the
+new Compression.framework buffer codecs. An optional, isolated APFS filesystem
+trial requires macOS 27.2 or newer; GitHub's currently hosted `xcode-27` image
+is older. See [methods and safety notes](hack/modern-compression.md) and the
+[LZRAVEN implementation roadmap](hack/roadmap-lzraven.md).
+
+LZMESH and LZRAVEN are **experimental investigations**, not selectable
+Applesauce transparent-compression modes. The experiment does not alter personal
+files or write guessed `decmpfs` type IDs to existing volumes.
+
 ## Features
 
 Applesauce has the following key features:

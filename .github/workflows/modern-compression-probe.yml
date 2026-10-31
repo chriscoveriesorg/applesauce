@@ -1,0 +1,73 @@
+name: Probe macOS 27 compression codecs
+
+# Manual button: use a disposable APFS image for the private filesystem test.
+on:
+  workflow_dispatch:
+    inputs:
+      probe_filesystem:
+        description: 'Try private decmpfs types on a disposable APFS image (macOS 27.2+ only)'
+        type: boolean
+        default: false
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Identify OS and SDK
+        run: |
+          sw_vers
+          xcodebuild -version
+          uname -m
+          printf '## Runner environment\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf '| Item | Value |\n| --- | --- |\n' >> "$GITHUB_STEP_SUMMARY"
+          printf '| macOS | `%s` |\n' "$(sw_vers -productVersion)" >> "$GITHUB_STEP_SUMMARY"
+          printf '| Xcode | `%s` |\n' "$(xcodebuild -version | /usr/bin/head -n 1)" >> "$GITHUB_STEP_SUMMARY"
+          printf '| Architecture | `%s` |\n\n' "$(uname -m)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report installed filesystem compressor components (read-only)
+        run: |
+          /usr/bin/kmutil showloaded | /usr/bin/grep -E 'AppleFSCompression|decmpfs' || true
+          /usr/sbin/ioreg -l -w 0 -p IOService | /usr/bin/grep -E 'AppleFSCompression|providesType' | /usr/bin/head -n 40 || true
+      - name: Compile and exercise Compression.framework codecs
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O hack/modern-compression-probe.swift -o "$RUNNER_TEMP/modern-compression-probe"
+          printf '## Compression.framework buffer codecs\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf '```text\n' >> "$GITHUB_STEP_SUMMARY"
+          "$RUNNER_TEMP/modern-compression-probe" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Test private AppleFSCompression on disposable APFS image (27.2+ only)
+        if: ${{ inputs.probe_filesystem }}
+        run: |
+          set -euo pipefail
+          # The hosted xcode-27 image currently runs macOS 27.0.1. Keep
+          # undocumented filesystem-format tests off older patch releases.
+          VERSION="$(sw_vers -productVersion)"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          if (( MAJOR < 27 || (MAJOR == 27 && MINOR < 2) )); then
+            printf '## APFS filesystem trial skipped\n\n' >> "$GITHUB_STEP_SUMMARY"
+            printf 'Host macOS `%s` is older than 27.2. The buffer codec test above remains valid.\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+            printf 'Run `hack/run-local-apfs-probe.sh` on a macOS 27.2+ machine for the isolated native trial.\n' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          xcrun clang -std=c11 -Wall -Wextra -Werror -framework CoreFoundation \
+            hack/apfs-type-probe.c -o "$RUNNER_TEMP/apfs-type-probe"
+
+          TEMP_IMAGE_DIR="$(mktemp -d "$RUNNER_TEMP/applesauce-probe.XXXXXX")"
+          IMAGE="$TEMP_IMAGE_DIR/apfs.sparseimage"
+          MOUNT="$TEMP_IMAGE_DIR/mount"
+          mkdir "$MOUNT"
+          /usr/bin/hdiutil create -size 128m -fs APFS -type SPARSE \
+            -volname ApplesauceProbe "$IMAGE"
+          /usr/bin/hdiutil attach -nobrowse -mountpoint "$MOUNT" "$IMAGE"
+          trap '/usr/bin/hdiutil detach "$MOUNT" -quiet || true' EXIT
+          touch "$MOUNT/.applesauce-disposable-image"
+
+          printf '## APFS filesystem type candidates\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'This test uses a fresh 128 MiB APFS disk image. Type 12 is the LZFSE control; types 15–22 are unverified candidates. Success means an APFS file passed transparent readback, and does not yet identify its algorithm.\n\n' >> "$GITHUB_STEP_SUMMARY"
+          "$RUNNER_TEMP/apfs-type-probe" "$MOUNT" | tee -a "$GITHUB_STEP_SUMMARY"
