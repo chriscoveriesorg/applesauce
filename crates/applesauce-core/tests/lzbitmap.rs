@@ -11,7 +11,11 @@ fn round_trip(input: &[u8], expected_type: u32) -> (Vec<u8>, Vec<u8>) {
         .compressor()
         .expect("native tests require macOS 12+ and a working LZBitmap buffer codec");
     let mut fork = Vec::new();
-    let mut writer = Writer::new(kind, input.len() as u64, || Cursor::new(&mut fork)).unwrap();
+    let mut writer = Writer::new(kind, input.len() as u64, {
+        let fork_ref = &mut fork;
+        move || Cursor::new(fork_ref)
+    })
+    .unwrap();
     let mut block = vec![0; BLOCK_SIZE + 1];
     for input in input.chunks(BLOCK_SIZE) {
         let size = compressor.compress(&mut block, input, 0).unwrap();
