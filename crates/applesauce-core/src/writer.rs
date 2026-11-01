@@ -52,10 +52,14 @@ impl<O: Open> Writer<O> {
             // Native resource-fork formats use 32-bit block counts/offsets.
             // Validate before opening or seeking into the target resource fork.
             let header_size = kind.header_size(block_count);
-            if header_size.saturating_add(block_count) > u64::from(u32::MAX) {
+            let max_data_end = u64::from(u32::MAX) - kind.trailer_size();
+            if header_size
+                .checked_add(block_count)
+                .is_none_or(|minimum_end| minimum_end > max_data_end)
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "resource fork block table cannot fit in 32-bit offsets",
+                    "resource fork block table, minimum payload and trailer exceed 32-bit offsets",
                 ));
             }
             let mut resource_fork = open.open_resource_fork()?;
@@ -127,6 +131,23 @@ impl<O: Open> Writer<O> {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "too many blocks",
+                    ));
+                }
+                // Reject an impossible final layout before writing payload
+                // bytes. Leave room for at least one byte in each remaining
+                // block and for a codec-specific resource-fork trailer.
+                let remaining_blocks =
+                    crate::num_blocks(self.uncompressed_size) - block_sizes.len() as u64 - 1;
+                let max_data_end = u64::from(u32::MAX) - self.kind.trailer_size();
+                let position = resource_fork.stream_position()?;
+                if position
+                    .checked_add(u64::from(compressed_size))
+                    .and_then(|end| end.checked_add(remaining_blocks))
+                    .is_none_or(|minimum_end| minimum_end > max_data_end)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "compressed block would exceed 32-bit resource-fork capacity",
                     ));
                 }
                 // Reserve the metadata slot before touching the fork. An
@@ -240,6 +261,18 @@ impl<O: Open> Writer<O> {
     // Only called on single-block files, to convert to multiple blocks, even with a single block
     // because the block is too large to fit in an xattr
     fn write_single_block_as_rfork(&mut self, new_block: &[u8]) -> io::Result<()> {
+        let max_data_end = u64::from(u32::MAX) - self.kind.trailer_size();
+        if self
+            .kind
+            .header_size(1)
+            .checked_add(new_block.len() as u64)
+            .is_none_or(|end| end > max_data_end)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "single-block resource fork exceeds 32-bit capacity",
+            ));
+        }
         match mem::replace(&mut self.state, WriterState::Empty) {
             WriterState::SingleBlock { open, block } => {
                 debug_assert!(block.is_empty());

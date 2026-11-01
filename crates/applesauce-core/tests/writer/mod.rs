@@ -376,3 +376,98 @@ fn failed_single_block_resource_fork_conversion_cannot_publish() {
     );
     assert!(output.is_empty());
 }
+
+struct VirtualNearLimitFork {
+    position: u64,
+    starting_position: u64,
+    writes: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl std::io::Write for VirtualNearLimitFork {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.writes.set(self.writes.get() + 1);
+        self.position += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl std::io::Seek for VirtualNearLimitFork {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        match from {
+            // Simulate a storage backend reporting a fork cursor near its
+            // 32-bit limit without allocating gigabytes of backing storage.
+            std::io::SeekFrom::Start(_) => self.position = self.starting_position,
+            std::io::SeekFrom::Current(0) => {}
+            _ => return Err(std::io::ErrorKind::Unsupported.into()),
+        }
+        Ok(self.position)
+    }
+}
+
+fn near_limit_writer(
+    kind: Kind,
+    position: u64,
+    writes: std::rc::Rc<std::cell::Cell<usize>>,
+) -> Writer<impl applesauce_core::writer::Open> {
+    Writer::new(kind, 2 * BLOCK_SIZE as u64, move || VirtualNearLimitFork {
+        position: 0,
+        starting_position: position,
+        writes,
+    })
+    .unwrap()
+}
+
+#[test]
+fn oversized_resource_fork_payload_is_rejected_before_writing() {
+    // The second block still needs one byte of space. The first block must
+    // fail before any write when it would make the final layout impossible.
+    for kind in Kind::ALL.into_iter().filter(|kind| kind.supported()) {
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut writer =
+            near_limit_writer(kind, u64::from(u32::MAX) - 1, std::rc::Rc::clone(&writes));
+        assert_eq!(
+            writer.add_block(&[0x11, 0x22]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{kind}"
+        );
+        assert_eq!(writes.get(), 0, "{kind} wrote oversized payload");
+    }
+}
+
+#[test]
+fn zlib_trailer_and_remaining_block_fit_exactly_at_the_limit() {
+    if !Kind::Zlib.supported() {
+        return;
+    }
+    let max = u64::from(u32::MAX);
+    // 2-byte first payload + 1-byte required final payload + 50-byte trailer.
+    for (position, accepted) in [(max - 53, true), (max - 52, false)] {
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut writer = near_limit_writer(Kind::Zlib, position, std::rc::Rc::clone(&writes));
+        let result = writer.add_block(&[0x11, 0x22]);
+        assert_eq!(result.is_ok(), accepted, "position={position}");
+        assert_eq!(writes.get(), usize::from(accepted));
+    }
+}
+
+#[test]
+fn zlib_trailer_overflow_fails_before_opening_the_resource_fork() {
+    if !Kind::Zlib.supported() {
+        return;
+    }
+    // Each block requires 8 table bytes, 1 payload byte, plus the fixed
+    // header and trailer. This count fits without the trailer but not with it.
+    let max = u64::from(u32::MAX);
+    let trailer = decmpfs::ZLIB_TRAILER.len() as u64;
+    let header = Kind::Zlib.header_size(0);
+    let blocks = (max - header - trailer) / 9 + 1;
+    assert!(Kind::Zlib.header_size(blocks) + blocks <= max);
+    let error = Writer::new(Kind::Zlib, blocks * BLOCK_SIZE as u64, never_called_open)
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
