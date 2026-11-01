@@ -29,12 +29,25 @@ impl super::CompressorImpl for Zlib {
     }
 
     fn compress(&mut self, dst: &mut [u8], src: &[u8], level: u32) -> io::Result<usize> {
-        assert!(dst.len() > src.len());
+        if dst.len() <= src.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "destination must be larger than the uncompressed block",
+            ));
+        }
 
         if self.compressor_level != level {
+            let invalid_level = || {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "zlib compression level must be 1..=12",
+                )
+            };
+            let level_i32 = i32::try_from(level).map_err(|_| invalid_level())?;
+            let validated_level =
+                libdeflater::CompressionLvl::new(level_i32).map_err(|_| invalid_level())?;
+            self.compressor = libdeflater::Compressor::new(validated_level);
             self.compressor_level = level;
-            self.compressor =
-                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level as _).unwrap());
         }
 
         let len = match self.compressor.zlib_compress(src, &mut dst[..src.len()]) {
@@ -286,6 +299,26 @@ mod tests {
     use crate::compressor::CompressorImpl;
     use crate::BLOCK_SIZE;
     use std::io::Cursor;
+
+    #[test]
+    fn invalid_level_fails_without_panic_or_state_change() {
+        let mut compressor = Zlib::new();
+        let input = [0x41; 256];
+        let mut output = vec![0xa5; 512];
+        for level in [0, 13, u32::MAX] {
+            let error = compressor.compress(&mut output, &input, level).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(output.iter().all(|&byte| byte == 0xa5));
+        }
+
+        // A rejected level must leave the compressor usable.
+        let size = compressor.compress(&mut output, &input, 6).unwrap();
+        let mut recovered = [0; 257];
+        let decoded = compressor
+            .decompress(&mut recovered, &output[..size])
+            .unwrap();
+        assert_eq!(&recovered[..decoded], &input);
+    }
 
     #[test]
     fn round_trip() {

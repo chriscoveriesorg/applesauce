@@ -295,6 +295,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn insufficient_encode_capacity_fails_without_mutation() {
+        let input = [0xa5; 32];
+        for kind in Kind::ALL {
+            let Some(mut compressor) = kind.compressor() else {
+                continue;
+            };
+            for capacity in [0, 1, input.len()] {
+                let mut output = vec![0x5a; capacity];
+                let error = compressor.compress(&mut output, &input, 5).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::WriteZero, "{kind}");
+                assert!(output.iter().all(|&byte| byte == 0x5a), "{kind}");
+            }
+        }
+    }
+
     #[cfg(not(all(target_os = "macos", feature = "lzbitmap")))]
     #[test]
     fn lzbitmap_is_unavailable_without_native_opt_in() {

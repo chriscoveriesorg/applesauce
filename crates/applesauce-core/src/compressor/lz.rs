@@ -85,7 +85,12 @@ impl<I: Impl> CompressorImpl for Lz<I> {
     }
 
     fn compress(&mut self, dst: &mut [u8], src: &[u8], _level: u32) -> io::Result<usize> {
-        assert!(dst.len() > src.len());
+        if dst.len() <= src.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "destination must be larger than the uncompressed block",
+            ));
+        }
 
         let max_compress_size = if I::UNCOMPRESSED_PREFIX.is_some() {
             src.len()
