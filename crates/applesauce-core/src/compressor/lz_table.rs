@@ -105,10 +105,23 @@ pub(super) fn finish<W: io::Write + io::Seek>(
     // The writer's position must agree with the payload lengths before any
     // table bytes are published. Otherwise a short or overlong payload could
     // be described as a valid resource fork despite the checked offsets.
-    if writer.stream_position()? != u64::from(final_offset) {
+    let position = writer.stream_position()?;
+    if position != u64::from(final_offset) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "resource-fork block lengths do not match written data",
+        ));
+    }
+    // A seekable fork can contain stale bytes past the current write cursor.
+    // The offset table must not describe only a prefix of that fork. Check
+    // physical EOF before writing any table bytes, restoring the cursor even
+    // when the length disagrees.
+    let fork_len = writer.seek(SeekFrom::End(0))?;
+    writer.seek(SeekFrom::Start(position))?;
+    if fork_len != position {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "resource-fork contains unreferenced bytes after the final block",
         ));
     }
 
@@ -326,6 +339,20 @@ mod tests {
             assert_eq!(cursor.get_ref(), &original);
             assert_eq!(cursor.position(), position);
         }
+    }
+
+    #[test]
+    fn finalizer_rejects_stale_bytes_beyond_payload_without_mutation() {
+        // Both blocks fit exactly at byte 18. An older 21-byte fork with
+        // the write cursor at 18 must not receive a misleading offset table.
+        let payload_end = header_size(2) + 2 + 4;
+        let original = vec![0xa5; payload_end as usize + 3];
+        let mut cursor = Cursor::new(original.clone());
+        cursor.set_position(payload_end);
+        let error = finish(&mut cursor, &[2, 4]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(cursor.get_ref(), &original);
+        assert_eq!(cursor.position(), payload_end);
     }
 
     #[test]

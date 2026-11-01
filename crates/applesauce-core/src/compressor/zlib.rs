@@ -261,6 +261,18 @@ impl super::CompressorImpl for Zlib {
                 "zlib resource-fork block lengths do not match written data",
             ));
         }
+        // Reusing a fork must not leave stale bytes beyond the trailer.
+        // Otherwise the table describes only a prefix, and the resulting
+        // fork cannot pass the reader's length and trailer validation.
+        // Seek back before returning, including for a length mismatch.
+        let fork_len = writer.seek(SeekFrom::End(0))?;
+        writer.seek(SeekFrom::Start(u64::from(data_end)))?;
+        if fork_len != u64::from(data_end) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "zlib resource-fork contains stale trailing bytes",
+            ));
+        }
         let table_start = u32::try_from(block_start - ZLIB_BLOCK_TABLE_START)
             .map_err(|_| io::ErrorKind::InvalidInput)?;
         writer.write_all(&ZLIB_TRAILER)?;
@@ -550,6 +562,20 @@ mod tests {
             assert_eq!(cursor.get_ref(), &original);
             assert_eq!(cursor.position(), position);
         }
+    }
+
+    #[test]
+    fn finalizer_rejects_stale_bytes_beyond_payload_without_mutation() {
+        // A previous fork's trailing bytes would survive writing the new
+        // trailer and make the published resource fork unreadable.
+        let data_end = Zlib::header_size(1) + 3;
+        let original = vec![0xa5; (data_end + 7) as usize];
+        let mut cursor = Cursor::new(original.clone());
+        cursor.set_position(data_end);
+        let error = Zlib::finish(&mut cursor, &[3]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(cursor.get_ref(), &original);
+        assert_eq!(cursor.position(), data_end);
     }
 
     #[test]
