@@ -74,6 +74,23 @@ impl<R: Read + Seek> Reader<R> {
                 State::Xattr(Cursor::new(decmpfs_value.extra_data.to_vec()))
             }
             Storage::ResourceFork => {
+                // Resource-fork decmpfs metadata contains only the 16-byte
+                // header. Any inline payload is contradictory and must not be
+                // silently ignored in favor of the separate fork.
+                if !decmpfs_value.extra_data.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "resource-fork decmpfs header contains inline payload",
+                    ));
+                }
+                // An empty file is represented by an empty inline xattr.
+                // Do not accept a zero-block fork as valid compressed data.
+                if decmpfs_value.uncompressed_size == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "empty file cannot use resource-fork compression",
+                    ));
+                }
                 let mut rfork = BufReader::new(open.open_resource_fork()?);
                 let mut blocks_info =
                     kind.read_block_info(&mut rfork, decmpfs_value.uncompressed_size)?;
