@@ -114,6 +114,31 @@ fn resource_fork_reader_accepts_header_only_single_block() {
 }
 
 #[test]
+fn resource_fork_reader_preserves_large_compressed_block_bytes() {
+    use applesauce_core::writer::Writer;
+    use applesauce_core::BLOCK_SIZE;
+
+    // Exercise multiple read chunks without imposing an undocumented
+    // compressed-size ceiling on otherwise valid resource-fork framing.
+    let kind = Kind::default();
+    let payload = vec![0x42; 2 * BLOCK_SIZE + 17];
+    let mut resource_fork = Vec::new();
+    let mut writer = Writer::new(kind, 1, || Cursor::new(&mut resource_fork)).unwrap();
+    writer.force_resource_fork().unwrap();
+    writer.add_block(&payload).unwrap();
+    let mut metadata = Vec::new();
+    writer.finish_decmpfs_data(&mut metadata).unwrap();
+
+    let mut reader = Reader::new(&metadata, || Cursor::new(&resource_fork)).unwrap();
+    let mut output = vec![0xa5, 0x5a];
+    assert!(reader.read_block_into(&mut output).unwrap());
+    assert_eq!(&output[..2], &[0xa5, 0x5a]);
+    assert_eq!(&output[2..], payload);
+    assert_eq!(reader.remaining_blocks(), 0);
+    assert!(!reader.read_block_into(&mut output).unwrap());
+}
+
+#[test]
 fn sparse_resource_fork_does_not_allocate_its_declared_block_before_reading() {
     use std::io::{Read, Seek, SeekFrom};
 
