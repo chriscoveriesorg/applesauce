@@ -75,6 +75,10 @@ def validate(manifest: Path, suite: str) -> int:
     seen = set()
     hashes = {}
     for index, row in enumerate(rows, 1):
+        # csv.DictReader stores excess cells under the None key. Checking
+        # only the named fields would silently accept an extended CSV row.
+        if None in row:
+            raise ValueError(f"row {index}: unexpected trailing CSV columns")
         if not all(isinstance(row.get(field), str) for field in FIELDS):
             raise ValueError(f"row {index}: missing/extra fields")
         if row["schema_version"] != "1" or row["fixture_version"] != "1":
