@@ -108,10 +108,16 @@ impl io::Write for ResourceFork<'_> {
 // must never wrap it, even when the caller supplies a large buffer.
 fn checked_read_advance(position: u32, bytes_read: usize) -> io::Result<u32> {
     let advance = u32::try_from(bytes_read).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "resource fork read exceeds 32-bit offset")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resource fork read exceeds 32-bit offset",
+        )
     })?;
     position.checked_add(advance).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "resource fork read exceeds 32-bit offset")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resource fork read exceeds 32-bit offset",
+        )
     })
 }
 
