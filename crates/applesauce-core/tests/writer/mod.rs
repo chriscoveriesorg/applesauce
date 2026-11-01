@@ -176,13 +176,18 @@ fn empty_file_cannot_receive_compressed_blocks() {
     );
     let mut output = Vec::new();
     writer.finish_decmpfs_data(&mut output).unwrap();
-    assert!(decmpfs::Value::from_data(&output).unwrap().extra_data.is_empty());
+    assert!(decmpfs::Value::from_data(&output)
+        .unwrap()
+        .extra_data
+        .is_empty());
 }
 
 #[test]
 fn incomplete_resource_fork_cannot_publish_metadata() {
-    let mut writer =
-        Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, || Cursor::new(Vec::new())).unwrap();
+    let mut writer = Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, || {
+        Cursor::new(Vec::new())
+    })
+    .unwrap();
     assert_eq!(
         writer.add_block(&[]).unwrap_err().kind(),
         std::io::ErrorKind::InvalidInput,
@@ -191,7 +196,11 @@ fn incomplete_resource_fork_cannot_publish_metadata() {
     let mut output = vec![0x5a];
     let error = writer.finish_decmpfs_data(&mut output).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(output, [0x5a], "incomplete resource fork must not be published");
+    assert_eq!(
+        output,
+        [0x5a],
+        "incomplete resource fork must not be published"
+    );
 }
 
 #[test]
@@ -221,7 +230,8 @@ fn forcing_resource_fork_before_first_block_does_not_create_phantom_block() {
     let (kind, storage) = value.compression_type.compression_storage().unwrap();
     assert_eq!(storage, decmpfs::Storage::ResourceFork);
     assert_eq!(
-        kind.read_block_info(Cursor::new(&resource_fork), 1).unwrap(),
+        kind.read_block_info(Cursor::new(&resource_fork), 1)
+            .unwrap(),
         [decmpfs::BlockInfo {
             offset: kind.header_size(1) as u32,
             compressed_size: 1,
