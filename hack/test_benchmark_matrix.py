@@ -62,6 +62,16 @@ class MatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete smoke suite"):
             matrix.validate(self.manifest, "smoke")
 
+    def test_rejects_trailing_csv_cells_in_an_otherwise_complete_suite(self):
+        for trailing in (",surprise", ","):
+            with self.subTest(trailing=trailing):
+                self.write()
+                lines = self.manifest.read_text(encoding="utf-8").splitlines()
+                lines[1] += trailing
+                self.manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "unexpected trailing CSV columns"):
+                    matrix.validate(self.manifest, "smoke")
+
     def test_rejects_duplicate_forged_mismatched_or_malformed_cases(self):
         for field, bad, message in (
             ("codec", "lzvn", "unexpected benchmark case"),
