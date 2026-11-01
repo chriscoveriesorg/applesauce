@@ -20,18 +20,22 @@ class MatrixTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.manifest = Path(self.temp.name) / "manifest.csv"
-        self.rows = []
-        for suite, workload, size, layout, codec, mode in sorted(matrix.expected_cases("smoke")):
+        self.rows = self.build_rows("smoke")
+
+    @staticmethod
+    def build_rows(suite):
+        rows = []
+        for case_suite, workload, size, layout, codec, mode in sorted(matrix.expected_cases(suite)):
             encoded_bytes = size // 2
-            self.rows.append(dict(
+            rows.append(dict(
                 schema_version="1",
                 fixture_version="1",
-                suite=suite,
+                suite=case_suite,
                 workload=workload,
                 input_bytes=str(size),
-                input_sha256=matrix.GOLDEN_64K[workload],
+                input_sha256=matrix.GOLDEN_SHA256[size][workload],
                 layout=layout,
-                chunk_bytes=str(size),
+                chunk_bytes=str(size if layout == "whole" else 65536),
                 codec=codec,
                 scratch_mode=mode,
                 encode_scratch_bytes="n/a" if mode == "api-managed" else "0",
@@ -40,6 +44,7 @@ class MatrixTests(unittest.TestCase):
                 encoded_over_input_ratio="0.500000000",
                 verified_roundtrip="true",
             ))
+        return rows
 
     def write(self):
         with self.manifest.open("w", encoding="utf-8", newline="") as handle:
@@ -94,6 +99,32 @@ class MatrixTests(unittest.TestCase):
         self.write()
         with self.assertRaisesRegex(ValueError, "duplicate benchmark case"):
             matrix.validate(self.manifest, "smoke")
+
+    def test_all_fixture_sizes_are_pinned_to_v1_goldens(self):
+        for suite in ("standard", "extended"):
+            with self.subTest(suite=suite):
+                self.rows = self.build_rows(suite)
+                self.write()
+                self.assertEqual(matrix.validate(self.manifest, suite), len(self.rows))
+
+                # A consistent but wrong digest across every codec/layout must
+                # fail too; agreement within the manifest is insufficient.
+                for size in matrix.SIZES[suite]:
+                    for workload in matrix.WORKLOADS:
+                        matching = [
+                            row for row in self.rows
+                            if row["input_bytes"] == str(size) and row["workload"] == workload
+                        ]
+                        original = matching[0]["input_sha256"]
+                        for row in matching:
+                            row["input_sha256"] = "f" * 64
+                        self.write()
+                        with self.subTest(size=size, workload=workload):
+                            with self.assertRaisesRegex(ValueError, "differs from v1 golden"):
+                                matrix.validate(self.manifest, suite)
+                        for row in matching:
+                            row["input_sha256"] = original
+
 
 
 if __name__ == "__main__":

@@ -32,9 +32,10 @@ different byte distributions:
 Fixtures always have the requested exact byte count, so the last synthetic
 JSONL record can end mid-line. These are *compression distributions*, not
 parser-conformance samples. No private chat logs or other customer data are
-collected or uploaded. Each workload+size has its SHA-256 in `manifest.csv`;
-changing the fixture version or digest means cross-run comparisons need a
-separate cohort.
+collected or uploaded. Each workload+size has its SHA-256 in `manifest.csv`. The v1 SHA-256
+values for every standard/extended fixture size (4 KiB through 8 MiB) are
+pinned independently in the Rust generator tests and the Python matrix validator.
+Changing a digest requires a new fixture version and a separate comparison cohort.
 
 Every case tests Apple's public in-memory `ZLIB`, `LZFSE`, `LZBITMAP`, `LZMESH`
 and `LZRAVEN` selectors when present on the host. Legacy LZVN belongs to the
