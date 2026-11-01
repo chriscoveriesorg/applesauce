@@ -18,6 +18,19 @@ fn unavailable_codec_is_rejected_before_opening_storage() {
 }
 
 #[test]
+fn unrepresentable_resource_fork_table_fails_before_opening_storage() {
+    // Both an overflowing block count and a representable block count
+    // whose header + minimum nonempty payload exceeds 32-bit offsets
+    // must be rejected without touching the resource fork.
+    for kind in Kind::ALL.into_iter().filter(|kind| kind.supported()) {
+        for size in [u64::MAX, 900_000_000u64 * BLOCK_SIZE as u64] {
+            let error = Writer::new(kind, size, never_called_open).err().unwrap();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+}
+
+#[test]
 fn empty() {
     let writer = Writer::new(Kind::default(), 0, never_called_open).unwrap();
 
