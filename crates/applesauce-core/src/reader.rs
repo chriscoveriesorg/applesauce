@@ -47,7 +47,32 @@ impl<R: Read + Seek> Reader<R> {
             .filter(|(kind, _)| kind.supported())
             .ok_or_else(|| io::Error::other("unsupported compression kind or storage"))?;
         let state = match storage {
-            Storage::Xattr => State::Xattr(Cursor::new(decmpfs_value.extra_data.to_vec())),
+            Storage::Xattr => {
+                // An inline xattr represents at most one 64 KiB block.
+                // Reject inconsistent metadata before a caller can mistake
+                // an absent or truncated payload for end-of-file.
+                if decmpfs_value.uncompressed_size > crate::BLOCK_SIZE as u64 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "inline decmpfs data exceeds one uncompressed block",
+                    ));
+                }
+                if decmpfs_value.extra_data.len() > decmpfs::MAX_XATTR_DATA_SIZE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "inline decmpfs payload exceeds maximum xattr size",
+                    ));
+                }
+                if (decmpfs_value.uncompressed_size == 0)
+                    != decmpfs_value.extra_data.is_empty()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "inline decmpfs payload does not match uncompressed size",
+                    ));
+                }
+                State::Xattr(Cursor::new(decmpfs_value.extra_data.to_vec()))
+            }
             Storage::ResourceFork => {
                 let mut rfork = BufReader::new(open.open_resource_fork()?);
                 let mut blocks_info =
