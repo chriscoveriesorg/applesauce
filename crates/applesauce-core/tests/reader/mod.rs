@@ -113,6 +113,98 @@ fn resource_fork_reader_accepts_header_only_single_block() {
     assert!(!reader.read_block_into(&mut payload).unwrap());
 }
 
+#[test]
+fn resource_fork_reader_preserves_large_compressed_block_bytes() {
+    use applesauce_core::writer::Writer;
+    use applesauce_core::BLOCK_SIZE;
+
+    // Exercise multiple read chunks without imposing an undocumented
+    // compressed-size ceiling on otherwise valid resource-fork framing.
+    let kind = Kind::default();
+    let payload = vec![0x42; 2 * BLOCK_SIZE + 17];
+    let mut resource_fork = Vec::new();
+    let mut writer = {
+        let rfork_ref = &mut resource_fork;
+        Writer::new(kind, 1, move || Cursor::new(rfork_ref)).unwrap()
+    };
+    writer.force_resource_fork().unwrap();
+    writer.add_block(&payload).unwrap();
+    let mut metadata = Vec::new();
+    writer.finish_decmpfs_data(&mut metadata).unwrap();
+
+    let mut reader = Reader::new(&metadata, || Cursor::new(&resource_fork)).unwrap();
+    let mut output = vec![0xa5, 0x5a];
+    assert!(reader.read_block_into(&mut output).unwrap());
+    assert_eq!(&output[..2], &[0xa5, 0x5a]);
+    assert_eq!(&output[2..], payload);
+    assert_eq!(reader.remaining_blocks(), 0);
+    assert!(!reader.read_block_into(&mut output).unwrap());
+}
+
+#[test]
+fn sparse_resource_fork_does_not_allocate_its_declared_block_before_reading() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // The LZ table has two absolute offsets for a single block. A forged
+    // seekable fork can report 32 MiB while only supplying the eight table
+    // bytes. This must fail after at most one bounded read allocation.
+    let Some(kind) = Kind::ALL
+        .into_iter()
+        .find(|kind| *kind != Kind::Zlib && kind.supported())
+    else {
+        return;
+    };
+    const REPORTED_LEN: u64 = 32 * 1024 * 1024;
+    struct SparseFork {
+        cursor: Cursor<[u8; 8]>,
+    }
+    impl Read for SparseFork {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.cursor.read(buf)
+        }
+    }
+    impl Seek for SparseFork {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            match pos {
+                SeekFrom::End(0) => Ok(REPORTED_LEN),
+                other => self.cursor.seek(other),
+            }
+        }
+    }
+
+    let mut offsets = [0u8; 8];
+    offsets[..4].copy_from_slice(&8u32.to_le_bytes());
+    offsets[4..].copy_from_slice(&(REPORTED_LEN as u32).to_le_bytes());
+    let mut metadata = Vec::new();
+    decmpfs::Value {
+        compression_type: decmpfs::CompressionType::new(kind, decmpfs::Storage::ResourceFork),
+        uncompressed_size: 1,
+        extra_data: &[],
+    }
+    .write_to(&mut metadata)
+    .unwrap();
+
+    let mut reader = Reader::new(&metadata, move || SparseFork {
+        cursor: Cursor::new(offsets),
+    })
+    .unwrap();
+    let mut output = vec![0xa5, 0x5a];
+    assert_eq!(
+        reader.read_block_into(&mut output).unwrap_err().kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+    assert_eq!(output, [0xa5, 0x5a]);
+    assert!(
+        output.capacity() < 128 * 1024,
+        "truncated sparse fork must not allocate its declared 32 MiB block"
+    );
+    assert_eq!(reader.remaining_blocks(), 1);
+    assert_eq!(
+        reader.read_block_into(&mut output).unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}
+
 #[cfg(feature = "zlib")]
 #[test]
 fn partial_resource_fork_read_preserves_output_and_fails_closed() {

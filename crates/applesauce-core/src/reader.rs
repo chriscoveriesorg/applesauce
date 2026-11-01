@@ -149,15 +149,20 @@ impl<R: Read + Seek> Reader<R> {
                 let diff = i64::from(block.offset) - i64::from(*last_offset);
                 reader.seek_relative(diff)?;
 
-                // Block lengths are known from the validated resource-fork
-                // table. Reuse the caller's buffer and read exactly once
-                // rather than growing it in read_to_end increments.
-                let size = usize::try_from(block.compressed_size)
+                // A forged sparse fork can advertise a huge block while
+                // providing almost no readable payload. Do not allocate the
+                // entire declared size before confirming that bytes exist.
+                // Valid large blocks still stream into the caller's Vec.
+                let mut remaining = usize::try_from(block.compressed_size)
                     .map_err(|_| io::ErrorKind::InvalidData)?;
-                dst.try_reserve_exact(size).map_err(io::Error::other)?;
-                let start = dst.len();
-                dst.resize(start + size, 0);
-                reader.read_exact(&mut dst[start..])?;
+                while remaining != 0 {
+                    let chunk = remaining.min(crate::BLOCK_SIZE);
+                    dst.try_reserve_exact(chunk).map_err(io::Error::other)?;
+                    let start = dst.len();
+                    dst.resize(start + chunk, 0);
+                    reader.read_exact(&mut dst[start..])?;
+                    remaining -= chunk;
+                }
 
                 *last_offset = block
                     .offset
