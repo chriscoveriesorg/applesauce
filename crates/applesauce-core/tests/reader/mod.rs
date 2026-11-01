@@ -123,7 +123,10 @@ fn resource_fork_reader_preserves_large_compressed_block_bytes() {
     let kind = Kind::default();
     let payload = vec![0x42; 2 * BLOCK_SIZE + 17];
     let mut resource_fork = Vec::new();
-    let mut writer = Writer::new(kind, 1, || Cursor::new(&mut resource_fork)).unwrap();
+    let mut writer = {
+        let rfork_ref = &mut resource_fork;
+        Writer::new(kind, 1, move || Cursor::new(rfork_ref)).unwrap()
+    };
     writer.force_resource_fork().unwrap();
     writer.add_block(&payload).unwrap();
     let mut metadata = Vec::new();
