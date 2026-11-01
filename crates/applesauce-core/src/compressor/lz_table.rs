@@ -79,7 +79,7 @@ pub(super) fn finish<W: io::Write + io::Seek>(
 
     // Reject invalid tables before rewriting any bytes in the resource fork.
     // A late overflow would otherwise leave a partly replaced offset table.
-    let _final_offset = block_sizes.iter().try_fold(first_offset, |offset, &size| {
+    let final_offset = block_sizes.iter().try_fold(first_offset, |offset, &size| {
         if size == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -93,6 +93,15 @@ pub(super) fn finish<W: io::Write + io::Seek>(
             )
         })
     })?;
+    // The writer's position must agree with the payload lengths before any
+    // table bytes are published. Otherwise a short or overlong payload could
+    // be described as a valid resource fork despite the checked offsets.
+    if writer.stream_position()? != u64::from(final_offset) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "resource-fork block lengths do not match written data",
+        ));
+    }
 
     writer.rewind()?;
     let mut offset = first_offset;
@@ -149,6 +158,7 @@ mod tests {
     #[test]
     fn table_is_absolute_little_endian_with_a_terminal_offset() {
         let mut cursor = Cursor::new(vec![0; 18]);
+        cursor.set_position(18);
         finish(&mut cursor, &[2, 4]).unwrap();
         assert_eq!(
             &cursor.get_ref()[..12],
@@ -193,6 +203,22 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             assert_eq!(cursor.get_ref(), &original);
             assert_eq!(cursor.position(), 17);
+        }
+    }
+
+    #[test]
+    fn finalizer_rejects_mismatched_payload_lengths_without_modifying_fork() {
+        // Two blocks need a 12-byte table and six payload bytes.
+        // Even when the backing fork is long enough, its write cursor must
+        // reflect exactly the supplied payload sizes.
+        let original = vec![0xa5; 24];
+        for position in [0u64, 12, 17, 19, 24] {
+            let mut cursor = Cursor::new(original.clone());
+            cursor.set_position(position);
+            let error = finish(&mut cursor, &[2, 4]).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(cursor.get_ref(), &original);
+            assert_eq!(cursor.position(), position);
         }
     }
 
