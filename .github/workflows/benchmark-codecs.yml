@@ -72,6 +72,9 @@ jobs:
       - name: Produce complete per-case CSV and concise comparison
         run: |
           set -euo pipefail
+          python3 hack/validate-benchmark-matrix.py \
+            "$APPLESAUCE_BENCH_MANIFEST" "$APPLESAUCE_BENCH_SUITE" \
+            | tee "$BENCH_RESULTS/matrix-check.txt"
           python3 hack/summarize-benchmarks.py \
             "$APPLESAUCE_BENCH_MANIFEST" target/criterion \
             "$BENCH_RESULTS/summary.csv" \

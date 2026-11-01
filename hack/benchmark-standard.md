@@ -75,6 +75,7 @@ Artifacts include:
 | `environment.txt` | UTC, full commit SHA, OS/build, model/CPU/memory, Xcode/SDK, Rust version |
 | `config.txt` | Suite, warmup, measurement duration, sample count |
 | `manifest.csv` | Fixture version, SHA-256, sizes, codec, layout, scratch sizes/mode, payload ratio, round-trip status |
+| `matrix-check.txt` | Independent fail-closed check that every expected codec, workload, size, layout and scratch mode was actually measured |
 | `criterion/**/new/estimates.json` and `sample.json` | Raw Criterion timing estimates, confidence intervals and samples for encode and decode |
 | `summary.csv` | Full-case median ns and derived encode/decode MiB/s joined by exact case key |
 | `summary.md` | Small same-host Chat JSONL vs entropy comparison |
@@ -83,6 +84,11 @@ Artifacts include:
 The pure-Python
 [`hack/summarize-benchmarks.py`](summarize-benchmarks.py) exits nonzero when
 an expected result is missing; it will never silently fabricate speed data.
+[`hack/validate-benchmark-matrix.py`](validate-benchmark-matrix.py) separately
+checks the entire expected v1 workload matrix, not just the cases listed in
+the manifest. A host that skips Raven/Mesh, a missing input size, a forged
+fixture hash, or mismatched ratio now fails the report rather than producing
+an apparently complete benchmark.
 
 ## Reproduce locally on a macOS 27 host
 
@@ -94,6 +100,8 @@ export APPLESAUCE_BENCH_SUITE=standard
 export APPLESAUCE_BENCH_MANIFEST="$PWD/target/applesauce-bench/manifest.csv"
 cargo bench --locked -p applesauce-core --bench modern_buffer -- \
   --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30
+python3 hack/validate-benchmark-matrix.py \
+  "$APPLESAUCE_BENCH_MANIFEST" "$APPLESAUCE_BENCH_SUITE"
 python3 hack/summarize-benchmarks.py \
   "$APPLESAUCE_BENCH_MANIFEST" target/criterion \
   target/applesauce-bench/summary.csv
