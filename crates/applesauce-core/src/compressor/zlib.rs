@@ -178,10 +178,13 @@ impl super::CompressorImpl for Zlib {
                 .offset
                 .checked_add(block_info.compressed_size)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "block end overflow"))?;
-            if block_info.compressed_size == 0 || block_info.offset < previous_end {
+            // The writer lays payloads out contiguously. A gap would leave
+            // unreferenced bytes between blocks, just as a short final block
+            // leaves unreferenced bytes before the trailer.
+            if block_info.compressed_size == 0 || block_info.offset != previous_end {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "empty, overlapping, or header-overlapping compressed block",
+                    "empty, overlapping, or noncontiguous compressed block",
                 ));
             }
             if block_end > data_end {
@@ -573,6 +576,36 @@ mod tests {
         bytes[0x100..0x104].copy_from_slice(&u32::to_be_bytes(enlarged_end - 0x104));
 
         let error = Zlib::read_block_info(Cursor::new(bytes), BLOCK_SIZE as u64).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_unreferenced_bytes_between_zlib_blocks() {
+        let block_start = Zlib::header_size(2);
+        let data_end = u32::try_from(block_start + 8).unwrap();
+        let mut cursor = Cursor::new(vec![0u8; data_end as usize]);
+        cursor.set_position(u64::from(data_end));
+        Zlib::finish(&mut cursor, &[4, 4]).unwrap();
+        let mut bytes = cursor.into_inner();
+        assert_eq!(
+            Zlib::read_block_info(Cursor::new(&bytes), 2 * BLOCK_SIZE as u64)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Insert an orphan byte between the two blocks and move the second
+        // block's table offset forward. All declared blocks still fit and
+        // the final block still reaches the trailer.
+        bytes.insert((block_start + 4) as usize, 0xa5);
+        let second_offset = u32::try_from(block_start + 4 + 1 - ZLIB_BLOCK_TABLE_START).unwrap();
+        bytes[0x110..0x114].copy_from_slice(&second_offset.to_le_bytes());
+        let enlarged_end = data_end + 1;
+        bytes[..HEADER_LEN].copy_from_slice(&header(enlarged_end));
+        bytes[0x100..0x104].copy_from_slice(&u32::to_be_bytes(enlarged_end - 0x104));
+
+        let error =
+            Zlib::read_block_info(Cursor::new(bytes), 2 * BLOCK_SIZE as u64).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
