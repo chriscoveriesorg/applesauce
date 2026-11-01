@@ -136,8 +136,11 @@ impl<I: Impl> CompressorImpl for Lz<I> {
         // src is initialised for len bytes
         // buf is valid to write up to scratch size bytes
         let len = unsafe { I::decode(dst, src, self.buf) };
-        debug_assert!(len < dst.len());
-        if len == 0 || len == dst.len() {
+        // A full destination may mean truncated decoding. Reject it before
+        // returning bytes, including unexpected oversized decoder results.
+        // A one-byte destination is therefore insufficient for one byte of
+        // compressed output; callers must provide an overflow guard.
+        if len == 0 || len >= dst.len() {
             return Err(io::ErrorKind::WriteZero.into());
         }
         Ok(len)
@@ -152,5 +155,53 @@ impl<I: Impl> CompressorImpl for Lz<I> {
 
     fn finish<W: io::Write + io::Seek>(writer: W, block_sizes: &[u32]) -> io::Result<()> {
         lz_table::finish(writer, block_sizes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A bounded decoder can legitimately fill the caller's output exactly.
+    // The LZ wrapper must report ambiguous truncation without a debug panic.
+    struct OneByteDecoder;
+
+    // SAFETY: This test implementation uses no scratch storage and only
+    // accesses initialized, in-bounds elements of the caller's buffers.
+    unsafe impl Impl for OneByteDecoder {
+        fn scratch_size() -> usize {
+            0
+        }
+
+        unsafe fn encode(_: &mut [u8], _: &[u8], _: NonNull<u8>) -> usize {
+            0
+        }
+
+        unsafe fn decode(dst: &mut [u8], src: &[u8], _: NonNull<u8>) -> usize {
+            if dst.is_empty() || src.is_empty() {
+                return 0;
+            }
+            dst[0] = src[0];
+            1
+        }
+    }
+
+    #[test]
+    fn exact_destination_capacity_reports_error_and_guarded_retry_succeeds() {
+        let mut compressor = Lz::<OneByteDecoder>::new();
+        let mut exact = [0u8; 1];
+        assert_eq!(
+            compressor
+                .decompress(&mut exact, &[0x41])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WriteZero,
+        );
+
+        // The error leaves the scratch allocation usable, and the extra
+        // output byte makes the decoded length unambiguous.
+        let mut guarded = [0u8; 2];
+        assert_eq!(compressor.decompress(&mut guarded, &[0x41]).unwrap(), 1);
+        assert_eq!(guarded[0], 0x41);
     }
 }
