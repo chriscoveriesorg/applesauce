@@ -247,3 +247,116 @@ fn empty_file_cannot_force_resource_fork() {
         std::io::ErrorKind::InvalidInput,
     );
 }
+
+#[test]
+fn single_block_writer_rejects_extra_block_without_panicking() {
+    let mut writer = Writer::new(Kind::default(), 1, never_called_open).unwrap();
+    writer.add_block(&[0x11]).unwrap();
+    assert_eq!(
+        writer.add_block(&[0x22]).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    let mut output = Vec::new();
+    writer.finish_decmpfs_data(&mut output).unwrap();
+    assert_eq!(decmpfs::Value::from_data(&output).unwrap().extra_data, &[0x11]);
+}
+
+#[test]
+fn resource_fork_writer_rejects_extra_block_without_mutation() {
+    let mut resource_fork = Vec::new();
+    let mut writer = {
+        let rfork_ref = &mut resource_fork;
+        Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, move || {
+            Cursor::new(rfork_ref)
+        })
+        .unwrap()
+    };
+    writer.add_block(&[0x11]).unwrap();
+    writer.add_block(&[0x22]).unwrap();
+    assert_eq!(
+        writer.add_block(&[0x33]).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    let mut output = Vec::new();
+    writer.finish_decmpfs_data(&mut output).unwrap();
+    let value = decmpfs::Value::from_data(&output).unwrap();
+    let (kind, storage) = value.compression_type.compression_storage().unwrap();
+    assert_eq!(storage, decmpfs::Storage::ResourceFork);
+    let blocks = kind
+        .read_block_info(Cursor::new(&resource_fork), BLOCK_SIZE as u64 + 1)
+        .unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].compressed_size, 1);
+    assert_eq!(blocks[1].compressed_size, 1);
+    assert_eq!(resource_fork[blocks[0].offset as usize], 0x11);
+    assert_eq!(resource_fork[blocks[1].offset as usize], 0x22);
+}
+
+struct FailAfterPartialWrite {
+    cursor: Cursor<Vec<u8>>,
+    writes: usize,
+}
+
+impl std::io::Write for FailAfterPartialWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes += 1;
+        if self.writes == 1 {
+            std::io::Write::write(&mut self.cursor, &buf[..1])
+        } else {
+            Err(std::io::Error::other("injected write failure"))
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl std::io::Seek for FailAfterPartialWrite {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.cursor, pos)
+    }
+}
+
+fn partial_failure_open() -> FailAfterPartialWrite {
+    FailAfterPartialWrite {
+        cursor: Cursor::new(Vec::new()),
+        writes: 0,
+    }
+}
+
+#[test]
+fn partial_resource_fork_write_cannot_be_retried_or_published() {
+    let mut writer = Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, partial_failure_open)
+        .unwrap();
+    assert_eq!(
+        writer.add_block(&[0x11, 0x22]).unwrap_err().kind(),
+        std::io::ErrorKind::Other
+    );
+    assert_eq!(
+        writer.add_block(&[0x33]).unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    let mut output = vec![0x5a];
+    assert_eq!(
+        writer.finish_decmpfs_data(&mut output).unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert_eq!(output, [0x5a]);
+}
+
+#[test]
+fn failed_single_block_resource_fork_conversion_cannot_publish() {
+    let mut writer = Writer::new(Kind::default(), 1, partial_failure_open).unwrap();
+    writer.add_block(&[0x11, 0x22]).unwrap();
+    assert_eq!(
+        writer.force_resource_fork().unwrap_err().kind(),
+        std::io::ErrorKind::Other
+    );
+    let mut output = Vec::new();
+    assert_eq!(
+        writer.finish_decmpfs_data(&mut output).unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert!(output.is_empty());
+}
