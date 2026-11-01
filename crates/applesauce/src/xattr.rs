@@ -426,7 +426,7 @@ mod tests {
                 return -1;
             }
             // SAFETY: the caller provided at least two writable bytes.
-            unsafe { ptr::copy_nonoverlapping(b"x\0".as_ptr(), value, 2) };
+            unsafe { ptr::copy_nonoverlapping(c"x".as_ptr().cast(), value, 2) };
             2
         }
     }
