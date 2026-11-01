@@ -604,8 +604,7 @@ mod tests {
         bytes[..HEADER_LEN].copy_from_slice(&header(enlarged_end));
         bytes[0x100..0x104].copy_from_slice(&u32::to_be_bytes(enlarged_end - 0x104));
 
-        let error =
-            Zlib::read_block_info(Cursor::new(bytes), 2 * BLOCK_SIZE as u64).unwrap_err();
+        let error = Zlib::read_block_info(Cursor::new(bytes), 2 * BLOCK_SIZE as u64).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
