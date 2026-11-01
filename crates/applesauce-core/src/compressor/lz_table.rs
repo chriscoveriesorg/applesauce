@@ -207,9 +207,9 @@ mod tests {
         }
 
         impl io::Seek for SparseFork {
-            fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
                 match pos {
-                    io::SeekFrom::End(0) => Ok(header_size(1_000_000)),
+                    SeekFrom::End(0) => Ok(header_size(1_000_000)),
                     other => io::Seek::seek(&mut self.0, other),
                 }
             }
