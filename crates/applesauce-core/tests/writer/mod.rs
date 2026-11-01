@@ -258,7 +258,10 @@ fn single_block_writer_rejects_extra_block_without_panicking() {
     );
     let mut output = Vec::new();
     writer.finish_decmpfs_data(&mut output).unwrap();
-    assert_eq!(decmpfs::Value::from_data(&output).unwrap().extra_data, &[0x11]);
+    assert_eq!(
+        decmpfs::Value::from_data(&output).unwrap().extra_data,
+        &[0x11]
+    );
 }
 
 #[test]
@@ -327,8 +330,8 @@ fn partial_failure_open() -> FailAfterPartialWrite {
 
 #[test]
 fn partial_resource_fork_write_cannot_be_retried_or_published() {
-    let mut writer = Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, partial_failure_open)
-        .unwrap();
+    let mut writer =
+        Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, partial_failure_open).unwrap();
     assert_eq!(
         writer.add_block(&[0x11, 0x22]).unwrap_err().kind(),
         std::io::ErrorKind::Other

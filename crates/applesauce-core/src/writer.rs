@@ -79,7 +79,10 @@ impl<O: Open> Writer<O> {
             ));
         }
         let compressed_size = u32::try_from(new_block.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "compressed block exceeds u32 size")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "compressed block exceeds u32 size",
+            )
         })?;
 
         match &mut self.state {
