@@ -313,8 +313,7 @@ mod tests {
 
     #[test]
     fn rejects_unrepresentable_block_count_without_panicking() {
-        let error = Zlib::read_block_info(Cursor::new(Vec::<u8>::new()), u64::MAX)
-            .unwrap_err();
+        let error = Zlib::read_block_info(Cursor::new(Vec::<u8>::new()), u64::MAX).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
