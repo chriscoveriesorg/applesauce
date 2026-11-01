@@ -74,11 +74,7 @@ fn resource_fork_reader_rejects_inline_payload_and_empty_file_before_opening() {
     // The metadata for a resource-fork file is header-only and must
     // describe at least one block. Reject contradictions before I/O.
     for kind in Kind::ALL.into_iter().filter(|kind| kind.supported()) {
-        for (size, payload) in [
-            (0, &[][..]),
-            (0, &[0x42][..]),
-            (1, &[0x42][..]),
-        ] {
+        for (size, payload) in [(0, &[][..]), (0, &[0x42][..]), (1, &[0x42][..])] {
             let mut data = Vec::new();
             decmpfs::Value {
                 compression_type: decmpfs::CompressionType::new(
