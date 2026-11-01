@@ -205,6 +205,28 @@ impl Scratch {
         }
         platform::decode_with_scratch(self.codec, dst, src, scratch_ptr(&mut self.decode_words))
     }
+
+    /// Decode with reusable scratch and an exact expected output size.
+    ///
+    /// A full destination can mask truncated decompression in Apple's buffer
+    /// API. Reserve a one-byte guard and reject both shorter and longer output
+    /// before returning any bytes. This is a bounded allocating convenience
+    /// method; use `decode_into` with a guarded caller-owned buffer in timed
+    /// loops to avoid per-call allocations.
+    pub fn decode_exact(&mut self, src: &[u8], expected_size: usize) -> io::Result<Vec<u8>> {
+        validate_size(expected_size)?;
+        self.codec.ensure_supported()?;
+        let mut decoded = allocate(expected_size + 1)?;
+        let count = self.decode_into(&mut decoded, src)?;
+        if count != expected_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("decoded size {count} does not match expected size {expected_size}"),
+            ));
+        }
+        decoded.truncate(count);
+        Ok(decoded)
+    }
 }
 
 const MAX_SCRATCH_BYTES: usize = 128 * 1024 * 1024;
@@ -562,10 +584,22 @@ mod tests {
                     .unwrap();
                 assert_eq!(size, source.len());
                 assert_eq!(&reusable_decoded[..size], source);
+                assert_eq!(
+                    scratch
+                        .decode_exact(&reusable_encoded, source.len())
+                        .unwrap(),
+                    source
+                );
                 if source.len() > 1 {
                     assert!(codec.decode_exact(&encoded, source.len() - 1).is_err());
+                    assert!(scratch
+                        .decode_exact(&reusable_encoded, source.len() - 1)
+                        .is_err());
                 }
                 assert!(codec.decode_exact(&encoded, source.len() + 1).is_err());
+                assert!(scratch
+                    .decode_exact(&reusable_encoded, source.len() + 1)
+                    .is_err());
             }
         }
     }
