@@ -60,6 +60,9 @@ impl CompressorImpl for Lzbitmap {
             return Err(io::ErrorKind::UnexpectedEof.into());
         };
         if first == STORED_MARKER {
+            if rest.is_empty() {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
             if dst.len() < rest.len() {
                 return Err(io::ErrorKind::WriteZero.into());
             }
@@ -129,6 +132,21 @@ mod tests {
         let mut decoded = vec![0; input.len() + 1];
         let size = compressor.decompress(&mut decoded, &encoded).unwrap();
         assert_eq!(&decoded[..size], input);
+    }
+
+    #[test]
+    fn marker_only_stored_block_is_invalid() {
+        let mut compressor = native_compressor();
+        let mut output = [0xa5; 2];
+        let error = compressor.decompress(&mut output, &[STORED_MARKER]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(output, [0xa5; 2]);
+
+        let size = compressor
+            .decompress(&mut output, &[STORED_MARKER, 0x41])
+            .unwrap();
+        assert_eq!(size, 1);
+        assert_eq!(output[0], 0x41);
     }
 
     #[test]
