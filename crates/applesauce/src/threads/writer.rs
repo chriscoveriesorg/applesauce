@@ -162,8 +162,12 @@ impl Handler {
         let mut tmp_file = tmp_file_for(&item)?;
         copy_xattrs(&item.file, tmp_file.as_file())?;
 
-        let decmpfs_data = xattr::read(item.file.as_ref(), decmpfs::XATTR_NAME)?
-            .ok_or_else(|| io::Error::other("file is not compressed"))?;
+        let decmpfs_data = xattr::read(
+            item.file.as_ref(),
+            decmpfs::XATTR_NAME,
+            decmpfs::MAX_XATTR_SIZE,
+        )?
+        .ok_or_else(|| io::Error::other("file is not compressed"))?;
         let expected_size = decmpfs::Value::from_data(&decmpfs_data)?.uncompressed_size;
         let mut written_size = 0u64;
 

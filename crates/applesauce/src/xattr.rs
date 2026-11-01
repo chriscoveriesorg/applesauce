@@ -194,7 +194,14 @@ pub fn set<F: XattrSource + ?Sized>(
     }
 }
 
-pub fn read<F: XattrSource + ?Sized>(f: &F, xattr_name: &CStr) -> io::Result<Option<Vec<u8>>> {
+/// Read an xattr without allocating more than the caller's format permits.
+/// A size probe can report untrusted metadata, so enforce the limit before
+/// allocating and again after fetching the value.
+pub fn read<F: XattrSource + ?Sized>(
+    f: &F,
+    xattr_name: &CStr,
+    max_len: usize,
+) -> io::Result<Option<Vec<u8>>> {
     let mut buf = Vec::new();
 
     loop {
@@ -202,6 +209,12 @@ pub fn read<F: XattrSource + ?Sized>(f: &F, xattr_name: &CStr) -> io::Result<Opt
             Some(len) => len,
             None => return Ok(None),
         };
+        if len > max_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "xattr exceeds maximum allowed size",
+            ));
+        }
         if len > buf.len() {
             buf.resize(len, 0);
         }
@@ -219,6 +232,12 @@ pub fn read<F: XattrSource + ?Sized>(f: &F, xattr_name: &CStr) -> io::Result<Opt
             };
         }
         let new_len = rc as usize;
+        if new_len > max_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "xattr exceeds maximum allowed size",
+            ));
+        }
         match len.cmp(&new_len) {
             Ordering::Less => {
                 buf.truncate(new_len);
@@ -286,4 +305,68 @@ pub fn with_names<T: XattrSource + ?Sized, F: FnMut(&CStr) -> io::Result<()>>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use applesauce_core::decmpfs;
+    use std::cell::Cell;
+
+    struct MockXattr {
+        data: Vec<u8>,
+        reads: Cell<usize>,
+    }
+
+    impl XattrSource for MockXattr {
+        unsafe fn get_xattr(&self, _: &CStr, value: *mut u8, size: usize) -> ssize_t {
+            self.reads.set(self.reads.get() + 1);
+            if value.is_null() {
+                return self.data.len() as ssize_t;
+            }
+            if size < self.data.len() {
+                return -1;
+            }
+            // SAFETY: the caller supplied a writable buffer of at least
+            // data.len() bytes, checked immediately above.
+            unsafe { ptr::copy_nonoverlapping(self.data.as_ptr(), value, self.data.len()) };
+            self.data.len() as ssize_t
+        }
+
+        unsafe fn set_xattr(&self, _: &CStr, _: *const u8, _: usize, _: u32) -> c_int {
+            -1
+        }
+
+        unsafe fn remove_xattr(&self, _: &CStr) -> c_int {
+            -1
+        }
+
+        unsafe fn list_xattr(&self, _: *mut u8, _: usize) -> ssize_t {
+            -1
+        }
+    }
+
+    #[test]
+    fn oversized_decmpfs_xattr_is_rejected_before_allocation_or_read() {
+        let xattr = MockXattr {
+            data: vec![0xa5; decmpfs::MAX_XATTR_SIZE + 1],
+            reads: Cell::new(0),
+        };
+        let error = read(&xattr, decmpfs::XATTR_NAME, decmpfs::MAX_XATTR_SIZE).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(xattr.reads.get(), 1, "oversized value must not be fetched");
+    }
+
+    #[test]
+    fn decmpfs_xattr_at_size_limit_is_read_exactly() {
+        let xattr = MockXattr {
+            data: vec![0x5a; decmpfs::MAX_XATTR_SIZE],
+            reads: Cell::new(0),
+        };
+        let value = read(&xattr, decmpfs::XATTR_NAME, decmpfs::MAX_XATTR_SIZE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, xattr.data);
+        assert_eq!(xattr.reads.get(), 2);
+    }
 }
