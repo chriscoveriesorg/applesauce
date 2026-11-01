@@ -114,6 +114,19 @@ jobs:
             2>&1 | tee "$PROBE_RESULTS/rust-buffer-tests.log"
           cargo test --locked -p applesauce-cli --features lzbitmap codecs::tests:: \
             2>&1 | tee "$PROBE_RESULTS/rust-cli-tests.log"
+      - name: Smoke-check versioned benchmark fixtures and speed harness
+        env:
+          APPLESAUCE_BENCH_SUITE: smoke
+        run: |
+          set -euo pipefail
+          cargo test --locked -p applesauce-core --test benchmark_fixtures \
+            2>&1 | tee "$PROBE_RESULTS/benchmark-fixtures-tests.log"
+          python3 -m unittest discover -s hack -p test_benchmark_summary.py \
+            2>&1 | tee "$PROBE_RESULTS/benchmark-summary-tests.log"
+          cargo bench --locked -p applesauce-core --bench modern_buffer -- --test \
+            2>&1 | tee "$PROBE_RESULTS/benchmark-smoke-tests.log"
+          printf '## Benchmark harness\n\nDeterministic fixtures, CSV report parser, and macOS public-buffer encode/decode smoke cases passed. Full timed Criterion runs are manual-only.\n' \
+            >> "$GITHUB_STEP_SUMMARY"
       - name: Exercise read-only Rust capabilities and generated buffer benchmark
         run: |
           set -euo pipefail

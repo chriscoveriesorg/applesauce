@@ -1,0 +1,90 @@
+name: Benchmark Apple buffer codecs (speed and ratio)
+
+# Intentionally manual: shared runners are too noisy for an automated
+# performance-regression gate. The macOS CI workflow separately checks the
+# smoke suite for correctness on every relevant PR.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Generated data and number of benchmark cases'
+        type: choice
+        options: [smoke, standard, extended]
+        default: standard
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  criterion:
+    runs-on: xcode-27
+    timeout-minutes: 120
+    env:
+      APPLESAUCE_BENCH_SUITE: ${{ inputs.suite }}
+      APPLESAUCE_BENCH_MANIFEST: target/applesauce-bench/manifest.csv
+      BENCH_RESULTS: target/applesauce-bench
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Capture exact software and hardware provenance
+        run: |
+          set -euo pipefail
+          mkdir -p "$BENCH_RESULTS"
+          {
+            printf 'UTC: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            printf 'Commit: %s\n' "$GITHUB_SHA"
+            printf 'Suite: %s\n' "$APPLESAUCE_BENCH_SUITE"
+            printf 'Runner: %s\n' "$RUNNER_NAME"
+            sw_vers
+            uname -srm
+            sysctl -n hw.model || true
+            sysctl -n machdep.cpu.brand_string || true
+            sysctl -n hw.logicalcpu || true
+            sysctl -n hw.memsize || true
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            rustc --version --verbose
+            cargo --version
+          } 2>&1 | tee "$BENCH_RESULTS/environment.txt"
+      - name: Run Criterion with warmup, sampling and confidence intervals
+        run: |
+          set -euo pipefail
+          case "$APPLESAUCE_BENCH_SUITE" in
+            smoke)
+              warmup=1; measurement=2; samples=20 ;;
+            standard)
+              warmup=1; measurement=3; samples=30 ;;
+            extended)
+              warmup=2; measurement=5; samples=50 ;;
+            *)
+              printf 'Unknown benchmark suite: %s\n' "$APPLESAUCE_BENCH_SUITE" >&2
+              exit 2 ;;
+          esac
+          printf 'Criterion: %s warmup=%ss measurement=%ss samples=%s\n' \
+            "$APPLESAUCE_BENCH_SUITE" "$warmup" "$measurement" "$samples" \
+            | tee "$BENCH_RESULTS/config.txt"
+          cargo bench --locked -p applesauce-core --bench modern_buffer -- \
+            --noplot --warm-up-time "$warmup" \
+            --measurement-time "$measurement" --sample-size "$samples" \
+            2>&1 | tee "$BENCH_RESULTS/criterion.log"
+      - name: Produce complete per-case CSV and concise comparison
+        run: |
+          set -euo pipefail
+          python3 hack/summarize-benchmarks.py \
+            "$APPLESAUCE_BENCH_MANIFEST" target/criterion \
+            "$BENCH_RESULTS/summary.csv" \
+            | tee "$BENCH_RESULTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nRaw Criterion estimates and samples are available in the downloadable artifact.\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain raw evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: applesauce-criterion-${{ inputs.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/applesauce-bench/**
+            target/criterion/**
+          retention-days: 90
+          if-no-files-found: warn

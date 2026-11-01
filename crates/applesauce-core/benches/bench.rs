@@ -37,7 +37,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     #[cfg(feature = "zlib")]
     group.bench_function("zlib", |b| {
         let mut dst = vec![0; data.len() + 1024];
-        let mut compressor = Compressor::lzvn();
+        let mut compressor = Compressor::zlib();
         b.iter(|| {
             let res = compressor.compress(&mut dst, &data, 5).unwrap();
 

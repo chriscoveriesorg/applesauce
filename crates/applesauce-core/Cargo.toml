@@ -34,9 +34,14 @@ lzfse-sys = { version = "=2.0.0", optional = true }
 [dev-dependencies]
 rand = "0.10.1"
 criterion = { version = "0.8.2", features = ["html_reports"] }
+sha2 = "0.11.1"
 
 [[bench]]
 name = "bench"
+harness = false
+
+[[bench]]
+name = "modern_buffer"
 harness = false
 
 [lints]

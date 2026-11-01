@@ -47,6 +47,19 @@ maximum). It never compresses that file on disk, changes xattrs, or uploads it.
 Results compare whole buffers with independent 64 KiB buffers; these are raw
 payload measurements, not APFS allocation savings.
 
+### Reproducible speed and ratio benchmarks
+
+The [benchmark standards](hack/benchmark-standard.md) define deterministic
+chat JSONL, mixed JSONL, structured binary, high-entropy and zero-filled
+workloads, fixed sizes, SHA-256 fixture identities, per-algorithm encode/decode
+MiB/s, 64 KiB independent blocks, and scratch-reuse comparisons. The
+[Benchmark Apple buffer codecs](https://github.com/chriscoveriesorg/applesauce/actions/workflows/benchmark-codecs.yml)
+workflow has a **Run workflow** button with `smoke`, `standard` and `extended`
+presets. It uploads raw Criterion samples, confidence intervals, environment,
+compression ratios and a per-case CSV; PR CI validates the smoke suite.
+These measurements concern the public in-memory buffer API—not transparent
+APFS compression or filesystem read/write throughput.
+
 For the optional native LZBitmap writer, build with
 `cargo build --locked --release -p applesauce-cli --features lzbitmap`.
 Then check `./target/release/applesauce capabilities --json --require-native lzbitmap`
