@@ -8,6 +8,9 @@ use std::{io, ptr};
 const FLAGS: c_int = libc::XATTR_SHOWCOMPRESSION;
 // A concurrently changing attribute must not keep a caller spinning forever.
 const MAX_XATTR_READ_ATTEMPTS: usize = 8;
+// Refuse implausibly large, untrusted listxattr size probes before allocating.
+// A 1 MiB budget accommodates many normal attributes and bounds memory use.
+const MAX_XATTR_NAMES_BYTES: usize = 1024 * 1024;
 
 pub trait XattrSource {
     unsafe fn get_xattr(&self, xattr_name: &CStr, value: *mut u8, size: usize) -> ssize_t;
@@ -270,7 +273,17 @@ fn raw_names<F: XattrSource + ?Sized>(f: &F) -> io::Result<Vec<u8>> {
             };
         }
         let size = rc as usize;
+        if size > MAX_XATTR_NAMES_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "xattr name list exceeds maximum allowed size",
+            ));
+        }
         if size > buf.len() {
+            // Size probes come from the filesystem. Allocate fallibly so an
+            // enormous or changing list cannot panic or exhaust memory.
+            buf.try_reserve_exact(size - buf.len())
+                .map_err(io::Error::other)?;
             buf.resize(size, 0);
         }
 
@@ -285,10 +298,10 @@ fn raw_names<F: XattrSource + ?Sized>(f: &F) -> io::Result<Vec<u8>> {
             };
         }
         let size = rc as usize;
-        if size > buf.len() {
+        if size > MAX_XATTR_NAMES_BYTES || size > buf.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "xattr name reader reported more bytes than the destination can hold",
+                "xattr name reader returned an invalid length",
             ));
         }
         buf.truncate(size);
@@ -449,6 +462,31 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(xattr.probes.get(), MAX_XATTR_READ_ATTEMPTS);
         assert_eq!(xattr.reads.get(), MAX_XATTR_READ_ATTEMPTS);
+    }
+
+    #[test]
+    fn oversized_xattr_name_list_is_rejected_before_fetching() {
+        // A forged listxattr size probe must never allocate its claimed
+        // storage or invoke the read side of the API.
+        struct OversizedNames;
+        impl XattrSource for OversizedNames {
+            unsafe fn get_xattr(&self, _: &CStr, _: *mut u8, _: usize) -> ssize_t {
+                panic!("unrelated xattr lookup")
+            }
+            unsafe fn set_xattr(&self, _: &CStr, _: *const u8, _: usize, _: u32) -> c_int {
+                panic!("unrelated xattr mutation")
+            }
+            unsafe fn remove_xattr(&self, _: &CStr) -> c_int {
+                panic!("unrelated xattr mutation")
+            }
+            unsafe fn list_xattr(&self, names: *mut u8, _: usize) -> ssize_t {
+                assert!(names.is_null(), "oversized name list must not be fetched");
+                (MAX_XATTR_NAMES_BYTES + 1) as ssize_t
+            }
+        }
+
+        let err = raw_names(&OversizedNames).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
