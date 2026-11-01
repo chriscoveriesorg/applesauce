@@ -52,10 +52,7 @@ impl<O: Open> Writer<O> {
             // Native resource-fork formats use 32-bit block counts/offsets.
             // Validate before opening or seeking into the target resource fork.
             let header_size = kind.header_size(block_count);
-            if u32::try_from(block_count).is_err()
-                || u32::try_from(header_size.checked_add(block_count).unwrap_or(u64::MAX))
-                    .is_err()
-            {
+            if header_size.saturating_add(block_count) > u64::from(u32::MAX) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "resource fork block table cannot fit in 32-bit offsets",
