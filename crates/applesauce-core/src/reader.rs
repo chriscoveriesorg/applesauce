@@ -32,6 +32,7 @@ enum State<R> {
 pub struct Reader<R> {
     kind: compressor::Kind,
     state: State<R>,
+    failed: bool,
 }
 
 impl<R: Read + Seek> Reader<R> {
@@ -64,10 +65,34 @@ impl<R: Read + Seek> Reader<R> {
                 }
             }
         };
-        Ok(Self { kind, state })
+        Ok(Self {
+            kind,
+            state,
+            failed: false,
+        })
     }
 
+    /// Appends one compressed block to `dst`. If a read fails, any partial
+    /// bytes are discarded and the reader is poisoned so a later call cannot
+    /// silently skip the failed block.
     pub fn read_block_into(&mut self, dst: &mut Vec<u8>) -> io::Result<bool> {
+        if self.failed {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "compressed reader cannot be reused after a failed read",
+            ));
+        }
+
+        let original_len = dst.len();
+        let result = self.read_block_into_inner(dst);
+        if result.is_err() {
+            dst.truncate(original_len);
+            self.failed = true;
+        }
+        result
+    }
+
+    fn read_block_into_inner(&mut self, dst: &mut Vec<u8>) -> io::Result<bool> {
         match &mut self.state {
             State::Xattr(cursor) => cursor.read_to_end(dst).map(|bytes_read| bytes_read > 0),
             State::ResourceFork {
@@ -75,24 +100,28 @@ impl<R: Read + Seek> Reader<R> {
                 last_offset,
                 reader,
             } => {
-                let block = match block_infos.pop() {
+                let block = match block_infos.last().copied() {
                     Some(block) => block,
                     None => return Ok(false),
                 };
                 let diff = i64::from(block.offset) - i64::from(*last_offset);
                 reader.seek_relative(diff)?;
 
-                let bytes_read = reader
-                    .by_ref()
-                    .take(block.compressed_size.into())
-                    .read_to_end(dst)?;
-                if bytes_read < block.compressed_size as usize {
-                    return Err(io::ErrorKind::UnexpectedEof.into());
-                }
+                // Block lengths are known from the validated resource-fork
+                // table. Reuse the caller's buffer and read exactly once
+                // rather than growing it in read_to_end increments.
+                let size = usize::try_from(block.compressed_size)
+                    .map_err(|_| io::ErrorKind::InvalidData)?;
+                dst.try_reserve_exact(size).map_err(io::Error::other)?;
+                let start = dst.len();
+                dst.resize(start + size, 0);
+                reader.read_exact(&mut dst[start..])?;
+
                 *last_offset = block
                     .offset
                     .checked_add(block.compressed_size)
                     .ok_or(io::ErrorKind::InvalidData)?;
+                block_infos.pop();
                 Ok(true)
             }
         }

@@ -19,6 +19,80 @@ fn invalid_magic() {
     assert_eq!(reader_err.kind(), std::io::ErrorKind::InvalidData);
 }
 
+#[cfg(feature = "zlib")]
+#[test]
+fn partial_resource_fork_read_preserves_output_and_fails_closed() {
+    use applesauce_core::writer::Writer;
+    use applesauce_core::BLOCK_SIZE;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // Only fail reads after the resource-fork table and trailer have passed
+    // validation during Reader::new. A one-byte read followed by an injected
+    // error exercises partial payload delivery through BufReader.
+    struct FailingRead {
+        cursor: Cursor<Vec<u8>>,
+        armed: Arc<AtomicBool>,
+        delivered: bool,
+    }
+
+    impl Read for FailingRead {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.armed.load(Ordering::SeqCst) {
+                return self.cursor.read(buf);
+            }
+            if self.delivered {
+                return Err(std::io::Error::other("injected payload read failure"));
+            }
+            self.delivered = true;
+            let len = buf.len().min(1);
+            self.cursor.read(&mut buf[..len])
+        }
+    }
+
+    impl Seek for FailingRead {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.cursor.seek(pos)
+        }
+    }
+
+    let mut resource_fork = Vec::new();
+    let mut writer = Writer::new(Kind::Zlib, BLOCK_SIZE as u64 + 1, || {
+        Cursor::new(&mut resource_fork)
+    })
+    .unwrap();
+    writer.add_block(&vec![0x41; 16 * 1024]).unwrap();
+    writer.add_block(&[0x42; 4]).unwrap();
+    let mut metadata = Vec::new();
+    writer.finish_decmpfs_data(&mut metadata).unwrap();
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&armed);
+    let mut reader = Reader::new(&metadata, || FailingRead {
+        cursor: Cursor::new(resource_fork),
+        armed: flag,
+        delivered: false,
+    })
+    .unwrap();
+    assert_eq!(reader.remaining_blocks(), 2);
+    armed.store(true, Ordering::SeqCst);
+
+    let mut output = vec![0xa5, 0x5a];
+    assert_eq!(
+        reader.read_block_into(&mut output).unwrap_err().kind(),
+        std::io::ErrorKind::Other
+    );
+    assert_eq!(output, [0xa5, 0x5a], "partial bytes must be rolled back");
+    assert_eq!(reader.remaining_blocks(), 2, "failed block remains pending");
+    assert_eq!(
+        reader.read_block_into(&mut output).unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe,
+        "retry must fail closed rather than skip a corrupted block"
+    );
+    assert_eq!(output, [0xa5, 0x5a]);
+}
+
 fn round_trip(kind: Kind, uncompressed_data: &[u8]) {
     let mut compressor = kind.compressor().unwrap();
 
