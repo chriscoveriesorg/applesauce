@@ -103,7 +103,15 @@ impl<I: Impl> CompressorImpl for Lz<I> {
         // src is initialised for len bytes
         // buf is valid to write up to scratch size bytes
         let len = unsafe { I::encode(&mut dst[..max_compress_size], src, self.buf) };
-        debug_assert!(len <= max_compress_size);
+        // A faulty codec must not report bytes beyond the output slice.
+        // A debug assertion would panic in development but allow invalid
+        // compressed block lengths to reach the writer in release builds.
+        if len > max_compress_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LZ encoder returned more bytes than its destination capacity",
+            ));
+        }
 
         if len == 0 {
             let uncompressed_prefix = I::UNCOMPRESSED_PREFIX.ok_or(io::ErrorKind::WriteZero)?;
@@ -184,6 +192,47 @@ mod tests {
             dst[0] = src[0];
             1
         }
+    }
+
+    // Deliberately violate the encoder's output-length contract. Both the
+    // stored-marker and direct-encoding paths must fail closed in release
+    // builds instead of returning a length outside the provided buffer.
+    struct OversizedEncoder<const STORED: bool>;
+
+    // SAFETY: This test implementation does not access scratch or write
+    // outside any slice; it only reports a deliberately invalid length.
+    unsafe impl<const STORED: bool> Impl for OversizedEncoder<STORED> {
+        const UNCOMPRESSED_PREFIX: Option<u8> = if STORED { Some(0x06) } else { None };
+
+        fn scratch_size() -> usize {
+            0
+        }
+
+        unsafe fn encode(dst: &mut [u8], _: &[u8], _: NonNull<u8>) -> usize {
+            dst.len() + 1
+        }
+
+        unsafe fn decode(_: &mut [u8], _: &[u8], _: NonNull<u8>) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn oversized_encoder_result_is_rejected_with_and_without_stored_marker() {
+        let input = [0xa5; 8];
+        let mut output = [0x5a; 16];
+
+        let error = Lz::<OversizedEncoder<true>>::new()
+            .compress(&mut output, &input, 0)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(output, [0x5a; 16]);
+
+        let error = Lz::<OversizedEncoder<false>>::new()
+            .compress(&mut output, &input, 0)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(output, [0x5a; 16]);
     }
 
     #[test]
