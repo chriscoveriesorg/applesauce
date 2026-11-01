@@ -181,6 +181,43 @@ impl super::CompressorImpl for Zlib {
             u32::try_from(block_sizes.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
         let data_end =
             u32::try_from(writer.stream_position()?).map_err(|_| io::ErrorKind::InvalidInput)?;
+
+        // Preflight the complete resource-fork layout before writing the
+        // trailer or header. The block table must describe exactly the
+        // payload written so far, and the trailer must fit 32-bit offsets.
+        let block_start = Self::header_size(u64::from(block_count));
+        let max_data_end = u64::from(u32::MAX) - Self::trailer_size();
+        if block_start > max_data_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "zlib resource-fork block table exceeds 32-bit offsets",
+            ));
+        }
+        let expected_data_end = block_sizes.iter().try_fold(block_start, |offset, &size| {
+            if size == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "zlib resource-fork blocks must be nonempty",
+                ));
+            }
+            offset
+                .checked_add(u64::from(size))
+                .filter(|&end| end <= max_data_end)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "zlib resource-fork offsets exceed 32 bits",
+                    )
+                })
+        })?;
+        if u64::from(data_end) != expected_data_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "zlib resource-fork block lengths do not match written data",
+            ));
+        }
+        let table_start = u32::try_from(block_start - ZLIB_BLOCK_TABLE_START)
+            .map_err(|_| io::ErrorKind::InvalidInput)?;
         writer.write_all(&ZLIB_TRAILER)?;
 
         // This is logically a non-modifying operation, even if it takes &mut self, and can fail
@@ -199,8 +236,7 @@ impl super::CompressorImpl for Zlib {
         writer.write_all(&u32::to_be_bytes(data_end - 0x104))?;
 
         writer.write_all(&u32::to_le_bytes(block_count))?;
-        let mut current_offset =
-            u32::try_from(Self::header_size(block_count.into()) - ZLIB_BLOCK_TABLE_START).unwrap();
+        let mut current_offset = table_start;
         for &size in block_sizes {
             let block_info = BlockInfo {
                 offset: current_offset,
@@ -346,6 +382,25 @@ mod tests {
         let mut header_overlap = valid;
         header_overlap[0x108..0x10c].copy_from_slice(&0u32.to_le_bytes());
         assert!(Zlib::read_block_info(Cursor::new(header_overlap), original_size).is_err());
+    }
+
+    #[test]
+    fn invalid_finalizer_layout_cannot_modify_the_resource_fork() {
+        let block_start = Zlib::header_size(1);
+        let original = vec![0xa5; (block_start + 16) as usize];
+        for (position, sizes) in [
+            (0u64, vec![1u32]),
+            (block_start, vec![0]),
+            (block_start + 2, vec![1]),
+            (block_start + 1, vec![u32::MAX]),
+        ] {
+            let mut cursor = Cursor::new(original.clone());
+            cursor.set_position(position);
+            let error = Zlib::finish(&mut cursor, &sizes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(cursor.get_ref(), &original);
+            assert_eq!(cursor.position(), position);
+        }
     }
 
     #[test]
