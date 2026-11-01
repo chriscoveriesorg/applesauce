@@ -272,7 +272,9 @@ mod tests {
     #[test]
     fn huge_claimed_table_with_truncated_entries_fails_without_eager_allocation() {
         // Model a sparse/forged resource fork: its reported length fits a
-        // million-block table, but only the first offset is readable.
+        // million-block table plus one byte per block, but only the first
+        // offset is readable. This exercises the truncated-entry path after
+        // the minimum-payload preflight succeeds.
         // The parser must read entries before allocating their metadata.
         struct SparseFork(Cursor<[u8; 4]>);
 
@@ -285,7 +287,7 @@ mod tests {
         impl io::Seek for SparseFork {
             fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
                 match pos {
-                    SeekFrom::End(0) => Ok(header_size(1_000_000)),
+                    SeekFrom::End(0) => Ok(header_size(1_000_000) + 1_000_000),
                     other => io::Seek::seek(&mut self.0, other),
                 }
             }
