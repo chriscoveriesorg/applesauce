@@ -121,7 +121,7 @@ jobs:
           set -euo pipefail
           cargo test --locked -p applesauce-core --test benchmark_fixtures \
             2>&1 | tee "$PROBE_RESULTS/benchmark-fixtures-tests.log"
-          python3 -m unittest discover -s hack -p test_benchmark_summary.py \
+          python3 -m unittest discover -s hack -p 'test_benchmark_*.py' \
             2>&1 | tee "$PROBE_RESULTS/benchmark-summary-tests.log"
           cargo bench --locked -p applesauce-core --bench modern_buffer -- --test \
             2>&1 | tee "$PROBE_RESULTS/benchmark-smoke-tests.log"
