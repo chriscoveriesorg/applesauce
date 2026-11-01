@@ -142,9 +142,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(output, [0xa5; 2]);
 
-        let size = compressor
-            .decompress(&mut output, &[STORED_MARKER, 0x41])
-            .unwrap();
+        let size = compressor.decompress(&mut output, &[STORED_MARKER, 0x41]).unwrap();
         assert_eq!(size, 1);
         assert_eq!(output[0], 0x41);
     }
