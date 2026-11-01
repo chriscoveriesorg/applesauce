@@ -8,6 +8,7 @@ an error: an incomplete run should not look like a successful comparison.
 
 import csv
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -47,7 +48,7 @@ def median_ns(root: Path, row: dict[str, str], operation: str) -> float:
     path = root / relative
     with path.open(encoding="utf-8") as handle:
         duration = float(json.load(handle)["median"]["point_estimate"])
-    if duration <= 0:
+    if not math.isfinite(duration) or duration <= 0:
         raise ValueError(f"invalid {operation} median in {path}")
     return duration
 
@@ -60,12 +61,23 @@ def summarize(manifest: Path, criterion: Path, output: Path) -> list[dict[str, s
         rows = list(reader)
     if not rows:
         raise ValueError("empty benchmark manifest")
+    seen_cases: set[tuple[str, ...]] = set()
     for row in rows:
         if row["verified_roundtrip"] != "true":
             raise ValueError(f"unverified benchmark: {row}")
         if row["schema_version"] != "1" or row["fixture_version"] != "1":
             raise ValueError("unknown benchmark/fixture version")
+        # A duplicate case can silently inflate reports or hide a corrupted
+        # manifest; every codec/layout/scratch combination is unique.
+        case = tuple(row[key] for key in (
+            "suite", "workload", "input_bytes", "layout", "codec", "scratch_mode"
+        ))
+        if case in seen_cases:
+            raise ValueError(f"duplicate benchmark case: {case}")
+        seen_cases.add(case)
         size = int(row["input_bytes"])
+        if size <= 0:
+            raise ValueError(f"invalid benchmark input size: {size}")
         for operation in ("encode", "decode"):
             ns = median_ns(criterion, row, operation)
             row[f"{operation}_median_ns"] = f"{ns:.5f}"
