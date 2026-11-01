@@ -5,7 +5,7 @@ use applesauce::compressor::Kind;
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -471,6 +471,16 @@ fn read_bounded(reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+// A same-size in-place rewrite can restore its mtime. Unix ctime (inode
+// status-change time, not creation time) gives us an additional read-only
+// check before trusting benchmark data from a supposedly stable copy.
+fn metadata_stable(before: &std::fs::Metadata, after: &std::fs::Metadata) -> io::Result<bool> {
+    Ok(before.len() == after.len()
+        && before.modified()? == after.modified()?
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec())
+}
+
 fn read_bounded_file(path: &Path) -> io::Result<Vec<u8>> {
     // O_NONBLOCK prevents a raced-in FIFO from hanging before fstat. O_NOFOLLOW
     // refuses a final-component symlink. No write mode is ever requested.
@@ -487,10 +497,7 @@ fn read_bounded_file(path: &Path) -> io::Result<Vec<u8>> {
     }
     let bytes = read_bounded(&mut file, MAX_BUFFER_BYTES)?;
     let after = file.metadata()?;
-    if before.len() != after.len()
-        || bytes.len() as u64 != before.len()
-        || before.modified()? != after.modified()?
-    {
+    if !metadata_stable(&before, &after)? || bytes.len() as u64 != before.len() {
         return Err(io::Error::other(
             "input changed while being read; benchmark a stable copy",
         ));
@@ -578,6 +585,29 @@ mod tests {
         assert!(read_bounded(&b""[..], 4).is_err());
         assert_eq!(read_bounded(&b"abcd"[..], 4).unwrap(), b"abcd");
         assert!(read_bounded(&b"abcde-more-data"[..], 4).is_err());
+    }
+
+    #[test]
+    fn benchmark_metadata_detects_rewrite_with_restored_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stable.jsonl");
+        std::fs::write(&path, b"modified test data").unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let original_mtime = before.modified().unwrap();
+
+        // Keep file length and mtime unchanged, like a writer that attempts
+        // to replace data while a benchmark reads an existing file.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::fs::write(&path, b"replaced test data").unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+        let after = std::fs::metadata(&path).unwrap();
+
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert!(!metadata_stable(&before, &after).unwrap());
     }
 
     #[test]
