@@ -234,6 +234,23 @@ impl Kind {
         }
     }
 
+    /// Fixed footer bytes reserved for native resource-fork metadata.
+    #[must_use]
+    pub(crate) fn trailer_size(self) -> u64 {
+        match self {
+            #[cfg(feature = "zlib")]
+            Kind::Zlib => Zlib::trailer_size(),
+            #[cfg(feature = "lzvn")]
+            Kind::Lzvn => Lzvn::trailer_size(),
+            #[cfg(feature = "lzfse")]
+            Kind::Lzfse => Lzfse::trailer_size(),
+            #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
+            Kind::Lzbitmap => Lzbitmap::trailer_size(),
+            #[allow(unreachable_patterns)]
+            _ => panic!("Unsupported compression kind {self}"),
+        }
+    }
+
     pub fn read_block_info<R: io::Read + io::Seek>(
         self,
         reader: R,
