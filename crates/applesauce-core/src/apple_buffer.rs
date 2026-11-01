@@ -143,6 +143,8 @@ impl Codec {
     pub fn decode_exact(self, src: &[u8], expected_size: usize) -> io::Result<Vec<u8>> {
         validate_size(expected_size)?;
         self.ensure_supported()?;
+        // Reject empty compressed payloads before allocating up to 64 MiB.
+        validate_encoded_input(src)?;
         let mut decoded = allocate(expected_size + 1)?;
         let count = self.decode_into(&mut decoded, src)?;
         if count != expected_size {
@@ -216,6 +218,8 @@ impl Scratch {
     pub fn decode_exact(&mut self, src: &[u8], expected_size: usize) -> io::Result<Vec<u8>> {
         validate_size(expected_size)?;
         self.codec.ensure_supported()?;
+        // Reject empty compressed payloads before allocating up to 64 MiB.
+        validate_encoded_input(src)?;
         let mut decoded = allocate(expected_size + 1)?;
         let count = self.decode_into(&mut decoded, src)?;
         if count != expected_size {
@@ -262,6 +266,17 @@ fn validate_size(size: usize) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "buffer size must be 1 byte through 64 MiB",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_encoded_input(src: &[u8]) -> io::Result<()> {
+    if src.is_empty() {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty compressed input",
         ))
     } else {
         Ok(())
@@ -542,6 +557,41 @@ mod tests {
         assert_eq!(aligned_words(65).unwrap().len(), 2);
         assert_eq!(align_of::<AlignedScratch>(), 64);
         assert!(aligned_words(MAX_SCRATCH_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn empty_compressed_input_is_rejected_by_preallocation_guard() {
+        assert_eq!(
+            validate_encoded_input(&[]).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(validate_encoded_input(&[0x41]).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_decode_exact_payload_does_not_allocate_maximum_output() {
+        // MAX_BUFFER_BYTES would otherwise allocate 64 MiB per invalid
+        // request before decode_into notices the empty compressed payload.
+        for codec in Codec::ALL.into_iter().filter(|codec| codec.is_supported()) {
+            assert_eq!(
+                codec
+                    .decode_exact(&[], MAX_BUFFER_BYTES)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput,
+                "{codec:?}"
+            );
+            let mut scratch = codec.reusable_scratch().unwrap();
+            assert_eq!(
+                scratch
+                    .decode_exact(&[], MAX_BUFFER_BYTES)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput,
+                "{codec:?}"
+            );
+        }
     }
 
     #[test]
