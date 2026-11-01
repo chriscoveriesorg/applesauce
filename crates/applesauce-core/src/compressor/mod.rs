@@ -112,6 +112,15 @@ impl Compressor {
     }
 
     pub fn compress(&mut self, dst: &mut [u8], src: &[u8], level: u32) -> io::Result<usize> {
+        // A compressed block must contain logical data. Empty inputs can
+        // produce marker-only stored blocks that the decoders rightly reject.
+        // Fail before invoking any codec or modifying the caller's buffer.
+        if src.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot compress an empty block",
+            ));
+        }
         match self.0 {
             #[cfg(feature = "zlib")]
             Data::Zlib(ref mut i) => i.compress(dst, src, level),
@@ -324,6 +333,21 @@ mod tests {
                 let error = compressor.compress(&mut output, &input, 5).unwrap_err();
                 assert_eq!(error.kind(), io::ErrorKind::WriteZero, "{kind}");
                 assert!(output.iter().all(|&byte| byte == 0x5a), "{kind}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_compressor_input_is_rejected_without_modifying_destination() {
+        for kind in Kind::ALL {
+            let Some(mut compressor) = kind.compressor() else {
+                continue;
+            };
+            for capacity in [0, 1, 16] {
+                let mut output = vec![0xa5; capacity];
+                let error = compressor.compress(&mut output, &[], 5).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{kind}");
+                assert!(output.iter().all(|&byte| byte == 0xa5), "{kind}");
             }
         }
     }
