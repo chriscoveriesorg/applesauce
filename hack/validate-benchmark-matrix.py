@@ -18,7 +18,7 @@ CODECS = ("zlib", "lzfse", "lzbitmap", "lzmesh", "lzraven")
 WORKLOADS = ("chat-jsonl", "mixed-jsonl", "binary-records", "entropy", "zeros")
 SIZES = {
     "smoke": (65536,),
-    "standard": (4096, 65536, 1048576),
+    "standard": (4096, 65536, 1048576, 8388608),
     "extended": (4096, 65536, 1048576, 8388608),
 }
 GOLDEN_SHA256 = {

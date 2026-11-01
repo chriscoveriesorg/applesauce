@@ -15,7 +15,7 @@ download its `applesauce-criterion-…` artifact. Runs use the macOS 27
 | Suite | Generated workloads | Uncompressed sizes | Layouts | Scratch comparison | Typical use |
 |---|---|---|---|---|---|
 | `smoke` | Chat JSONL-like, entropy | 64 KiB | Whole | Both | Correctness/quick measurement |
-| `standard` (default) | All five | 4 KiB, 64 KiB, 1 MiB | Whole, plus 1 MiB independent 64 KiB | Reused throughout; API-managed for representative Chat/entropy | Repeatable comparison |
+| `standard` (default) | All five | 4 KiB, 64 KiB, 1 MiB, 8 MiB | Whole, plus 1/8 MiB independent 64 KiB | Reused throughout; API-managed for representative Chat/entropy | Full-size repeatable comparison (170 cases) |
 | `extended` | All five | 4 KiB, 64 KiB, 1 MiB, 8 MiB | Whole, plus 1/8 MiB independent 64 KiB | Both throughout | Detailed scaling / scratch study |
 
 The fixture generator in
