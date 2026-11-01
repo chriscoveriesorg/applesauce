@@ -62,9 +62,57 @@ class BenchmarkSummaryTests(unittest.TestCase):
             self.assertIn("lzraven", summary.markdown(rows))
             with output.open(encoding="utf-8") as result:
                 self.assertEqual(len(list(csv.DictReader(result))), 1)
-            (criterion / "apple-buffer_smoke_65536_chat-jsonl_whole/lzraven-reused-scratch/decode/new/estimates.json").unlink()
+            estimate = (
+                criterion
+                / "apple-buffer_smoke_65536_chat-jsonl_whole/lzraven-reused-scratch"
+                / "encode/new/estimates.json"
+            )
+            # JSON permits nonstandard NaN/Infinity tokens in Python; the old
+            # <= 0 check accepted them and emitted fabricated throughput.
+            invalid_values = (
+                0, -1, float("nan"), float("inf"), -float("inf"),
+                None, True, "2.5", [], {}, 10 ** 400,
+            )
+            for invalid in invalid_values:
+                with self.subTest(invalid=repr(invalid)):
+                    estimate.write_text(
+                        json.dumps({"median": {"point_estimate": invalid}}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "invalid encode median"):
+                        summary.summarize(manifest, criterion, output)
+            estimate.write_text(
+                json.dumps({"median": {"point_estimate": 1_000_000}}),
+                encoding="utf-8",
+            )
+
+            decode = (
+                criterion
+                / "apple-buffer_smoke_65536_chat-jsonl_whole/lzraven-reused-scratch"
+                / "decode/new/estimates.json"
+            )
+            decode.unlink()
             with self.assertRaises(FileNotFoundError):
                 summary.summarize(manifest, criterion, output)
+            decode.write_text(
+                json.dumps({"median": {"point_estimate": 500_000}}),
+                encoding="utf-8",
+            )
+
+            with manifest.open("a", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=summary.FIELDS)
+                writer.writerow(row)
+            with self.assertRaisesRegex(ValueError, "duplicate benchmark case"):
+                summary.summarize(manifest, criterion, output)
+
+            for invalid_size in ("0", "-1"):
+                row["input_bytes"] = invalid_size
+                with manifest.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=summary.FIELDS)
+                    writer.writeheader()
+                    writer.writerow(row)
+                with self.assertRaisesRegex(ValueError, "invalid benchmark input size"):
+                    summary.summarize(manifest, criterion, output)
 
 
 if __name__ == "__main__":

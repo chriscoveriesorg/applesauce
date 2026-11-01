@@ -28,6 +28,8 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: Run tests
         run: cargo test --workspace --all-targets
+      - name: Validate offline benchmark summary contract
+        run: python3 -m unittest discover -s hack -p 'test_benchmark_summary.py'
       - name: Run tests with system lzfse
         run: cargo test --workspace --features system-lzfse --all-targets
       - name: Test opt-in native LZBitmap on generated temporary files
