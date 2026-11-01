@@ -22,8 +22,8 @@ jobs:
     timeout-minutes: 120
     env:
       APPLESAUCE_BENCH_SUITE: ${{ inputs.suite }}
-      APPLESAUCE_BENCH_MANIFEST: ${{ runner.temp }}/applesauce-bench/manifest.csv
-      BENCH_RESULTS: ${{ runner.temp }}/applesauce-bench
+      APPLESAUCE_BENCH_MANIFEST: target/applesauce-bench/manifest.csv
+      BENCH_RESULTS: target/applesauce-bench
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -84,7 +84,7 @@ jobs:
         with:
           name: applesauce-criterion-${{ inputs.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/applesauce-bench/**
+            target/applesauce-bench/**
             target/criterion/**
           retention-days: 90
           if-no-files-found: warn
