@@ -1,0 +1,25 @@
+name: Four-tool logical content contract
+
+on:
+  push:
+    paths:
+      - 'hack/family_contract.py'
+      - 'hack/test_family_contract.py'
+      - '.github/workflows/family-contract.yml'
+  pull_request:
+    paths:
+      - 'hack/family_contract.py'
+      - 'hack/test_family_contract.py'
+      - '.github/workflows/family-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  portable-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check synthetic Foldy and ZGX receipts (no private code or data)
+        run: python3 -m unittest discover -s hack -p 'test_family_contract.py' -v
