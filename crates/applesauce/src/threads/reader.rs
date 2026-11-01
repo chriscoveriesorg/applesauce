@@ -3,6 +3,7 @@ use crate::threads::{compressing, writer, BgWork, Context, Mode, WorkHandler};
 use crate::{rfork_storage, seq_queue, try_read_all};
 use applesauce_core::BLOCK_SIZE;
 use std::fs::File;
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::{io, thread};
@@ -34,6 +35,15 @@ impl BgWork for Work {
 pub(super) struct Handler {
     compressor: compressing::Sender,
     writer: writer::Sender,
+}
+
+// A bounded reader preserves the 64 KiB chunk contract while allowing the
+// standard library to initialize only bytes actually read. Creating a
+// &mut [u8] over a Vec whose length was unsafely extended is undefined behavior.
+fn read_chunk<R: Read>(reader: R) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(BLOCK_SIZE);
+    reader.take(BLOCK_SIZE as u64).read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 impl Handler {
@@ -135,27 +145,14 @@ impl Handler {
                 }
             };
 
-            #[allow(clippy::uninit_vec)]
-            // SAFETY: we just allocated this with capacity, and we will truncate it before
-            //         allowing it to escape. This is not technically safe, but there's no
-            //         io api that lets us use an uninit buffer yet. However, file is a
-            //         std::io::File, which won't do wonky things in read, and won't lie about
-            //         the return value.
-            let buf = unsafe {
-                let mut buf = Vec::with_capacity(BLOCK_SIZE);
-                buf.set_len(BLOCK_SIZE);
-
-                let n = try_read_all(file, &mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                total_read += u64::try_from(n).unwrap();
-                if total_read > expected_len {
-                    return Err(io::Error::other("file size changed while reading"));
-                }
-                buf.truncate(n);
-                buf
-            };
+            let buf = read_chunk(file)?;
+            if buf.is_empty() {
+                break;
+            }
+            total_read += u64::try_from(buf.len()).unwrap();
+            if total_read > expected_len {
+                return Err(io::Error::other("file size changed while reading"));
+            }
 
             f(slot, buf)?;
         }
@@ -209,5 +206,61 @@ impl WorkHandler<WorkItem> for Handler {
                 .error(&format!("Error reading {}: {}", context.path.display(), e));
         }
         tx.finish(result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_chunk;
+    use applesauce_core::BLOCK_SIZE;
+    use std::io::{self, Cursor, Read};
+
+    #[test]
+    fn chunk_reader_preserves_generated_bytes_and_boundaries() {
+        for len in [
+            0,
+            1,
+            BLOCK_SIZE - 1,
+            BLOCK_SIZE,
+            BLOCK_SIZE + 1,
+            2 * BLOCK_SIZE + 13,
+        ] {
+            let input: Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
+            let mut cursor = Cursor::new(&input);
+            let mut recovered = Vec::new();
+            loop {
+                let chunk = read_chunk(&mut cursor).unwrap();
+                if chunk.is_empty() {
+                    break;
+                }
+                assert!(chunk.len() <= BLOCK_SIZE);
+                recovered.extend_from_slice(&chunk);
+            }
+            assert_eq!(recovered, input, "length {len}");
+        }
+    }
+
+    #[test]
+    fn chunk_reader_handles_short_reads_without_exposing_unwritten_bytes() {
+        struct OneByteReader<'a>(&'a [u8]);
+
+        impl Read for OneByteReader<'_> {
+            fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+                if self.0.is_empty() || dst.is_empty() {
+                    return Ok(0);
+                }
+                dst[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+
+        let input: Vec<u8> = (0..BLOCK_SIZE + 7)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let mut reader = OneByteReader(&input);
+        assert_eq!(read_chunk(&mut reader).unwrap(), input[..BLOCK_SIZE]);
+        assert_eq!(read_chunk(&mut reader).unwrap(), input[BLOCK_SIZE..]);
+        assert!(read_chunk(&mut reader).unwrap().is_empty());
     }
 }
