@@ -195,6 +195,16 @@ impl super::CompressorImpl for Zlib {
             result.push(block_info);
         }
 
+        // Every compressed byte before the fixed trailer must belong to a
+        // declared block. A shorter final block end would otherwise leave
+        // unauthenticated padding that the reader silently ignores.
+        if previous_end != data_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "last compressed block does not reach zlib trailer",
+            ));
+        }
+
         reader.seek(SeekFrom::Start(data_end.into()))?;
         let mut trailer_buf = [0; ZLIB_TRAILER.len()];
         reader.read_exact(&mut trailer_buf)?;
@@ -537,6 +547,33 @@ mod tests {
             assert_eq!(cursor.get_ref(), &original);
             assert_eq!(cursor.position(), position);
         }
+    }
+
+    #[test]
+    fn rejects_unreferenced_bytes_between_last_block_and_trailer() {
+        let block_start = Zlib::header_size(1);
+        let data_end = u32::try_from(block_start + 3).unwrap();
+        let mut cursor = Cursor::new(vec![0u8; data_end as usize]);
+        cursor.set_position(u64::from(data_end));
+        Zlib::finish(&mut cursor, &[3]).unwrap();
+        let mut bytes = cursor.into_inner();
+        assert_eq!(
+            Zlib::read_block_info(Cursor::new(&bytes), BLOCK_SIZE as u64)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Add one orphaned payload byte while keeping the header, length,
+        // and fixed trailer internally consistent. Before this regression
+        // the parser accepted it because no block described that byte.
+        bytes.insert(data_end as usize, 0xa5);
+        let enlarged_end = data_end + 1;
+        bytes[..HEADER_LEN].copy_from_slice(&header(enlarged_end));
+        bytes[0x100..0x104].copy_from_slice(&u32::to_be_bytes(enlarged_end - 0x104));
+
+        let error = Zlib::read_block_info(Cursor::new(bytes), BLOCK_SIZE as u64).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
