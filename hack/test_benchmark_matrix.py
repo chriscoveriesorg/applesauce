@@ -54,10 +54,33 @@ class MatrixTests(unittest.TestCase):
 
     def test_expected_v1_case_counts(self):
         self.assertEqual(len(matrix.expected_cases("smoke")), 20)
-        self.assertEqual(len(matrix.expected_cases("standard")), 120)
+        self.assertEqual(len(matrix.expected_cases("standard")), 170)
         self.assertEqual(len(matrix.expected_cases("extended")), 300)
         with self.assertRaisesRegex(ValueError, "unknown suite"):
             matrix.expected_cases("unexpected")
+
+    def test_standard_requires_8mib_whole_and_independent_blocks(self):
+        cases = matrix.expected_cases("standard")
+        for workload in matrix.WORKLOADS:
+            for codec in matrix.CODECS:
+                for layout in ("whole", "independent-64k"):
+                    self.assertIn(
+                        ("standard", workload, 8388608, layout, codec, "reused-scratch"),
+                        cases,
+                    )
+
+        # A valid-looking report lacking the largest independent blocks
+        # must be rejected before it can be used for speed comparisons.
+        self.rows = [
+            row for row in self.build_rows("standard")
+            if not (
+                row["input_bytes"] == "8388608"
+                and row["layout"] == "independent-64k"
+            )
+        ]
+        self.write()
+        with self.assertRaisesRegex(ValueError, "incomplete standard suite"):
+            matrix.validate(self.manifest, "standard")
 
     def test_complete_smoke_and_missing_raven_are_detected(self):
         self.write()

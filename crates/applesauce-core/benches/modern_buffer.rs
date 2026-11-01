@@ -54,7 +54,7 @@ impl Suite {
     fn sizes(self) -> &'static [usize] {
         match self {
             Self::Smoke => &[65_536],
-            Self::Standard => &[4_096, 65_536, 1_048_576],
+            Self::Standard => &[4_096, 65_536, 1_048_576, 8_388_608],
             Self::Extended => &[4_096, 65_536, 1_048_576, 8_388_608],
         }
     }
