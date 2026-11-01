@@ -26,6 +26,12 @@ not install or run anything automatically:
 - **[compress-agent-sessions](https://github.com/chriscoveriesorg/compress-agent-sessions)**: cold-session selection and optional transparent compression. Its [modern-codec integration](https://github.com/chriscoveriesorg/compress-agent-sessions/blob/main/docs/experimental-lzraven.md) uses Applesauce's fail-closed native capability gate.
 - **[ZGX](https://github.com/chriscoveriesorg/zgx)** *(private; access required)*: agent-oriented local metasearch. [Integration tracking](https://github.com/chriscoveriesorg/zgx/issues/504) checks unchanged logical bytes, search hits and byte spans after compression.
 
+The [four-tool integration guide](hack/family-integration.md) defines the
+Foldy → session policy → Applesauce → ZGX flow and ships a **read-only
+before/after contract checker** for file hashes and search results. Start with
+verified native LZFSE on generated data; Raven/Mesh filesystem writes remain
+blocked until their decoder/framing are proven.
+
 ## Installation
 
 ### Build this fork and run read-only diagnostics
