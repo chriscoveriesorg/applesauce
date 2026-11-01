@@ -462,7 +462,7 @@ fn zlib_trailer_overflow_fails_before_opening_the_resource_fork() {
     // Each block requires 8 table bytes, 1 payload byte, plus the fixed
     // header and trailer. This count fits without the trailer but not with it.
     let max = u64::from(u32::MAX);
-    let trailer = applesauce_core::decmpfs::ZLIB_TRAILER.len() as u64;
+    let trailer = decmpfs::ZLIB_TRAILER.len() as u64;
     let header = Kind::Zlib.header_size(0);
     let blocks = (max - header - trailer) / 9 + 1;
     assert!(Kind::Zlib.header_size(blocks) + blocks <= max);
