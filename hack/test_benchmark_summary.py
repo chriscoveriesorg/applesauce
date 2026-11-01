@@ -69,13 +69,18 @@ class BenchmarkSummaryTests(unittest.TestCase):
             )
             # JSON permits nonstandard NaN/Infinity tokens in Python; the old
             # <= 0 check accepted them and emitted fabricated throughput.
-            for invalid in (0, -1, float("nan"), float("inf"), -float("inf")):
-                estimate.write_text(
-                    json.dumps({"median": {"point_estimate": invalid}}),
-                    encoding="utf-8",
-                )
-                with self.assertRaisesRegex(ValueError, "invalid encode median"):
-                    summary.summarize(manifest, criterion, output)
+            invalid_values = (
+                0, -1, float("nan"), float("inf"), -float("inf"),
+                None, True, "2.5", [], {}, 10 ** 400,
+            )
+            for invalid in invalid_values:
+                with self.subTest(invalid=repr(invalid)):
+                    estimate.write_text(
+                        json.dumps({"median": {"point_estimate": invalid}}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "invalid encode median"):
+                        summary.summarize(manifest, criterion, output)
             estimate.write_text(
                 json.dumps({"median": {"point_estimate": 1_000_000}}),
                 encoding="utf-8",
