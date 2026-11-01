@@ -424,13 +424,13 @@ mod tests {
         // Reject the forged length without reading any filesystem bytes.
         struct SeekOnly(u64);
 
-        impl io::Read for SeekOnly {
+        impl Read for SeekOnly {
             fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
                 panic!("invalid layout must be rejected before reading");
             }
         }
 
-        impl io::Seek for SeekOnly {
+        impl Seek for SeekOnly {
             fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
                 match pos {
                     SeekFrom::End(0) => Ok(self.0),
@@ -456,17 +456,17 @@ mod tests {
             reported_len: u64,
         }
 
-        impl io::Read for SparseFork {
+        impl Read for SparseFork {
             fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
-                io::Read::read(&mut self.bytes, dst)
+                Read::read(&mut self.bytes, dst)
             }
         }
 
-        impl io::Seek for SparseFork {
+        impl Seek for SparseFork {
             fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
                 match pos {
                     SeekFrom::End(0) => Ok(self.reported_len),
-                    other => io::Seek::seek(&mut self.bytes, other),
+                    other => Seek::seek(&mut self.bytes, other),
                 }
             }
         }
