@@ -101,7 +101,8 @@ fn resource_fork_reader_accepts_header_only_single_block() {
     use applesauce_core::writer::Writer;
 
     let mut resource_fork = Vec::new();
-    let mut writer = Writer::new(Kind::default(), 1, || Cursor::new(&mut resource_fork)).unwrap();
+    let rfork_ref = &mut resource_fork;
+    let mut writer = Writer::new(Kind::default(), 1, move || Cursor::new(rfork_ref)).unwrap();
     writer.force_resource_fork().unwrap();
     writer.add_block(&[0x42]).unwrap();
     let mut metadata = Vec::new();
