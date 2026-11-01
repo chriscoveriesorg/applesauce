@@ -49,11 +49,25 @@ impl<O: Open> Writer<O> {
         }
         let block_count = crate::num_blocks(uncompressed_size);
         let state = if block_count > 1 {
+            // Native resource-fork formats use 32-bit block counts/offsets.
+            // Validate before opening or seeking into the target resource fork.
+            let header_size = kind.header_size(block_count);
+            if u32::try_from(block_count).is_err()
+                || u32::try_from(header_size.checked_add(block_count).unwrap_or(u64::MAX))
+                    .is_err()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "resource fork block table cannot fit in 32-bit offsets",
+                ));
+            }
             let mut resource_fork = open.open_resource_fork()?;
-            resource_fork.seek(SeekFrom::Start(kind.header_size(block_count)))?;
+            resource_fork.seek(SeekFrom::Start(header_size))?;
 
             WriterState::MultipleBlocks {
-                block_sizes: Vec::with_capacity(block_count.try_into().unwrap()),
+                // Do not allocate proportional to a caller-provided file size
+                // before any compressed blocks have been supplied.
+                block_sizes: Vec::new(),
                 resource_fork,
             }
         } else {
@@ -118,6 +132,9 @@ impl<O: Open> Writer<O> {
                         "too many blocks",
                     ));
                 }
+                // Reserve the metadata slot before touching the fork. An
+                // allocation failure must not strand an untracked payload.
+                block_sizes.try_reserve(1).map_err(io::Error::other)?;
                 if let Err(error) = resource_fork.write_all(new_block) {
                     // A partial write can leave bytes behind. Never allow a
                     // retry to make that incomplete payload publishable.
