@@ -19,12 +19,13 @@ pub(super) fn read_block_info<R: io::Read + io::Seek>(
     let block_count = crate::num_blocks(orig_file_size);
     let blocks_start =
         u32::try_from(header_size(block_count)).map_err(|_| io::ErrorKind::InvalidInput)?;
-    // A corrupt uncompressed-size field must not cause a large allocation
-    // before checking whether the resource fork even contains its table.
-    if reader.seek(SeekFrom::End(0))? < u64::from(blocks_start) {
+    // Each declared block needs one table entry and at least one payload
+    // byte. Reject impossible layouts before reading or allocating metadata.
+    let fork_len = reader.seek(SeekFrom::End(0))?;
+    if fork_len < u64::from(blocks_start) + block_count {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "resource fork shorter than its block table",
+            "resource fork shorter than its block table and minimum payload",
         ));
     }
     reader.rewind()?;
@@ -52,6 +53,14 @@ pub(super) fn read_block_info<R: io::Read + io::Seek>(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "empty compressed block in resource fork",
+            ));
+        }
+        // Do not retain a malformed block or read further table entries
+        // when its end already exceeds the reported fork length.
+        if u64::from(next_offset) > fork_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compressed block extends past resource fork",
             ));
         }
         result.try_reserve(1).map_err(io::Error::other)?;
@@ -190,6 +199,73 @@ mod tests {
         assert!(read_block_info(Cursor::new(vec![12, 0, 0, 0]), size).is_err());
         let error =
             read_block_info(Cursor::new(vec![0; 4]), 1_000_000 * BLOCK_SIZE as u64).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_table_without_one_payload_byte_per_block_before_reading() {
+        // A forged length fits two offset entries but only one payload
+        // byte. It must fail without reading any bytes from the fork.
+        struct SeekOnly(u64);
+
+        impl io::Read for SeekOnly {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("invalid layout must be rejected before reading");
+            }
+        }
+
+        impl io::Seek for SeekOnly {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                match pos {
+                    SeekFrom::Start(0) => Ok(0),
+                    SeekFrom::End(0) => Ok(self.0),
+                    _ => panic!("invalid layout must be rejected before seeking the table"),
+                }
+            }
+        }
+
+        let count = 2u64;
+        let error = read_block_info(
+            SeekOnly(header_size(count) + count - 1),
+            count * BLOCK_SIZE as u64,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_out_of_fork_offset_before_reading_remaining_table() {
+        // The reported fork length is large enough for two minimal blocks,
+        // but the first block's end is beyond it. Only two offsets exist;
+        // rejecting the second offset must precede a third read.
+        struct SparseFork {
+            bytes: Cursor<[u8; 8]>,
+            reported_len: u64,
+        }
+
+        impl io::Read for SparseFork {
+            fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+                io::Read::read(&mut self.bytes, dst)
+            }
+        }
+
+        impl io::Seek for SparseFork {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                match pos {
+                    SeekFrom::End(0) => Ok(self.reported_len),
+                    other => io::Seek::seek(&mut self.bytes, other),
+                }
+            }
+        }
+
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&12u32.to_le_bytes());
+        bytes[4..].copy_from_slice(&21u32.to_le_bytes());
+        let fork = SparseFork {
+            bytes: Cursor::new(bytes),
+            reported_len: 20,
+        };
+        let error = read_block_info(fork, BLOCK_SIZE as u64 + 1).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
