@@ -28,11 +28,10 @@ pub(super) fn read_block_info<R: io::Read + io::Seek>(
         ));
     }
     reader.rewind()?;
-    let mut result = Vec::with_capacity(
-        block_count
-            .try_into()
-            .map_err(|_| io::ErrorKind::InvalidInput)?,
-    );
+    // Grow only after validating each table entry. A forged file size and
+    // uncompressed-size header must not reserve gigabytes before any blocks
+    // have been read. Fallible growth reports memory pressure as an I/O error.
+    let mut result = Vec::new();
     let mut buf = [0; size_of::<u32>()];
 
     reader.read_exact(&mut buf)?;
@@ -55,6 +54,7 @@ pub(super) fn read_block_info<R: io::Read + io::Seek>(
                 "empty compressed block in resource fork",
             ));
         }
+        result.try_reserve(1).map_err(io::Error::other)?;
         result.push(BlockInfo {
             offset: last_offset,
             compressed_size,
@@ -191,6 +191,34 @@ mod tests {
         let error =
             read_block_info(Cursor::new(vec![0; 4]), 1_000_000 * BLOCK_SIZE as u64).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn huge_claimed_table_with_truncated_entries_fails_without_eager_allocation() {
+        // Model a sparse/forged resource fork: its reported length fits a
+        // million-block table, but only the first offset is readable.
+        // The parser must read entries before allocating their metadata.
+        struct SparseFork(Cursor<[u8; 4]>);
+
+        impl io::Read for SparseFork {
+            fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+                io::Read::read(&mut self.0, dst)
+            }
+        }
+
+        impl io::Seek for SparseFork {
+            fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+                match pos {
+                    io::SeekFrom::End(0) => Ok(header_size(1_000_000)),
+                    other => io::Seek::seek(&mut self.0, other),
+                }
+            }
+        }
+
+        let first_offset = u32::try_from(header_size(1_000_000)).unwrap();
+        let fork = SparseFork(Cursor::new(first_offset.to_le_bytes()));
+        let error = read_block_info(fork, 1_000_000 * BLOCK_SIZE as u64).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]
