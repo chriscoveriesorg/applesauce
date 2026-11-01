@@ -162,6 +162,12 @@ impl<O: Open> Writer<O> {
     ///
     /// Calling this function will ensure that a resource fork is always used.
     pub fn force_resource_fork(&mut self) -> io::Result<()> {
+        if self.uncompressed_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "empty files have no resource-fork blocks",
+            ));
+        }
         if matches!(self.state, WriterState::MultipleBlocks { .. }) {
             return Ok(());
         }
@@ -189,10 +195,16 @@ impl<O: Open> Writer<O> {
                     self.kind
                         .header_size(crate::num_blocks(self.uncompressed_size)),
                 ))?;
-                resource_fork.write_all(new_block)?;
+                // Forcing the resource fork before add_block must not insert
+                // a phantom zero-length block into the offset table.
+                let mut block_sizes = Vec::new();
+                if !new_block.is_empty() {
+                    resource_fork.write_all(new_block)?;
+                    block_sizes.push(new_block.len() as u32);
+                }
 
                 self.state = WriterState::MultipleBlocks {
-                    block_sizes: vec![new_block.len() as u32],
+                    block_sizes,
                     resource_fork,
                 };
             }
