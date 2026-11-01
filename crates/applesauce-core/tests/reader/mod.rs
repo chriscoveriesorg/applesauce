@@ -69,6 +69,53 @@ fn inline_reader_preserves_valid_empty_and_single_block_files() {
     assert!(!reader.read_block_into(&mut output).unwrap());
 }
 
+#[test]
+fn resource_fork_reader_rejects_inline_payload_and_empty_file_before_opening() {
+    // The metadata for a resource-fork file is header-only and must
+    // describe at least one block. Reject contradictions before I/O.
+    for kind in Kind::ALL.into_iter().filter(|kind| kind.supported()) {
+        for (size, payload) in [
+            (0, &[][..]),
+            (0, &[0x42][..]),
+            (1, &[0x42][..]),
+        ] {
+            let mut data = Vec::new();
+            decmpfs::Value {
+                compression_type: decmpfs::CompressionType::new(
+                    kind,
+                    decmpfs::Storage::ResourceFork,
+                ),
+                uncompressed_size: size,
+                extra_data: payload,
+            }
+            .write_to(&mut data)
+            .unwrap();
+            let error = Reader::new(&data, never_called_open).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
+    }
+}
+
+#[test]
+fn resource_fork_reader_accepts_header_only_single_block() {
+    use applesauce_core::writer::Writer;
+
+    let mut resource_fork = Vec::new();
+    let mut writer = Writer::new(Kind::default(), 1, || Cursor::new(&mut resource_fork)).unwrap();
+    writer.force_resource_fork().unwrap();
+    writer.add_block(&[0x42]).unwrap();
+    let mut metadata = Vec::new();
+    writer.finish_decmpfs_data(&mut metadata).unwrap();
+    assert_eq!(metadata.len(), decmpfs::HEADER_LEN);
+
+    let mut reader = Reader::new(&metadata, || Cursor::new(&resource_fork)).unwrap();
+    assert_eq!(reader.remaining_blocks(), 1);
+    let mut payload = Vec::new();
+    assert!(reader.read_block_into(&mut payload).unwrap());
+    assert_eq!(payload, [0x42]);
+    assert!(!reader.read_block_into(&mut payload).unwrap());
+}
+
 #[cfg(feature = "zlib")]
 #[test]
 fn partial_resource_fork_read_preserves_output_and_fails_closed() {
