@@ -66,6 +66,45 @@ class BenchmarkSummaryTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 summary.summarize(manifest, criterion, output)
 
+    def test_rejects_invalid_or_nonfinite_criterion_medians(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            row = {
+                "suite": "smoke",
+                "input_bytes": "65536",
+                "workload": "chat-jsonl",
+                "layout": "whole",
+                "codec": "lzraven",
+                "scratch_mode": "reused-scratch",
+            }
+            estimate = (
+                root
+                / "apple-buffer_smoke_65536_chat-jsonl_whole"
+                / "lzraven-reused-scratch"
+                / "encode"
+                / "new"
+                / "estimates.json"
+            )
+            estimate.parent.mkdir(parents=True)
+            invalid_values = [
+                float("nan"),
+                float("inf"),
+                float("-inf"),
+                0,
+                -1,
+                None,
+                True,
+                "2.5",
+            ]
+            for value in invalid_values:
+                with self.subTest(median=repr(value)):
+                    estimate.write_text(
+                        json.dumps({"median": {"point_estimate": value}}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "invalid encode median"):
+                        summary.median_ns(root, row, "encode")
+
 
 if __name__ == "__main__":
     unittest.main()
