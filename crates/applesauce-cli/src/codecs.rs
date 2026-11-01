@@ -61,6 +61,19 @@ impl CodecName {
             Self::Lzmesh | Self::Lzraven => return None,
         })
     }
+
+    fn native_cli_enabled(self) -> bool {
+        // Cargo can unify a dependency's codec feature without enabling the
+        // corresponding CLI value. Attestation must match this binary's
+        // selectable `compress -c` variants, not just its linked core library.
+        match self {
+            Self::Zlib => cfg!(feature = "zlib"),
+            Self::Lzvn => cfg!(feature = "lzvn"),
+            Self::Lzfse => cfg!(feature = "lzfse"),
+            Self::Lzbitmap => cfg!(all(feature = "lzbitmap", target_os = "macos")),
+            Self::Lzmesh | Self::Lzraven => false,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -170,7 +183,7 @@ fn native_capability(name: CodecName) -> NativeCapability {
         Kind::Lzfse => vec![11, 12],
         Kind::Lzbitmap => vec![13, 14],
     };
-    let writable = kind.supported();
+    let writable = name.native_cli_enabled() && kind.supported();
     let experimental = kind == Kind::Lzbitmap;
     let reason = if !writable {
         "native writer disabled in this build or unavailable on this host"
@@ -537,6 +550,15 @@ mod tests {
             json["native_decmpfs"]["decmpfs_types"],
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn unavailable_cli_variants_cannot_attest_native_support() {
+        for name in CodecName::ALL {
+            if !name.native_cli_enabled() {
+                assert!(!native_capability(name).writable);
+            }
+        }
     }
 
     #[test]
