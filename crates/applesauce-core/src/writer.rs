@@ -75,14 +75,18 @@ impl<O: Open> Writer<O> {
                 "cannot add an empty compressed block or a block to an empty file",
             ));
         }
-        assert!(new_block.len() as u64 <= u32::MAX as u64);
+        let compressed_size = u32::try_from(new_block.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "compressed block exceeds u32 size")
+        })?;
 
         match &mut self.state {
             WriterState::SingleBlock { block, .. } => {
-                assert!(
-                    block.is_empty(),
-                    "adding multiple blocks to a single-block writer"
-                );
+                if !block.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "too many compressed blocks for file size",
+                    ));
+                }
                 if new_block.len() > decmpfs::MAX_XATTR_DATA_SIZE {
                     self.write_single_block_as_rfork(new_block)?;
                 } else {
@@ -93,14 +97,20 @@ impl<O: Open> Writer<O> {
                 block_sizes,
                 resource_fork,
             } => {
+                if block_sizes.len() as u64 >= crate::num_blocks(self.uncompressed_size) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "too many compressed blocks for file size",
+                    ));
+                }
                 if block_sizes.len() + 1 >= u32::MAX as usize {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "too many blocks",
                     ));
                 }
-                block_sizes.push(new_block.len() as u32);
                 resource_fork.write_all(new_block)?;
+                block_sizes.push(compressed_size);
             }
             WriterState::Empty => unreachable!(),
         };
