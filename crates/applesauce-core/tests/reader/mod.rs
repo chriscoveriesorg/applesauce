@@ -19,6 +19,56 @@ fn invalid_magic() {
     assert_eq!(reader_err.kind(), std::io::ErrorKind::InvalidData);
 }
 
+fn inline_metadata(uncompressed_size: u64, payload: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    decmpfs::Value {
+        compression_type: decmpfs::CompressionType::new(Kind::default(), decmpfs::Storage::Xattr),
+        uncompressed_size,
+        extra_data: payload,
+    }
+    .write_to(&mut data)
+    .unwrap();
+    data
+}
+
+#[test]
+fn inline_reader_rejects_missing_or_impossible_payloads() {
+    use applesauce_core::BLOCK_SIZE;
+
+    for (size, payload) in [
+        (1, &[][..]),
+        (0, &[0x42][..]),
+        (BLOCK_SIZE as u64 + 1, &[0x42][..]),
+    ] {
+        let data = inline_metadata(size, payload);
+        let error = Reader::new(&data, never_called_open).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    let oversized = vec![0x42; decmpfs::MAX_XATTR_DATA_SIZE + 1];
+    let data = inline_metadata(1, &oversized);
+    let error = Reader::new(&data, never_called_open).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn inline_reader_preserves_valid_empty_and_single_block_files() {
+    let empty = inline_metadata(0, &[]);
+    let mut reader = Reader::new(&empty, never_called_open).unwrap();
+    assert_eq!(reader.remaining_blocks(), 0);
+    let mut output = vec![0x5a];
+    assert!(!reader.read_block_into(&mut output).unwrap());
+    assert_eq!(output, [0x5a]);
+
+    let inline = inline_metadata(1, &[0x42]);
+    let mut reader = Reader::new(&inline, never_called_open).unwrap();
+    assert_eq!(reader.remaining_blocks(), 1);
+    assert!(reader.read_block_into(&mut output).unwrap());
+    assert_eq!(output, [0x5a, 0x42]);
+    assert_eq!(reader.remaining_blocks(), 0);
+    assert!(!reader.read_block_into(&mut output).unwrap());
+}
+
 #[cfg(feature = "zlib")]
 #[test]
 fn partial_resource_fork_read_preserves_output_and_fails_closed() {
