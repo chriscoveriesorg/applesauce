@@ -122,4 +122,34 @@ mod tests {
         // Compression jobs are not manual decompression jobs.
         assert!(validate_decoded_block_size(3, None).is_ok());
     }
+
+    #[test]
+    fn generated_codec_blocks_round_trip_with_exact_logical_lengths() {
+        use applesauce_core::compressor::Kind;
+        use applesauce_core::BLOCK_SIZE;
+
+        let input = vec![0x5a; BLOCK_SIZE + 7];
+        for kind in Kind::ALL {
+            let Some(mut compressor) = kind.compressor() else {
+                continue;
+            };
+            for block in input.chunks(BLOCK_SIZE) {
+                let mut encoded = vec![0; block.len() + 1024];
+                let encoded_len = compressor.compress(&mut encoded, block, 5).unwrap();
+                let mut decoded = vec![0; BLOCK_SIZE + 1024];
+                let decoded_len = compressor
+                    .decompress(&mut decoded, &encoded[..encoded_len])
+                    .unwrap();
+                validate_decoded_block_size(decoded_len, Some(block.len())).unwrap();
+                assert_eq!(&decoded[..decoded_len], block, "{kind}");
+                assert_eq!(
+                    validate_decoded_block_size(decoded_len, Some(block.len() + 1))
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::InvalidData,
+                    "{kind}"
+                );
+            }
+        }
+    }
 }
