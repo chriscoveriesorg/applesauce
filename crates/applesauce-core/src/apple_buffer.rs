@@ -575,13 +575,19 @@ mod tests {
         // request before decode_into notices the empty compressed payload.
         for codec in Codec::ALL.into_iter().filter(|codec| codec.is_supported()) {
             assert_eq!(
-                codec.decode_exact(&[], MAX_BUFFER_BYTES).unwrap_err().kind(),
+                codec
+                    .decode_exact(&[], MAX_BUFFER_BYTES)
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::InvalidInput,
                 "{codec:?}"
             );
             let mut scratch = codec.reusable_scratch().unwrap();
             assert_eq!(
-                scratch.decode_exact(&[], MAX_BUFFER_BYTES).unwrap_err().kind(),
+                scratch
+                    .decode_exact(&[], MAX_BUFFER_BYTES)
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::InvalidInput,
                 "{codec:?}"
             );
