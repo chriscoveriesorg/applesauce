@@ -104,6 +104,17 @@ impl io::Write for ResourceFork<'_> {
     }
 }
 
+// A resource-fork handle uses a 32-bit cursor. A successful kernel read
+// must never wrap it, even when the caller supplies a large buffer.
+fn checked_read_advance(position: u32, bytes_read: usize) -> io::Result<u32> {
+    let advance = u32::try_from(bytes_read).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "resource fork read exceeds 32-bit offset")
+    })?;
+    position.checked_add(advance).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "resource fork read exceeds 32-bit offset")
+    })
+}
+
 impl Read for ResourceFork<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // Despite the manpage for getxattr saying:
@@ -135,7 +146,7 @@ impl Read for ResourceFork<'_> {
             rc as usize
         };
         let bytes_read = cmp::min(remaining_len, buf.len());
-        self.position += u32::try_from(bytes_read).unwrap();
+        self.position = checked_read_advance(self.position, bytes_read)?;
         Ok(bytes_read)
     }
 }
@@ -226,6 +237,22 @@ mod tests {
 
         pub(super) fn is_present(path: &CStr, xattr_name: &CStr) -> io::Result<bool> {
             len(path, xattr_name).map(|len| len.is_some())
+        }
+    }
+
+    #[test]
+    fn read_offset_overflow_fails_without_wrapping() {
+        assert_eq!(checked_read_advance(0, 0).unwrap(), 0);
+        assert_eq!(checked_read_advance(u32::MAX - 1, 1).unwrap(), u32::MAX);
+        assert_eq!(
+            checked_read_advance(u32::MAX, 1).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        if let Ok(too_many) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert_eq!(
+                checked_read_advance(0, too_many).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
         }
     }
 
