@@ -8,6 +8,7 @@ an error: an incomplete run should not look like a successful comparison.
 
 import csv
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -46,8 +47,16 @@ def median_ns(root: Path, row: dict[str, str], operation: str) -> float:
     )
     path = root / relative
     with path.open(encoding="utf-8") as handle:
-        duration = float(json.load(handle)["median"]["point_estimate"])
-    if duration <= 0:
+        value = json.load(handle)["median"]["point_estimate"]
+    # Invalid/non-finite Criterion output must not become plausible CSV data
+    # or throughput figures such as "nan" or "inf".
+    if isinstance(value, (str, bool)):
+        raise ValueError(f"invalid {operation} median in {path}")
+    try:
+        duration = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"invalid {operation} median in {path}") from error
+    if not math.isfinite(duration) or duration <= 0:
         raise ValueError(f"invalid {operation} median in {path}")
     return duration
 
