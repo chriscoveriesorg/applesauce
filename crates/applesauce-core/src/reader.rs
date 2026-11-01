@@ -63,9 +63,9 @@ impl<R: Read + Seek> Reader<R> {
                         "inline decmpfs payload exceeds maximum xattr size",
                     ));
                 }
-                if (decmpfs_value.uncompressed_size == 0)
-                    != decmpfs_value.extra_data.is_empty()
-                {
+                let empty_file = decmpfs_value.uncompressed_size == 0;
+                let empty_payload = decmpfs_value.extra_data.is_empty();
+                if empty_file != empty_payload {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "inline decmpfs payload does not match uncompressed size",
