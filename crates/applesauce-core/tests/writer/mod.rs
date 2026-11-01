@@ -147,3 +147,103 @@ fn multiple_small_blocks() {
         compressed_block
     );
 }
+
+#[test]
+fn nonempty_file_requires_a_nonempty_compressed_block() {
+    let mut output = vec![0x5a];
+    let writer = Writer::new(Kind::default(), 1, never_called_open).unwrap();
+    let error = writer.finish_decmpfs_data(&mut output).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(output, [0x5a], "invalid metadata must not be published");
+
+    let mut writer = Writer::new(Kind::default(), 1, never_called_open).unwrap();
+    let error = writer.add_block(&[]).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    writer.add_block(&[0x42]).unwrap();
+    writer.finish_decmpfs_data(&mut output).unwrap();
+    assert_eq!(
+        decmpfs::Value::from_data(&output[1..]).unwrap().extra_data,
+        &[0x42],
+    );
+}
+
+#[test]
+fn empty_file_cannot_receive_compressed_blocks() {
+    let mut writer = Writer::new(Kind::default(), 0, never_called_open).unwrap();
+    assert_eq!(
+        writer.add_block(&[0x42]).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput,
+    );
+    let mut output = Vec::new();
+    writer.finish_decmpfs_data(&mut output).unwrap();
+    assert!(decmpfs::Value::from_data(&output)
+        .unwrap()
+        .extra_data
+        .is_empty());
+}
+
+#[test]
+fn incomplete_resource_fork_cannot_publish_metadata() {
+    let mut writer = Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, || {
+        Cursor::new(Vec::new())
+    })
+    .unwrap();
+    assert_eq!(
+        writer.add_block(&[]).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput,
+    );
+    writer.add_block(&[0x42]).unwrap();
+    let mut output = vec![0x5a];
+    let error = writer.finish_decmpfs_data(&mut output).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        output,
+        [0x5a],
+        "incomplete resource fork must not be published"
+    );
+}
+
+#[test]
+fn forced_resource_fork_cannot_publish_empty_placeholder() {
+    let mut writer = Writer::new(Kind::default(), 1, || Cursor::new(Vec::new())).unwrap();
+    writer.force_resource_fork().unwrap();
+    let mut output = Vec::new();
+    assert_eq!(
+        writer.finish_decmpfs_data(&mut output).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput,
+    );
+    assert!(output.is_empty());
+}
+
+#[test]
+fn forcing_resource_fork_before_first_block_does_not_create_phantom_block() {
+    let mut resource_fork = Vec::new();
+    let mut writer = {
+        let rfork_ref = &mut resource_fork;
+        Writer::new(Kind::default(), 1, move || Cursor::new(rfork_ref)).unwrap()
+    };
+    writer.force_resource_fork().unwrap();
+    writer.add_block(&[0x42]).unwrap();
+    let mut output = Vec::new();
+    writer.finish_decmpfs_data(&mut output).unwrap();
+    let value = decmpfs::Value::from_data(&output).unwrap();
+    let (kind, storage) = value.compression_type.compression_storage().unwrap();
+    assert_eq!(storage, decmpfs::Storage::ResourceFork);
+    assert_eq!(
+        kind.read_block_info(Cursor::new(&resource_fork), 1)
+            .unwrap(),
+        [decmpfs::BlockInfo {
+            offset: kind.header_size(1) as u32,
+            compressed_size: 1,
+        }]
+    );
+}
+
+#[test]
+fn empty_file_cannot_force_resource_fork() {
+    let mut writer = Writer::new(Kind::default(), 0, never_called_open).unwrap();
+    assert_eq!(
+        writer.force_resource_fork().unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput,
+    );
+}

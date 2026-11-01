@@ -69,6 +69,12 @@ impl<O: Open> Writer<O> {
     }
 
     pub fn add_block(&mut self, new_block: &[u8]) -> io::Result<()> {
+        if self.uncompressed_size == 0 || new_block.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot add an empty compressed block or a block to an empty file",
+            ));
+        }
         assert!(new_block.len() as u64 <= u32::MAX as u64);
 
         match &mut self.state {
@@ -105,7 +111,14 @@ impl<O: Open> Writer<O> {
         let mut extra_data = Vec::new();
         let storage = match self.state {
             WriterState::SingleBlock { block, .. } => {
-                debug_assert!(!block.is_empty() || self.uncompressed_size == 0);
+                // A nonempty file must not be published with only a decmpfs
+                // header. This must also hold in release builds.
+                if self.uncompressed_size != 0 && block.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing compressed block for nonempty file",
+                    ));
+                }
                 extra_data = block;
                 decmpfs::Storage::Xattr
             }
@@ -117,6 +130,12 @@ impl<O: Open> Writer<O> {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "Wrong number of blocks",
+                    ));
+                }
+                if block_sizes.contains(&0) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "empty compressed block in resource fork",
                     ));
                 }
                 self.kind.finish(resource_fork, &block_sizes)?;
@@ -143,6 +162,12 @@ impl<O: Open> Writer<O> {
     ///
     /// Calling this function will ensure that a resource fork is always used.
     pub fn force_resource_fork(&mut self) -> io::Result<()> {
+        if self.uncompressed_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "empty files have no resource-fork blocks",
+            ));
+        }
         if matches!(self.state, WriterState::MultipleBlocks { .. }) {
             return Ok(());
         }
@@ -170,10 +195,16 @@ impl<O: Open> Writer<O> {
                     self.kind
                         .header_size(crate::num_blocks(self.uncompressed_size)),
                 ))?;
-                resource_fork.write_all(new_block)?;
+                // Forcing the resource fork before add_block must not insert
+                // a phantom zero-length block into the offset table.
+                let mut block_sizes = Vec::new();
+                if !new_block.is_empty() {
+                    resource_fork.write_all(new_block)?;
+                    block_sizes.push(new_block.len() as u32);
+                }
 
                 self.state = WriterState::MultipleBlocks {
-                    block_sizes: vec![new_block.len() as u32],
+                    block_sizes,
                     resource_fork,
                 };
             }
