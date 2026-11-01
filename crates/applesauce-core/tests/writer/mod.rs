@@ -209,3 +209,32 @@ fn forced_resource_fork_cannot_publish_empty_placeholder() {
     );
     assert!(output.is_empty());
 }
+
+#[test]
+fn forcing_resource_fork_before_first_block_does_not_create_phantom_block() {
+    let mut resource_fork = Vec::new();
+    let mut writer = Writer::new(Kind::default(), 1, || Cursor::new(&mut resource_fork)).unwrap();
+    writer.force_resource_fork().unwrap();
+    writer.add_block(&[0x42]).unwrap();
+    let mut output = Vec::new();
+    writer.finish_decmpfs_data(&mut output).unwrap();
+    let value = decmpfs::Value::from_data(&output).unwrap();
+    let (kind, storage) = value.compression_type.compression_storage().unwrap();
+    assert_eq!(storage, decmpfs::Storage::ResourceFork);
+    assert_eq!(
+        kind.read_block_info(Cursor::new(&resource_fork), 1).unwrap(),
+        [decmpfs::BlockInfo {
+            offset: kind.header_size(1) as u32,
+            compressed_size: 1,
+        }]
+    );
+}
+
+#[test]
+fn empty_file_cannot_force_resource_fork() {
+    let mut writer = Writer::new(Kind::default(), 0, never_called_open).unwrap();
+    assert_eq!(
+        writer.force_resource_fork().unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput,
+    );
+}
