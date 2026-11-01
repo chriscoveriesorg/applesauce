@@ -118,6 +118,10 @@ pub fn generate(workload: Workload, size: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    // Criterion benches use harness = false: when clippy checks all targets,
+    // #[test] functions can be omitted while this import remains compiled.
+    // The same fixture tests also run through the normal integration harness.
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
