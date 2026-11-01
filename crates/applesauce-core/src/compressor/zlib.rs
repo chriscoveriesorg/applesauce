@@ -77,6 +77,9 @@ impl super::CompressorImpl for Zlib {
         }
         if src[0] == 0xff {
             let src = &src[1..];
+            if src.is_empty() {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
             if dst.len() < src.len() {
                 return Err(io::ErrorKind::WriteZero.into());
             }
@@ -308,6 +311,19 @@ mod tests {
     use crate::compressor::CompressorImpl;
     use crate::BLOCK_SIZE;
     use std::io::Cursor;
+
+    #[test]
+    fn marker_only_stored_block_is_invalid() {
+        let mut compressor = Zlib::new();
+        let mut output = [0xa5; 2];
+        let error = compressor.decompress(&mut output, &[0xff]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(output, [0xa5; 2]);
+
+        let size = compressor.decompress(&mut output, &[0xff, 0x41]).unwrap();
+        assert_eq!(size, 1);
+        assert_eq!(output[0], 0x41);
+    }
 
     #[test]
     fn invalid_level_fails_without_panic_or_state_change() {
