@@ -69,6 +69,7 @@ impl Handler {
                             data,
                             slot,
                             kind,
+                            expected_decoded_size: None,
                         })
                         .unwrap();
                     Ok(())
@@ -76,7 +77,7 @@ impl Handler {
             }
             Mode::DecompressManually => {
                 rfork_storage::with_compressed_blocks(file, |kind| {
-                    move |data| {
+                    move |data, expected_decoded_size| {
                         // TODO: This waits for a slot after we have already read.
                         // TODO: This should be able to exit early, without an error
                         let slot = tx
@@ -90,6 +91,7 @@ impl Handler {
                                 data: data.to_vec(),
                                 slot,
                                 kind,
+                                expected_decoded_size: Some(expected_decoded_size),
                             })
                             .unwrap();
                         Ok(())
