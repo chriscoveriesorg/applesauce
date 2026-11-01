@@ -8,6 +8,16 @@ fn never_called_open() -> Cursor<Vec<u8>> {
 }
 
 #[test]
+fn unavailable_codec_is_rejected_before_opening_storage() {
+    for kind in Kind::ALL.into_iter().filter(|kind| !kind.supported()) {
+        for size in [0, 1, BLOCK_SIZE as u64 + 1] {
+            let error = Writer::new(kind, size, never_called_open).err().unwrap();
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        }
+    }
+}
+
+#[test]
 fn empty() {
     let writer = Writer::new(Kind::default(), 0, never_called_open).unwrap();
 

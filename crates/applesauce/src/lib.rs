@@ -14,6 +14,7 @@ compile_error!("applesauce only works on macos/ios");
 
 pub mod info;
 pub mod progress;
+pub use applesauce_core::apple_buffer;
 pub use applesauce_core::compressor;
 
 mod rfork_storage;
@@ -207,6 +208,9 @@ impl FileCompressor {
         P: Progress + Send + Sync,
         P::Task: Send + Sync + 'static,
     {
+        // Opt-in native backends must verify before publishing the staged file,
+        // including callers using the library rather than our CLI.
+        let verify = verify || kind == Kind::Lzbitmap;
         self.bg_threads.scan(
             Mode::Compress {
                 kind,

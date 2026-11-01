@@ -23,7 +23,7 @@ impl BgWork for Work {
 
     fn make_handler(&self) -> Self::Handler {
         Handler {
-            compressors: (0..3).map(|_| None).collect(),
+            compressors: compressor::Kind::ALL.iter().map(|_| None).collect(),
             buf: vec![0; BLOCK_SIZE + 1024],
         }
     }
@@ -43,9 +43,17 @@ impl WorkHandler<WorkItem> for Handler {
         let _entered =
             tracing::debug_span!("compressing block", path=%item.context.path.display()).entered();
 
-        // TODO: Unwrap?
-        let compressor = self.compressors[item.kind as usize]
-            .get_or_insert_with(|| item.kind.compressor().unwrap());
+        let cached = &mut self.compressors[item.kind as usize];
+        if cached.is_none() {
+            *cached = item.kind.compressor();
+        }
+        let Some(compressor) = cached.as_mut() else {
+            item.slot.error(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("{} is unavailable in this build or on this host", item.kind),
+            ));
+            return;
+        };
         let size = match item.context.operation.mode {
             Mode::Compress { kind, level, .. } => {
                 debug_assert_eq!(kind, item.kind);

@@ -30,6 +30,8 @@ jobs:
         run: cargo test --workspace --all-targets
       - name: Run tests with system lzfse
         run: cargo test --workspace --features system-lzfse --all-targets
+      - name: Test opt-in native LZBitmap on generated temporary files
+        run: cargo test --workspace --features lzbitmap --all-targets
       - name: Run tests with only zlib
         run: cargo test --workspace --no-default-features --features zlib --all-targets
 
@@ -38,3 +40,5 @@ jobs:
 
       - name: Check for clippy warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check opt-in native LZBitmap for clippy warnings
+        run: cargo clippy --workspace --features lzbitmap --all-targets -- -D warnings
