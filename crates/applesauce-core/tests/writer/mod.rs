@@ -181,11 +181,8 @@ fn empty_file_cannot_receive_compressed_blocks() {
 
 #[test]
 fn incomplete_resource_fork_cannot_publish_metadata() {
-    let mut resource_fork = Vec::new();
-    let mut writer = Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, || {
-        Cursor::new(&mut resource_fork)
-    })
-    .unwrap();
+    let mut writer =
+        Writer::new(Kind::default(), BLOCK_SIZE as u64 + 1, || Cursor::new(Vec::new())).unwrap();
     assert_eq!(
         writer.add_block(&[]).unwrap_err().kind(),
         std::io::ErrorKind::InvalidInput,
@@ -199,8 +196,7 @@ fn incomplete_resource_fork_cannot_publish_metadata() {
 
 #[test]
 fn forced_resource_fork_cannot_publish_empty_placeholder() {
-    let mut resource_fork = Vec::new();
-    let mut writer = Writer::new(Kind::default(), 1, || Cursor::new(&mut resource_fork)).unwrap();
+    let mut writer = Writer::new(Kind::default(), 1, || Cursor::new(Vec::new())).unwrap();
     writer.force_resource_fork().unwrap();
     let mut output = Vec::new();
     assert_eq!(
@@ -213,7 +209,10 @@ fn forced_resource_fork_cannot_publish_empty_placeholder() {
 #[test]
 fn forcing_resource_fork_before_first_block_does_not_create_phantom_block() {
     let mut resource_fork = Vec::new();
-    let mut writer = Writer::new(Kind::default(), 1, || Cursor::new(&mut resource_fork)).unwrap();
+    let mut writer = {
+        let rfork_ref = &mut resource_fork;
+        Writer::new(Kind::default(), 1, move || Cursor::new(rfork_ref)).unwrap()
+    };
     writer.force_resource_fork().unwrap();
     writer.add_block(&[0x42]).unwrap();
     let mut output = Vec::new();
