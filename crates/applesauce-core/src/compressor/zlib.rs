@@ -441,8 +441,8 @@ mod tests {
 
         let data_end = u32::try_from(Zlib::header_size(2) + 1).unwrap();
         let reported_len = u64::from(data_end) + Zlib::trailer_size();
-        let error = Zlib::read_block_info(SeekOnly(reported_len), 2 * BLOCK_SIZE as u64)
-            .unwrap_err();
+        let error =
+            Zlib::read_block_info(SeekOnly(reported_len), 2 * BLOCK_SIZE as u64).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -472,10 +472,9 @@ mod tests {
         }
 
         let block_count = 100_000_000u32;
-        let data_end = u32::try_from(
-            Zlib::header_size(u64::from(block_count)) + u64::from(block_count),
-        )
-        .unwrap();
+        let data_end =
+            u32::try_from(Zlib::header_size(u64::from(block_count)) + u64::from(block_count))
+                .unwrap();
         let mut prefix = vec![0u8; 0x108];
         prefix[..HEADER_LEN].copy_from_slice(&header(data_end));
         prefix[0x100..0x104].copy_from_slice(&u32::to_be_bytes(data_end - 0x104));
@@ -485,8 +484,8 @@ mod tests {
             bytes: Cursor::new(prefix),
             reported_len: u64::from(data_end) + Zlib::trailer_size(),
         };
-        let error = Zlib::read_block_info(fork, u64::from(block_count) * BLOCK_SIZE as u64)
-            .unwrap_err();
+        let error =
+            Zlib::read_block_info(fork, u64::from(block_count) * BLOCK_SIZE as u64).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
