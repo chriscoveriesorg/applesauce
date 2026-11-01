@@ -70,7 +70,9 @@ impl super::CompressorImpl for Zlib {
         mut reader: R,
         orig_file_size: u64,
     ) -> io::Result<Vec<BlockInfo>> {
-        let block_count = u32::try_from(crate::num_blocks(orig_file_size)).unwrap();
+        let block_count = u32::try_from(crate::num_blocks(orig_file_size)).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "unrepresentable block count")
+        })?;
 
         let total_size = u32::try_from(reader.seek(SeekFrom::End(0))?).map_err(|_| {
             io::Error::new(
@@ -82,6 +84,16 @@ impl super::CompressorImpl for Zlib {
             .checked_sub(u32::try_from(ZLIB_TRAILER.len()).unwrap())
             .filter(|&end| end >= 0x108)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "resource fork too short"))?;
+
+        // Reject impossible block tables before allocating from untrusted
+        // decmpfs uncompressed-size metadata.
+        let table_end = Self::header_size(u64::from(block_count));
+        if table_end > u64::from(data_end) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "block table extends past compressed data",
+            ));
+        }
 
         reader.rewind()?;
         let mut header_buf = [0; HEADER_LEN];
@@ -120,6 +132,7 @@ impl super::CompressorImpl for Zlib {
         }
 
         let mut result = Vec::with_capacity(block_count.try_into().unwrap());
+        let mut previous_end = table_end as u32;
         let mut buf = [0; BlockInfo::SIZE];
         for _ in 0..block_count {
             reader.read_exact(&mut buf)?;
@@ -134,12 +147,19 @@ impl super::CompressorImpl for Zlib {
                 .offset
                 .checked_add(block_info.compressed_size)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "block end overflow"))?;
+            if block_info.compressed_size == 0 || block_info.offset < previous_end {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "empty, overlapping, or header-overlapping compressed block",
+                ));
+            }
             if block_end > data_end {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "block extends past compressed data",
                 ));
             }
+            previous_end = block_end;
             result.push(block_info);
         }
 
@@ -289,6 +309,44 @@ mod tests {
     fn rejects_short_resource_fork() {
         let mut cursor = Cursor::new(vec![0; ZLIB_TRAILER.len() - 1]);
         assert!(Zlib::read_block_info(&mut cursor, 0).is_err());
+    }
+
+    #[test]
+    fn rejects_unrepresentable_block_count_without_panicking() {
+        let error = Zlib::read_block_info(Cursor::new(Vec::<u8>::new()), u64::MAX)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_empty_overlapping_and_header_overlapping_blocks() {
+        let count = 2;
+        let data_end = Zlib::header_size(count) as usize + 8;
+        let mut cursor = Cursor::new(vec![0u8; data_end]);
+        cursor.set_position(data_end as u64);
+        Zlib::finish(&mut cursor, &[4, 4]).unwrap();
+        let valid = cursor.into_inner();
+        let original_size = 2 * BLOCK_SIZE as u64;
+        assert_eq!(
+            Zlib::read_block_info(Cursor::new(&valid), original_size)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // The first table entry is at 0x108, with offset and length.
+        let mut empty = valid.clone();
+        empty[0x10c..0x110].copy_from_slice(&0u32.to_le_bytes());
+        assert!(Zlib::read_block_info(Cursor::new(empty), original_size).is_err());
+
+        let mut overlapping = valid.clone();
+        let relative = (Zlib::header_size(count) - ZLIB_BLOCK_TABLE_START + 2) as u32;
+        overlapping[0x110..0x114].copy_from_slice(&relative.to_le_bytes());
+        assert!(Zlib::read_block_info(Cursor::new(overlapping), original_size).is_err());
+
+        let mut header_overlap = valid;
+        header_overlap[0x108..0x10c].copy_from_slice(&0u32.to_le_bytes());
+        assert!(Zlib::read_block_info(Cursor::new(header_overlap), original_size).is_err());
     }
 
     #[test]
