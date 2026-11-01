@@ -58,8 +58,9 @@ fn partial_resource_fork_read_preserves_output_and_fails_closed() {
     }
 
     let mut resource_fork = Vec::new();
-    let mut writer = Writer::new(Kind::Zlib, BLOCK_SIZE as u64 + 1, || {
-        Cursor::new(&mut resource_fork)
+    let rfork_ref = &mut resource_fork;
+    let mut writer = Writer::new(Kind::Zlib, BLOCK_SIZE as u64 + 1, move || {
+        Cursor::new(rfork_ref)
     })
     .unwrap();
     writer.add_block(&vec![0x41; 16 * 1024]).unwrap();
