@@ -36,6 +36,15 @@ impl super::CompressorImpl for Zlib {
             ));
         }
 
+        // The CLI and public API both accept levels 1..=12. Some libdeflate
+        // versions accept level 0, so check the contract explicitly.
+        if !(1..=12).contains(&level) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "zlib compression level must be 1..=12",
+            ));
+        }
+
         if self.compressor_level != level {
             let invalid_level = || {
                 io::Error::new(
