@@ -110,13 +110,16 @@ impl super::CompressorImpl for Zlib {
             .filter(|&end| end >= 0x108)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "resource fork too short"))?;
 
-        // Reject impossible block tables before allocating from untrusted
-        // decmpfs uncompressed-size metadata.
+        // Each block needs a table entry and at least one payload byte.
+        // Reject impossible untrusted sizes before reading or allocating.
         let table_end = Self::header_size(u64::from(block_count));
-        if table_end > u64::from(data_end) {
+        if table_end
+            .checked_add(u64::from(block_count))
+            .is_none_or(|min_end| min_end > u64::from(data_end))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "block table extends past compressed data",
+                "block table and minimum payload extend past compressed data",
             ));
         }
 
@@ -156,7 +159,10 @@ impl super::CompressorImpl for Zlib {
             ));
         }
 
-        let mut result = Vec::with_capacity(block_count.try_into().unwrap());
+        // A sparse or forged fork can claim millions of blocks while holding
+        // only a short readable prefix. Grow metadata after checking each
+        // entry, and report allocation failures instead of panicking.
+        let mut result = Vec::new();
         let mut previous_end = table_end as u32;
         let mut buf = [0; BlockInfo::SIZE];
         for _ in 0..block_count {
@@ -185,6 +191,7 @@ impl super::CompressorImpl for Zlib {
                 ));
             }
             previous_end = block_end;
+            result.try_reserve(1).map_err(io::Error::other)?;
             result.push(block_info);
         }
 
@@ -409,6 +416,78 @@ mod tests {
     fn rejects_unrepresentable_block_count_without_panicking() {
         let error = Zlib::read_block_info(Cursor::new(Vec::<u8>::new()), u64::MAX).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_block_table_without_minimum_payload_before_reading() {
+        // A block must occupy at least one byte beyond its table entry.
+        // Reject the forged length without reading any filesystem bytes.
+        struct SeekOnly(u64);
+
+        impl io::Read for SeekOnly {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("invalid layout must be rejected before reading");
+            }
+        }
+
+        impl io::Seek for SeekOnly {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                match pos {
+                    SeekFrom::End(0) => Ok(self.0),
+                    _ => panic!("invalid layout must be rejected before seeking the table"),
+                }
+            }
+        }
+
+        let data_end = u32::try_from(Zlib::header_size(2) + 1).unwrap();
+        let reported_len = u64::from(data_end) + Zlib::trailer_size();
+        let error = Zlib::read_block_info(SeekOnly(reported_len), 2 * BLOCK_SIZE as u64)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn sparse_fork_with_huge_claimed_table_rejects_truncated_entries() {
+        // Advertise a valid 100-million-block layout with a 264-byte prefix.
+        // The reader must fail at the first absent entry without reserving
+        // metadata for all claimed blocks.
+        struct SparseFork {
+            bytes: Cursor<Vec<u8>>,
+            reported_len: u64,
+        }
+
+        impl io::Read for SparseFork {
+            fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+                io::Read::read(&mut self.bytes, dst)
+            }
+        }
+
+        impl io::Seek for SparseFork {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                match pos {
+                    SeekFrom::End(0) => Ok(self.reported_len),
+                    other => io::Seek::seek(&mut self.bytes, other),
+                }
+            }
+        }
+
+        let block_count = 100_000_000u32;
+        let data_end = u32::try_from(
+            Zlib::header_size(u64::from(block_count)) + u64::from(block_count),
+        )
+        .unwrap();
+        let mut prefix = vec![0u8; 0x108];
+        prefix[..HEADER_LEN].copy_from_slice(&header(data_end));
+        prefix[0x100..0x104].copy_from_slice(&u32::to_be_bytes(data_end - 0x104));
+        prefix[0x104..0x108].copy_from_slice(&block_count.to_le_bytes());
+
+        let fork = SparseFork {
+            bytes: Cursor::new(prefix),
+            reported_len: u64::from(data_end) + Zlib::trailer_size(),
+        };
+        let error = Zlib::read_block_info(fork, u64::from(block_count) * BLOCK_SIZE as u64)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]
