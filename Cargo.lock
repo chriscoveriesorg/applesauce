@@ -122,6 +122,7 @@ dependencies = [
  "libdeflater",
  "lzfse-sys",
  "rand",
+ "sha2",
  "tracing",
 ]
 

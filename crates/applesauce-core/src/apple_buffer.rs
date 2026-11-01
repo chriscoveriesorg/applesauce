@@ -107,6 +107,25 @@ impl Codec {
         platform::decode(self, dst, src)
     }
 
+    /// Preallocate the Apple Compression API's encoder and decoder scratch
+    /// buffers once, for repeated calls with the same codec. This allows
+    /// benchmarks and batch users to separate scratch allocation from codec
+    /// throughput. A zero-byte scratch requirement is valid.
+    ///
+    /// Scratch storage is private to each value; do not share a mutable
+    /// instance across simultaneous codec calls.
+    pub fn reusable_scratch(self) -> io::Result<Scratch> {
+        self.ensure_supported()?;
+        let (encode_bytes, decode_bytes) = platform::scratch_sizes(self)?;
+        Ok(Scratch {
+            codec: self,
+            encode_bytes,
+            decode_bytes,
+            encode_words: aligned_words(encode_bytes)?,
+            decode_words: aligned_words(decode_bytes)?,
+        })
+    }
+
     /// Allocate a bounded output buffer and encode a nonempty input of at most
     /// 64 MiB. The capacity is a policy limit, not a promised codec size bound.
     pub fn encode(self, src: &[u8]) -> io::Result<Vec<u8>> {
@@ -150,6 +169,69 @@ impl Codec {
             ));
         }
         Ok(())
+    }
+}
+
+/// Caller-owned, reusable and 64-byte-aligned scratch buffers for one codec.
+/// Unlike `Codec::encode_into`, scratch allocation is performed at creation,
+/// outside each measured operation. Input and output slices remain caller-owned.
+#[derive(Debug)]
+pub struct Scratch {
+    codec: Codec,
+    encode_bytes: usize,
+    decode_bytes: usize,
+    encode_words: Vec<AlignedScratch>,
+    decode_words: Vec<AlignedScratch>,
+}
+
+impl Scratch {
+    #[must_use]
+    pub const fn sizes(&self) -> (usize, usize) {
+        (self.encode_bytes, self.decode_bytes)
+    }
+
+    pub fn encode_into(&mut self, dst: &mut [u8], src: &[u8]) -> io::Result<usize> {
+        self.codec.ensure_supported()?;
+        if src.is_empty() || dst.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty buffer"));
+        }
+        platform::encode_with_scratch(self.codec, dst, src, scratch_ptr(&mut self.encode_words))
+    }
+
+    pub fn decode_into(&mut self, dst: &mut [u8], src: &[u8]) -> io::Result<usize> {
+        self.codec.ensure_supported()?;
+        if src.is_empty() || dst.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty buffer"));
+        }
+        platform::decode_with_scratch(self.codec, dst, src, scratch_ptr(&mut self.decode_words))
+    }
+}
+
+const MAX_SCRATCH_BYTES: usize = 128 * 1024 * 1024;
+
+#[repr(align(64))]
+#[derive(Debug)]
+struct AlignedScratch([u8; 64]);
+
+fn aligned_words(size: usize) -> io::Result<Vec<AlignedScratch>> {
+    if size > MAX_SCRATCH_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Apple codec requested an unexpectedly large scratch buffer",
+        ));
+    }
+    let count = size.div_ceil(size_of::<AlignedScratch>());
+    let mut words = Vec::new();
+    words.try_reserve_exact(count).map_err(io::Error::other)?;
+    words.resize_with(count, || AlignedScratch([0; 64]));
+    Ok(words)
+}
+
+fn scratch_ptr(words: &mut [AlignedScratch]) -> *mut std::ffi::c_void {
+    if words.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        words[0].0.as_mut_ptr().cast()
     }
 }
 
@@ -243,18 +325,30 @@ mod platform {
             scratch: *mut c_void,
             algorithm: u32,
         ) -> usize;
+        fn compression_encode_scratch_buffer_size(algorithm: u32) -> usize;
+        fn compression_decode_scratch_buffer_size(algorithm: u32) -> usize;
     }
 
     pub(super) fn encode(codec: Codec, dst: &mut [u8], src: &[u8]) -> io::Result<usize> {
+        encode_with_scratch(codec, dst, src, ptr::null_mut())
+    }
+
+    pub(super) fn encode_with_scratch(
+        codec: Codec,
+        dst: &mut [u8],
+        src: &[u8],
+        scratch: *mut c_void,
+    ) -> io::Result<usize> {
         // SAFETY: nonoverlapping borrowed slices have the supplied lengths.
-        // The caller checked OS availability. NULL requests API-owned scratch.
+        // The caller checked OS availability. The supplied scratch is either
+        // NULL (API-owned) or sized by Apple's size query for this algorithm.
         let count = unsafe {
             compression_encode_buffer(
                 dst.as_mut_ptr(),
                 dst.len(),
                 src.as_ptr(),
                 src.len(),
-                ptr::null_mut(),
+                scratch,
                 codec as u32,
             )
         };
@@ -274,6 +368,15 @@ mod platform {
     }
 
     pub(super) fn decode(codec: Codec, dst: &mut [u8], src: &[u8]) -> io::Result<usize> {
+        decode_with_scratch(codec, dst, src, ptr::null_mut())
+    }
+
+    pub(super) fn decode_with_scratch(
+        codec: Codec,
+        dst: &mut [u8],
+        src: &[u8],
+        scratch: *mut c_void,
+    ) -> io::Result<usize> {
         // SAFETY: nonoverlapping borrowed slices have the supplied lengths.
         // The caller checked OS availability. NULL requests API-owned scratch.
         let count = unsafe {
@@ -282,7 +385,7 @@ mod platform {
                 dst.len(),
                 src.as_ptr(),
                 src.len(),
-                ptr::null_mut(),
+                scratch,
                 codec as u32,
             )
         };
@@ -294,6 +397,17 @@ mod platform {
         } else {
             Ok(count)
         }
+    }
+
+    pub(super) fn scratch_sizes(codec: Codec) -> io::Result<(usize, usize)> {
+        // SAFETY: Apple Compression.framework accepts this public algorithm
+        // selector on the host OS after the caller's availability check.
+        Ok(unsafe {
+            (
+                compression_encode_scratch_buffer_size(codec as u32),
+                compression_decode_scratch_buffer_size(codec as u32),
+            )
+        })
     }
 
     pub(super) fn sysctl_string(name: &CStr) -> Option<String> {
@@ -333,6 +447,25 @@ mod platform {
         Err(io::ErrorKind::Unsupported.into())
     }
     pub(super) fn decode(_: Codec, _: &mut [u8], _: &[u8]) -> io::Result<usize> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    pub(super) fn encode_with_scratch(
+        _: Codec,
+        _: &mut [u8],
+        _: &[u8],
+        _: *mut std::ffi::c_void,
+    ) -> io::Result<usize> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    pub(super) fn decode_with_scratch(
+        _: Codec,
+        _: &mut [u8],
+        _: &[u8],
+        _: *mut std::ffi::c_void,
+    ) -> io::Result<usize> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    pub(super) fn scratch_sizes(_: Codec) -> io::Result<(usize, usize)> {
         Err(io::ErrorKind::Unsupported.into())
     }
     pub(super) fn sysctl_string(_: &CStr) -> Option<String> {
@@ -382,6 +515,11 @@ mod tests {
             2 * MAX_BUFFER_BYTES + 65536
         );
         assert!(Codec::Lzraven.decode_exact(&[1], usize::MAX).is_err());
+        assert_eq!(aligned_words(0).unwrap().len(), 0);
+        assert_eq!(aligned_words(17).unwrap().len(), 1);
+        assert_eq!(aligned_words(65).unwrap().len(), 2);
+        assert_eq!(align_of::<AlignedScratch>(), 64);
+        assert!(aligned_words(MAX_SCRATCH_BYTES + 1).is_err());
     }
 
     #[test]
@@ -411,9 +549,19 @@ mod tests {
             .collect();
         for codec in Codec::ALL.into_iter().filter(|codec| codec.is_supported()) {
             codec.verify_roundtrip().unwrap();
+            let mut scratch = codec.reusable_scratch().unwrap();
             for source in [&repeated[..], &noise[..], &[42][..]] {
                 let encoded = codec.encode(source).unwrap();
                 assert_eq!(codec.decode_exact(&encoded, source.len()).unwrap(), source);
+                let mut reusable_encoded = vec![0; source.len() * 2 + 65536];
+                let reusable_len = scratch.encode_into(&mut reusable_encoded, source).unwrap();
+                reusable_encoded.truncate(reusable_len);
+                let mut reusable_decoded = vec![0; source.len() + 1];
+                let size = scratch
+                    .decode_into(&mut reusable_decoded, &reusable_encoded)
+                    .unwrap();
+                assert_eq!(size, source.len());
+                assert_eq!(&reusable_decoded[..size], source);
                 if source.len() > 1 {
                     assert!(codec.decode_exact(&encoded, source.len() - 1).is_err());
                 }
