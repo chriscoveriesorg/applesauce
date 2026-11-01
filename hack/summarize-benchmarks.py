@@ -47,7 +47,15 @@ def median_ns(root: Path, row: dict[str, str], operation: str) -> float:
     )
     path = root / relative
     with path.open(encoding="utf-8") as handle:
-        duration = float(json.load(handle)["median"]["point_estimate"])
+        value = json.load(handle)["median"]["point_estimate"]
+    # Python's JSON decoder permits nonstandard NaN/Infinity; malformed
+    # types (including bool and numeric strings) are not Criterion estimates.
+    if type(value) not in (int, float):
+        raise ValueError(f"invalid {operation} median in {path}")
+    try:
+        duration = float(value)
+    except (ValueError, OverflowError) as error:
+        raise ValueError(f"invalid {operation} median in {path}") from error
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError(f"invalid {operation} median in {path}")
     return duration
