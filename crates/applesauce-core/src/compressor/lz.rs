@@ -191,7 +191,10 @@ mod tests {
         let mut compressor = Lz::<OneByteDecoder>::new();
         let mut exact = [0u8; 1];
         assert_eq!(
-            compressor.decompress(&mut exact, &[0x41]).unwrap_err().kind(),
+            compressor
+                .decompress(&mut exact, &[0x41])
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::WriteZero,
         );
 
