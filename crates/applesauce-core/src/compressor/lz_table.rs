@@ -19,6 +19,15 @@ pub(super) fn read_block_info<R: io::Read + io::Seek>(
     let block_count = crate::num_blocks(orig_file_size);
     let blocks_start =
         u32::try_from(header_size(block_count)).map_err(|_| io::ErrorKind::InvalidInput)?;
+    // A corrupt uncompressed-size field must not cause a large allocation
+    // before checking whether the resource fork even contains its table.
+    if reader.seek(SeekFrom::End(0))? < u64::from(blocks_start) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resource fork shorter than its block table",
+        ));
+    }
+    reader.rewind()?;
     let mut result = Vec::with_capacity(
         block_count
             .try_into()
@@ -40,6 +49,12 @@ pub(super) fn read_block_info<R: io::Read + io::Seek>(
         let compressed_size = next_offset
             .checked_sub(last_offset)
             .ok_or_else(|| io::Error::other("compressed block overlap"))?;
+        if compressed_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "empty compressed block in resource fork",
+            ));
+        }
         result.push(BlockInfo {
             offset: last_offset,
             compressed_size,
@@ -132,12 +147,22 @@ mod tests {
     #[test]
     fn malformed_offsets_and_truncated_tables_are_rejected() {
         let size = BLOCK_SIZE as u64 + 1;
-        for offsets in [[8u32, 14, 18], [12, 11, 18], [12, 14, 19], [12, 14, 17]] {
+        for offsets in [
+            [8u32, 14, 18],
+            [12, 11, 18],
+            [12, 12, 18], // zero-length first block
+            [12, 14, 14], // zero-length final block
+            [12, 14, 19],
+            [12, 14, 17],
+        ] {
             let mut data: Vec<u8> = offsets.into_iter().flat_map(u32::to_le_bytes).collect();
             data.resize(18, 0);
             assert!(read_block_info(Cursor::new(data), size).is_err());
         }
         assert!(read_block_info(Cursor::new(vec![12, 0, 0, 0]), size).is_err());
+        let error =
+            read_block_info(Cursor::new(vec![0; 4]), 1_000_000 * BLOCK_SIZE as u64).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
