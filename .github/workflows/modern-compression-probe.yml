@@ -8,6 +8,8 @@ on:
       - 'Cargo.*'
       - 'crates/**'
       - 'hack/*probe*'
+      - 'hack/summarize-benchmarks.py'
+      - 'hack/test_benchmark_summary.py'
       - '.github/workflows/modern-compression-probe.yml'
   push:
     branches: [main, 'modern-compression/**', 'experimental/**']
@@ -15,6 +17,8 @@ on:
       - 'Cargo.*'
       - 'crates/**'
       - 'hack/*probe*'
+      - 'hack/summarize-benchmarks.py'
+      - 'hack/test_benchmark_summary.py'
       - '.github/workflows/modern-compression-probe.yml'
   workflow_dispatch:
     inputs:
