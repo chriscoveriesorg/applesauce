@@ -132,6 +132,9 @@ impl<I: Impl> CompressorImpl for Lz<I> {
         if let Some(uncompressed_prefix) = I::UNCOMPRESSED_PREFIX {
             if src[0] == uncompressed_prefix {
                 let src = &src[1..];
+                if src.is_empty() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
                 if dst.len() < src.len() {
                     return Err(io::ErrorKind::WriteZero.into());
                 }
@@ -233,6 +236,19 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(output, [0x5a; 16]);
+    }
+
+    #[test]
+    fn marker_only_stored_block_is_invalid() {
+        let mut compressor = Lz::<OversizedEncoder<true>>::new();
+        let mut output = [0xa5; 2];
+        let error = compressor.decompress(&mut output, &[0x06]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(output, [0xa5; 2]);
+
+        let size = compressor.decompress(&mut output, &[0x06, 0x41]).unwrap();
+        assert_eq!(size, 1);
+        assert_eq!(output[0], 0x41);
     }
 
     #[test]
