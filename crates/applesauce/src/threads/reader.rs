@@ -217,7 +217,14 @@ mod tests {
 
     #[test]
     fn chunk_reader_preserves_generated_bytes_and_boundaries() {
-        for len in [0, 1, BLOCK_SIZE - 1, BLOCK_SIZE, BLOCK_SIZE + 1, 2 * BLOCK_SIZE + 13] {
+        for len in [
+            0,
+            1,
+            BLOCK_SIZE - 1,
+            BLOCK_SIZE,
+            BLOCK_SIZE + 1,
+            2 * BLOCK_SIZE + 13,
+        ] {
             let input: Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
             let mut cursor = Cursor::new(&input);
             let mut recovered = Vec::new();
@@ -248,7 +255,9 @@ mod tests {
             }
         }
 
-        let input: Vec<u8> = (0..BLOCK_SIZE + 7).map(|index| (index % 251) as u8).collect();
+        let input: Vec<u8> = (0..BLOCK_SIZE + 7)
+            .map(|index| (index % 251) as u8)
+            .collect();
         let mut reader = OneByteReader(&input);
         assert_eq!(read_chunk(&mut reader).unwrap(), input[..BLOCK_SIZE]);
         assert_eq!(read_chunk(&mut reader).unwrap(), input[BLOCK_SIZE..]);
