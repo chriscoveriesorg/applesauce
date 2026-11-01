@@ -377,7 +377,6 @@ fn failed_single_block_resource_fork_conversion_cannot_publish() {
     assert!(output.is_empty());
 }
 
-
 struct VirtualNearLimitFork {
     position: u64,
     starting_position: u64,
@@ -428,11 +427,8 @@ fn oversized_resource_fork_payload_is_rejected_before_writing() {
     // fail before any write when it would make the final layout impossible.
     for kind in Kind::ALL.into_iter().filter(|kind| kind.supported()) {
         let writes = std::rc::Rc::new(std::cell::Cell::new(0));
-        let mut writer = near_limit_writer(
-            kind,
-            u64::from(u32::MAX) - 1,
-            std::rc::Rc::clone(&writes),
-        );
+        let mut writer =
+            near_limit_writer(kind, u64::from(u32::MAX) - 1, std::rc::Rc::clone(&writes));
         assert_eq!(
             writer.add_block(&[0x11, 0x22]).unwrap_err().kind(),
             std::io::ErrorKind::InvalidInput,
@@ -451,8 +447,7 @@ fn zlib_trailer_and_remaining_block_fit_exactly_at_the_limit() {
     // 2-byte first payload + 1-byte required final payload + 50-byte trailer.
     for (position, accepted) in [(max - 53, true), (max - 52, false)] {
         let writes = std::rc::Rc::new(std::cell::Cell::new(0));
-        let mut writer =
-            near_limit_writer(Kind::Zlib, position, std::rc::Rc::clone(&writes));
+        let mut writer = near_limit_writer(Kind::Zlib, position, std::rc::Rc::clone(&writes));
         let result = writer.add_block(&[0x11, 0x22]);
         assert_eq!(result.is_ok(), accepted, "position={position}");
         assert_eq!(writes.get(), usize::from(accepted));
