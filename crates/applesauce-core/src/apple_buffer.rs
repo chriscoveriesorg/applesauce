@@ -585,7 +585,9 @@ mod tests {
                 assert_eq!(size, source.len());
                 assert_eq!(&reusable_decoded[..size], source);
                 assert_eq!(
-                    scratch.decode_exact(&reusable_encoded, source.len()).unwrap(),
+                    scratch
+                        .decode_exact(&reusable_encoded, source.len())
+                        .unwrap(),
                     source
                 );
                 if source.len() > 1 {
