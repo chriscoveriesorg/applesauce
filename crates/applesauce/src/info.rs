@@ -241,7 +241,7 @@ pub fn get(path: &Path) -> io::Result<AfscFileInfo> {
 }
 
 fn get_decmpfs_info(path: &CStr) -> io::Result<Result<DecmpfsInfo, decmpfs::DecodeError>> {
-    let maybe_data = xattr::read(path, decmpfs::XATTR_NAME)?;
+    let maybe_data = xattr::read(path, decmpfs::XATTR_NAME, decmpfs::MAX_XATTR_SIZE)?;
     let data = maybe_data.ok_or_else(|| io::Error::other("cannot get decmpfs xattr"))?;
 
     Ok(decmpfs_info_from_bytes(&data))
