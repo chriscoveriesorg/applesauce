@@ -38,6 +38,11 @@ pub unsafe trait Impl {
     unsafe fn decode(dst: &mut [u8], src: &[u8], scratch: NonNull<u8>) -> usize;
 }
 
+// Match the cache-line alignment of apple_buffer::Scratch. This also exceeds
+// the alignment required by the LZVN decoder state and accommodates wider
+// vector accesses in the underlying encoder's scratch workspace.
+const SCRATCH_ALIGNMENT: usize = 64;
+
 pub struct Lz<I: Impl> {
     buf: NonNull<u8>,
     _impl: PhantomData<I>,
@@ -65,7 +70,7 @@ impl<I: Impl> Lz<I> {
     fn layout() -> alloc::Layout {
         // Ensure at least one byte: not allowed to allocate a zero sized layout
         let size = I::scratch_size().max(1);
-        alloc::Layout::from_size_align(size, align_of::<*mut u8>()).unwrap()
+        alloc::Layout::from_size_align(size, SCRATCH_ALIGNMENT).unwrap()
     }
 }
 
@@ -218,6 +223,17 @@ mod tests {
         unsafe fn decode(_: &mut [u8], _: &[u8], _: NonNull<u8>) -> usize {
             0
         }
+    }
+
+    #[test]
+    fn legacy_lz_scratch_is_cache_line_aligned() {
+        let compressor = Lz::<OneByteDecoder>::new();
+        assert_eq!(Lz::<OneByteDecoder>::layout().align(), SCRATCH_ALIGNMENT);
+        assert_eq!(
+            (compressor.buf.as_ptr() as usize) % SCRATCH_ALIGNMENT,
+            0,
+            "LZ scratch pointer must satisfy the declared allocator alignment",
+        );
     }
 
     #[test]
