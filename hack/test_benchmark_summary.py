@@ -100,6 +100,15 @@ class BenchmarkSummaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate benchmark case"):
                 summary.summarize(manifest, criterion, output)
 
+            for invalid_size in ("0", "-1"):
+                row["input_bytes"] = invalid_size
+                with manifest.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=summary.FIELDS)
+                    writer.writeheader()
+                    writer.writerow(row)
+                with self.assertRaisesRegex(ValueError, "invalid benchmark input size"):
+                    summary.summarize(manifest, criterion, output)
+
 
 if __name__ == "__main__":
     unittest.main()
