@@ -160,11 +160,8 @@ mod tests {
             assert!(read_block_info(Cursor::new(data), size).is_err());
         }
         assert!(read_block_info(Cursor::new(vec![12, 0, 0, 0]), size).is_err());
-        let error = read_block_info(
-            Cursor::new(vec![0; 4]),
-            1_000_000 * BLOCK_SIZE as u64,
-        )
-        .unwrap_err();
+        let error =
+            read_block_info(Cursor::new(vec![0; 4]), 1_000_000 * BLOCK_SIZE as u64).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
