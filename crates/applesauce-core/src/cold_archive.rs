@@ -140,6 +140,16 @@ pub fn write_archive<R: Read, W: Write + Seek>(
             "archive destination must be a new empty staging file",
         ));
     }
+    // Scratch and working buffers are allocated once for the entire file.
+    // Repeated 64 KiB chunks would otherwise pay Apple's scratch setup and
+    // three heap allocations per chunk, obscuring codec throughput.
+    let mut scratch = codec.reusable_scratch()?;
+    let mut clear_storage = vec![0u8; chunk_size];
+    let mut encoded_storage = vec![0u8; bounded_encoded_len(chunk_size)];
+    // Apple's decoder can fill the entire destination on truncated output.
+    // The extra byte detects overlong results before any staged success.
+    let mut decoded_storage = vec![0u8; chunk_size + 1];
+
     let table_bytes = count * ENTRY_BYTES;
     destination.seek(SeekFrom::Start(0))?;
     destination.write_all(&[0u8; HEADER_BYTES])?;
@@ -151,23 +161,31 @@ pub fn write_archive<R: Read, W: Write + Seek>(
     let mut next_offset = (HEADER_BYTES + table_bytes) as u64;
     for _ in 0..count {
         let clear_len = remaining.min(chunk_size as u64) as usize;
-        let mut clear = vec![0u8; clear_len];
-        source.read_exact(&mut clear)?;
-        total_hash.update(&clear);
-        let digest: [u8; 32] = Sha256::digest(&clear).into();
-        let encoded = codec.encode(&clear)?;
-        if encoded.is_empty() || encoded.len() > bounded_encoded_len(clear_len) {
+        let clear = &mut clear_storage[..clear_len];
+        source.read_exact(clear)?;
+        total_hash.update(&clear[..]);
+        let digest: [u8; 32] = Sha256::digest(&clear[..]).into();
+        // Bound each compressed chunk by its own logical size, including the
+        // final short chunk. No per-chunk allocation or scratch setup occurs.
+        let encoded_len = scratch.encode_into(
+            &mut encoded_storage[..bounded_encoded_len(clear_len)],
+            clear,
+        )?;
+        if encoded_len == 0 || encoded_len > bounded_encoded_len(clear_len) {
             return Err(invalid("encoder produced an invalid chunk length"));
         }
-        // Never report a successful staged archive on encode-only evidence:
-        // prove the public buffer decoder reconstructs the exact chunk bytes.
-        let decoded = codec.decode_exact(&encoded, clear_len)?;
-        if decoded != clear {
+        // Never report successful staged output on encode-only evidence.
+        // Check the exact length and bytes with a one-byte decode guard.
+        let decoded_len = scratch.decode_into(
+            &mut decoded_storage[..clear_len + 1],
+            &encoded_storage[..encoded_len],
+        )?;
+        if decoded_len != clear_len || decoded_storage[..clear_len] != clear[..] {
             return Err(invalid("encoder failed exact-byte chunk round-trip"));
         }
-        let stored_len = u32::try_from(encoded.len())
+        let stored_len = u32::try_from(encoded_len)
             .map_err(|_| invalid("encoded chunk length exceeds field width"))?;
-        destination.write_all(&encoded)?;
+        destination.write_all(&encoded_storage[..encoded_len])?;
         entries.push(Entry {
             offset: next_offset,
             stored_len,
@@ -175,7 +193,7 @@ pub fn write_archive<R: Read, W: Write + Seek>(
             clear_sha256: digest,
         });
         next_offset = next_offset
-            .checked_add(encoded.len() as u64)
+            .checked_add(encoded_len as u64)
             .ok_or_else(|| invalid("archive offset overflow"))?;
         remaining -= clear_len as u64;
     }
@@ -223,6 +241,9 @@ pub struct ArchiveReader<R> {
     logical_size: u64,
     logical_sha256: [u8; 32],
     entries: Vec<Entry>,
+    // Lazy so portable metadata inspection works without Apple codecs.
+    // Reuse aligned decoder scratch across random reads and verify_all.
+    decode_scratch: Option<crate::apple_buffer::Scratch>,
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
@@ -288,6 +309,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             logical_size,
             logical_sha256,
             entries,
+            decode_scratch: None,
         })
     }
 
@@ -311,8 +333,13 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let mut encoded = vec![0u8; entry.stored_len as usize];
         self.source.seek(SeekFrom::Start(entry.offset))?;
         self.source.read_exact(&mut encoded)?;
+        if self.decode_scratch.is_none() {
+            self.decode_scratch = Some(self.codec.reusable_scratch()?);
+        }
         let decoded = self
-            .codec
+            .decode_scratch
+            .as_mut()
+            .expect("scratch initialized above")
             .decode_exact(&encoded, entry.clear_len as usize)?;
         let digest: [u8; 32] = Sha256::digest(&decoded).into();
         if digest != entry.clear_sha256 {
@@ -406,6 +433,8 @@ mod tests {
         assert_eq!(reader.logical_size(), 1);
         let expected: [u8; 32] = Sha256::digest(b"x").into();
         assert_eq!(reader.logical_sha256(), expected);
+        // Metadata inspection must not allocate platform-dependent scratch.
+        assert!(reader.decode_scratch.is_none());
     }
 
     #[test]
@@ -544,7 +573,9 @@ mod tests {
             assert_eq!(stats.logical_sha256, expected);
             let stored = output.into_inner();
             let mut archive = ArchiveReader::open(Cursor::new(stored.clone())).unwrap();
+            assert!(archive.decode_scratch.is_none());
             archive.verify_all().unwrap();
+            assert!(archive.decode_scratch.is_some());
             for (start, length) in [
                 (0, 1),
                 (MIN_CHUNK_BYTES - 9, 29),
