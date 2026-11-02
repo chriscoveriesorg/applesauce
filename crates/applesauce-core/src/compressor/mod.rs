@@ -551,7 +551,10 @@ mod tests {
             .decompress(&mut output, &encoded)
             .unwrap_err();
         assert!(
-            matches!(error.kind(), io::ErrorKind::Other | io::ErrorKind::InvalidData),
+            matches!(
+                error.kind(),
+                io::ErrorKind::Other | io::ErrorKind::InvalidData
+            ),
             "unexpected decompression error: {error}"
         );
         assert!(
