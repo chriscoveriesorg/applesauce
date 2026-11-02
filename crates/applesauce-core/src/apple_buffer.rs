@@ -144,7 +144,7 @@ impl Codec {
         validate_size(expected_size)?;
         self.ensure_supported()?;
         // Reject empty compressed payloads before allocating up to 64 MiB.
-        validate_encoded_input(src)?;
+        validate_encoded_input(src, expected_size)?;
         let mut decoded = allocate(expected_size + 1)?;
         let count = self.decode_into(&mut decoded, src)?;
         if count != expected_size {
@@ -239,7 +239,7 @@ impl Scratch {
         validate_size(expected_size)?;
         self.codec.ensure_supported()?;
         // Reject empty compressed payloads before allocating up to 64 MiB.
-        validate_encoded_input(src)?;
+        validate_encoded_input(src, expected_size)?;
         let mut decoded = allocate(expected_size + 1)?;
         let count = self.decode_into(&mut decoded, src)?;
         if count != expected_size {
@@ -292,15 +292,24 @@ fn validate_size(size: usize) -> io::Result<()> {
     }
 }
 
-fn validate_encoded_input(src: &[u8]) -> io::Result<()> {
+fn validate_encoded_input(src: &[u8], expected_size: usize) -> io::Result<()> {
     if src.is_empty() {
-        Err(io::Error::new(
+        return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "empty compressed input",
-        ))
-    } else {
-        Ok(())
+        ));
     }
+    // The allocating encoder accepts only bounded inputs and provides at
+    // most this much output capacity. Reject implausibly long compressed
+    // payloads before allocating the expected output buffer or calling FFI.
+    // This also rejects trailing padding that could hide malformed frames.
+    if src.len() > encoded_capacity(expected_size)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compressed buffer exceeds defensive size ceiling",
+        ));
+    }
+    Ok(())
 }
 
 fn encoded_capacity(size: usize) -> io::Result<usize> {
@@ -580,12 +589,39 @@ mod tests {
     }
 
     #[test]
-    fn empty_compressed_input_is_rejected_by_preallocation_guard() {
+    fn invalid_encoded_input_is_rejected_before_output_allocation() {
         assert_eq!(
-            validate_encoded_input(&[]).unwrap_err().kind(),
+            validate_encoded_input(&[], 1).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
-        assert!(validate_encoded_input(&[0x41]).is_ok());
+        assert!(validate_encoded_input(&[0x41], 1).is_ok());
+        let cap = encoded_capacity(1).unwrap();
+        assert!(validate_encoded_input(&vec![0xa5; cap], 1).is_ok());
+        assert_eq!(
+            validate_encoded_input(&vec![0xa5; cap + 1], 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn oversized_compressed_input_fails_before_native_decode() {
+        let oversized = vec![0xa5; encoded_capacity(1).unwrap() + 1];
+        for codec in Codec::ALL.into_iter().filter(|codec| codec.is_supported()) {
+            assert_eq!(
+                codec.decode_exact(&oversized, 1).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "{codec:?}"
+            );
+            let mut scratch = codec.reusable_scratch().unwrap();
+            assert_eq!(
+                scratch.decode_exact(&oversized, 1).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "{codec:?}"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
