@@ -156,6 +156,22 @@ impl Compressor {
                 "native compressed block exceeds defensive size ceiling",
             ));
         }
+        // Stored-marker blocks are copied directly into the caller's buffer
+        // by their codec backends. Reject an overlong logical block before
+        // that copy, so malformed input cannot modify output on this path.
+        let stored_marker = match self.kind() {
+            Kind::Zlib | Kind::Lzbitmap => Some(0xff),
+            Kind::Lzvn => Some(0x06),
+            Kind::Lzfse => None,
+        };
+        if src.len() > crate::BLOCK_SIZE + 1
+            && stored_marker.is_some_and(|marker| src.first() == Some(&marker))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native stored block exceeds 64 KiB",
+            ));
+        }
         let decoded_size = match self.0 {
             #[cfg(feature = "zlib")]
             Data::Zlib(ref mut i) => i.decompress(dst, src),
@@ -433,8 +449,13 @@ mod tests {
             assert_eq!(&output[..size], &stored[1..], "{kind}");
 
             stored.push(0x42);
+            output.fill(0xa5);
             let error = compressor.decompress(&mut output, &stored).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{kind}");
+            assert!(
+                output.iter().all(|&byte| byte == 0xa5),
+                "{kind} modified output for an oversized stored block"
+            );
         }
     }
 
