@@ -387,7 +387,8 @@ mod tests {
         let reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
         assert_eq!(reader.codec(), Codec::Lzraven);
         assert_eq!(reader.logical_size(), 1);
-        assert_eq!(reader.logical_sha256(), Sha256::digest(b"x").into());
+        let expected: [u8; 32] = Sha256::digest(b"x").into();
+        assert_eq!(reader.logical_sha256(), expected);
     }
 
     #[test]
@@ -469,7 +470,8 @@ mod tests {
             assert_eq!(stats.logical_size, clear.len() as u64);
             assert_eq!(stats.chunk_count, 3);
             assert_eq!(stats.archive_bytes, output.get_ref().len() as u64);
-            assert_eq!(stats.logical_sha256, Sha256::digest(&clear).into());
+            let expected: [u8; 32] = Sha256::digest(&clear).into();
+            assert_eq!(stats.logical_sha256, expected);
             let stored = output.into_inner();
             let mut archive = ArchiveReader::open(Cursor::new(stored.clone())).unwrap();
             archive.verify_all().unwrap();
