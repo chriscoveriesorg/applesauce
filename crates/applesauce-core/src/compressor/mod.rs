@@ -400,7 +400,7 @@ mod tests {
                 continue;
             };
             let mut stored = vec![marker];
-            stored.extend_from_slice(&vec![0x42; crate::BLOCK_SIZE]);
+            stored.resize(crate::BLOCK_SIZE + 1, 0x42);
             let mut output = vec![0; crate::BLOCK_SIZE + 1024];
             let size = compressor.decompress(&mut output, &stored).unwrap();
             assert_eq!(size, crate::BLOCK_SIZE, "{kind}");
