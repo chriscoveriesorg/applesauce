@@ -123,6 +123,33 @@ class MatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate benchmark case"):
             matrix.validate(self.manifest, "smoke")
 
+    def test_rejects_impossible_encoded_sizes_even_with_matching_ratios(self):
+        # One 64 KiB whole-buffer encode has a 3 * 64 KiB output
+        # allocation. The encoded byte count cannot exceed that buffer.
+        for size, valid in ((196608, True), (196609, False)):
+            with self.subTest(size=size):
+                self.rows[0]["encoded_bytes"] = str(size)
+                self.rows[0]["encoded_over_input_ratio"] = str(size / 65536)
+                self.write()
+                if valid:
+                    self.assertEqual(matrix.validate(self.manifest, "smoke"), 20)
+                else:
+                    with self.assertRaisesRegex(ValueError, "invalid encoded size or ratio"):
+                        matrix.validate(self.manifest, "smoke")
+
+        # Independent blocks each reserve their own 64 KiB overhead.
+        self.rows = self.build_rows("standard")
+        row = next(row for row in self.rows if (
+            row["input_bytes"] == "1048576"
+            and row["layout"] == "independent-64k"
+        ))
+        # 16 pieces: 2 MiB input expansion plus 16 * 64 KiB overhead.
+        row["encoded_bytes"] = str(3 * 1048576 + 1)
+        row["encoded_over_input_ratio"] = str((3 * 1048576 + 1) / 1048576)
+        self.write()
+        with self.assertRaisesRegex(ValueError, "invalid encoded size or ratio"):
+            matrix.validate(self.manifest, "standard")
+
     def test_all_fixture_sizes_are_pinned_to_v1_goldens(self):
         for suite in ("standard", "extended"):
             with self.subTest(suite=suite):
