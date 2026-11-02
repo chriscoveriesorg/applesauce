@@ -71,9 +71,14 @@ unsafe impl lz::Impl for Impl {
             return 0;
         }
 
-        assert!(dst_range.contains(&state.dst));
-        // SAFETY: lvzn_decode will have updated the dst ptr on state,
-        //         but kept within range dst..dst_end
+        // A complete decode may leave the cursor exactly one past the
+        // destination's final byte. Treat other out-of-range cursors as
+        // malformed output rather than panicking inside a codec worker.
+        if !dst_range.contains(&state.dst) && state.dst != dst_range.end {
+            return 0;
+        }
+        // SAFETY: The decoder cursor was checked to lie within the output
+        // allocation or exactly at its one-past-end position.
         unsafe { state.dst.offset_from_unsigned(dst.as_mut_ptr()) }
     }
 }
