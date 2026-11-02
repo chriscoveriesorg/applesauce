@@ -40,6 +40,16 @@ class ForkReleaseSafetyTests(unittest.TestCase):
         self.assertNotIn('repository: "Dr-Emann/homebrew-tap"', workflow)
         self.assertIn("on:\n  pull_request:\n  push:\n    tags:", workflow)
 
+    def test_fork_metadata_links_and_guard_changes_trigger_ci(self):
+        for package in ("applesauce-cli", "applesauce-core", "applesauce", "resource-fork"):
+            with self.subTest(package=package):
+                manifest = (ROOT / "crates" / package / "Cargo.toml").read_text(encoding="utf-8")
+                self.assertIn('repository = "https://github.com/chriscoveriesorg/applesauce"', manifest)
+        ci = (ROOT / ".github/workflows/fork-release-safety.yml").read_text(encoding="utf-8")
+        self.assertEqual(ci.count("'hack/verify-fork-release.sh'"), 2)
+        self.assertEqual(ci.count("'.github/fork-release-build-setup.yml'"), 2)
+        self.assertEqual(ci.count("'crates/**/Cargo.toml'"), 2)
+
     def _run_gate(self, *, tag="applesauce-cli/v0.5.30", relation="identical", green=True):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

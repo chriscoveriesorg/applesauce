@@ -7,14 +7,20 @@ on:
       - '.github/workflows/applesauce-cli-release.yml'
       - '.github/workflows/release-plz.yml'
       - '.github/workflows/fork-release-safety.yml'
+      - '.github/fork-release-build-setup.yml'
+      - 'hack/verify-fork-release.sh'
       - 'hack/test_fork_release.py'
+      - 'crates/**/Cargo.toml'
   pull_request:
     paths:
       - 'dist-workspace.toml'
       - '.github/workflows/applesauce-cli-release.yml'
       - '.github/workflows/release-plz.yml'
       - '.github/workflows/fork-release-safety.yml'
+      - '.github/fork-release-build-setup.yml'
+      - 'hack/verify-fork-release.sh'
       - 'hack/test_fork_release.py'
+      - 'crates/**/Cargo.toml'
 
 permissions:
   contents: read
