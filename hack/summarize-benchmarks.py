@@ -87,6 +87,17 @@ def summarize(manifest: Path, criterion: Path, output: Path) -> list[dict[str, s
             raise ValueError(f"unverified benchmark: {row}")
         if row["schema_version"] != "1" or row["fixture_version"] != "1":
             raise ValueError("unknown benchmark/fixture version")
+        # These manifest fields become Criterion path components. Only v1
+        # benchmark identifiers are valid; reject unknown names and traversal
+        # components before constructing paths or reporting measurements.
+        identifiers = {
+            "suite": ("smoke", "standard", "extended"),
+            "workload": ("chat-jsonl", "mixed-jsonl", "binary-records", "entropy", "zeros"),
+            "codec": ("zlib", "lzfse", "lzbitmap", "lzmesh", "lzraven"),
+            "scratch_mode": ("api-managed", "reused-scratch"),
+        }
+        if any(row[field] not in values for field, values in identifiers.items()):
+            raise ValueError(f"unsupported benchmark identity in row {index}")
         # A duplicate case can silently inflate reports or hide a corrupted
         # manifest; every codec/layout/scratch combination is unique.
         case = tuple(row[key] for key in (
@@ -96,7 +107,7 @@ def summarize(manifest: Path, criterion: Path, output: Path) -> list[dict[str, s
             raise ValueError(f"duplicate benchmark case: {case}")
         seen_cases.add(case)
         size = int(row["input_bytes"])
-        if size <= 0:
+        if size not in (4096, 65536, 1048576, 8388608) or row["input_bytes"] != str(size):
             raise ValueError(f"invalid benchmark input size: {size}")
         # Ratios are reported as compression evidence. The benchmark
         # allocates 2 * piece.len() + 64 KiB per encoded piece; reject
@@ -106,6 +117,9 @@ def summarize(manifest: Path, criterion: Path, output: Path) -> list[dict[str, s
         ratio = float(row["encoded_over_input_ratio"])
         if row["layout"] not in ("whole", "independent-64k"):
             raise ValueError(f"invalid benchmark layout in row {index}")
+        expected_chunk = size if row["layout"] == "whole" else 65536
+        if row["chunk_bytes"] != str(expected_chunk):
+            raise ValueError(f"invalid benchmark chunk size in row {index}")
         pieces = 1 if row["layout"] == "whole" else (size + 65535) // 65536
         max_encoded_bytes = 2 * size + 65536 * pieces
         if (
