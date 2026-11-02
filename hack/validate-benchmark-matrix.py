@@ -129,8 +129,16 @@ def validate(manifest: Path, suite: str) -> int:
             raise ValueError(f"row {index}: incorrect chunk size")
         encoded_bytes = int(row["encoded_bytes"])
         ratio = float(row["encoded_over_input_ratio"])
-        if encoded_bytes <= 0 or not math.isfinite(ratio) or not math.isclose(
-            ratio, encoded_bytes / size, rel_tol=0, abs_tol=1e-8
+        # The benchmark allocates 2 * piece.len() + 64 KiB for each
+        # independently encoded piece. A larger reported payload is
+        # impossible, even when its ratio was forged consistently.
+        pieces = 1 if row["layout"] == "whole" else (size + 65535) // 65536
+        max_encoded_bytes = 2 * size + 65536 * pieces
+        if (
+            encoded_bytes <= 0
+            or encoded_bytes > max_encoded_bytes
+            or not math.isfinite(ratio)
+            or not math.isclose(ratio, encoded_bytes / size, rel_tol=0, abs_tol=1e-8)
         ):
             raise ValueError(f"row {index}: invalid encoded size or ratio")
         for field in ("encode_scratch_bytes", "decode_scratch_bytes"):
