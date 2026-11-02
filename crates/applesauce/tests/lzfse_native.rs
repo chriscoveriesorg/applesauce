@@ -79,7 +79,10 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
     let mut reopened = File::open(&path).unwrap();
     let mut offsets = vec![0, input.len() / 2, input.len() - 32];
     if input.len() > applesauce_core::BLOCK_SIZE + 32 {
-        offsets.extend([applesauce_core::BLOCK_SIZE - 16, applesauce_core::BLOCK_SIZE]);
+        offsets.extend([
+            applesauce_core::BLOCK_SIZE - 16,
+            applesauce_core::BLOCK_SIZE,
+        ]);
     }
     for offset in offsets {
         reopened.seek(SeekFrom::Start(offset as u64)).unwrap();
@@ -87,7 +90,10 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
         reopened.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, &input[offset..offset + bytes.len()]);
     }
-    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), original_modified);
+    assert_eq!(
+        fs::metadata(&path).unwrap().modified().unwrap(),
+        original_modified
+    );
 
     // Verify restored bytes against the original kernel-visible contents
     // before publishing the uncompressed replacement.
@@ -95,7 +101,10 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
     assert_no_errors(&progress);
     assert!(!info::get(&path).unwrap().is_compressed);
     assert_eq!(fs::read(&path).unwrap(), input);
-    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), original_modified);
+    assert_eq!(
+        fs::metadata(&path).unwrap().modified().unwrap(),
+        original_modified
+    );
 }
 
 #[test]
