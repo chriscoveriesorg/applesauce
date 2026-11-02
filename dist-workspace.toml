@@ -13,9 +13,8 @@ installers = ["shell"]
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 # Which actions to run on pull requests
 pr-run-mode = "plan"
-# Fork releases publish verified GitHub binaries and a shell installer. Never
-# write into the upstream maintainer's Homebrew tap from this fork.
-publish-jobs = []
+# Release builds fail before uploading artifacts unless the tag and main CI pass.
+github-build-setup = "../fork-release-build-setup.yml"
 # A prefix git tags must include for dist to care about them
 tag-namespace = "applesauce-cli"
 # Whether to install an updater program

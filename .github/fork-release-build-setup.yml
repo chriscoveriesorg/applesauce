@@ -1,0 +1,5 @@
+# cargo-dist inserts this step before each platform build.
+- name: Verify exact-version and CI-green fork release
+  if: ${{ github.event_name == 'push' && github.repository == 'chriscoveriesorg/applesauce' }}
+  shell: bash
+  run: bash hack/verify-fork-release.sh

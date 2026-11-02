@@ -15,9 +15,10 @@ applesauce-cli/v<the version in crates/applesauce-cli/Cargo.toml>
 ```
 
 For this fork, the tag must point to a commit reachable from `main` whose
-**exact SHA** has a successful `Continuous integration` run on `main`. A tag
-for a different package version, or an unverified commit, stops before the
-release builder starts. Inspect the release's built artifacts and checksums
+**exact SHA** has a successful `Continuous integration` run on `main`. The
+release's custom cargo-dist build-setup step checks the version, GitHub commit
+ancestry and successful push CI through the public API before either macOS
+binary build. A failed builder blocks artifact hosting. Inspect checksums
 afterward. A green CI job does not prove native LZRAVEN/LZMESH filesystem
 decoding.
 

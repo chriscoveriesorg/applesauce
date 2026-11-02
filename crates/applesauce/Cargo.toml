@@ -6,7 +6,7 @@ version = "0.8.10"
 edition = "2021"
 keywords = ["compression", "afsc", "decmpfs"]
 categories = ["compression"]
-repository = "https://github.com/Dr-Emann/applesauce"
+repository = "https://github.com/chriscoveriesorg/applesauce"
 readme = "../../README.md"
 
 [lib]

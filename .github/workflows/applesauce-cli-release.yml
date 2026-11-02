@@ -16,7 +16,6 @@
 name: Release
 permissions:
   "contents": "write"
-  "actions": "read"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -61,30 +60,6 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-          fetch-depth: 0
-      - name: Require CI-green main and exact version before fork release
-        if: ${{ github.event_name == 'push' && github.repository == 'chriscoveriesorg/applesauce' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "applesauce-cli") | .version')
-          if [ "$GITHUB_REF_NAME" != "applesauce-cli/v$version" ]; then
-            echo "Release tag must match applesauce-cli/v$version" >&2
-            exit 1
-          fi
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "Release commit must be reachable from main" >&2
-            exit 1
-          fi
-          green=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/cargo.yml/runs?head_sha=${GITHUB_SHA}&event=push&per_page=100" \
-            --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')
-          if [ "$green" -lt 1 ]; then
-            echo "Main CI must pass on this exact commit before tagging a stable fork release" >&2
-            exit 1
-          fi
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -156,6 +131,10 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Verify exact-version and CI-green fork release"
+        if: "${{ github.event_name == 'push' && github.repository == 'chriscoveriesorg/applesauce' }}"
+        run: "bash hack/verify-fork-release.sh"
+        shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -311,61 +290,14 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
-  publish-homebrew-formula:
-    needs:
-      - plan
-      - host
-    runs-on: "ubuntu-22.04"
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PLAN: ${{ needs.plan.outputs.val }}
-      GITHUB_USER: "axo bot"
-      GITHUB_EMAIL: "admin+bot@axo.dev"
-    if: ${{ github.repository == 'Dr-Emann/applesauce' && (!fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases) }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: true
-          repository: "Dr-Emann/homebrew-tap"
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      # So we have access to the formula
-      - name: Fetch homebrew formulae
-        uses: actions/download-artifact@v8
-        with:
-          pattern: artifacts-*
-          path: Formula/
-          merge-multiple: true
-      # This is extra complex because you can make your Formula name not match your app name
-      # so we need to find releases with a *.rb file, and publish with that filename.
-      - name: Commit formula files
-        run: |
-          git config --global user.name "${GITHUB_USER}"
-          git config --global user.email "${GITHUB_EMAIL}"
-
-          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
-            filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
-            name=$(echo "$filename" | sed "s/\.rb$//")
-            version=$(echo "$release" | jq .app_version --raw-output)
-
-            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
-            brew update
-            # We avoid reformatting user-provided data such as the app description and homepage.
-            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
-
-            git add "Formula/${filename}"
-            git commit -m "${name} ${version}"
-          done
-          git push
-
   announce:
     needs:
       - plan
       - host
-      - publish-homebrew-formula
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
