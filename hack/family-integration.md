@@ -54,6 +54,10 @@ stdlib-only. It checks two independent before/after evidence pairs:
   search-leg tags, cache receipts and latency are excluded from this
   logical-content invariant.
 
+Evidence must be unambiguous finite JSON: duplicate object keys, nonstandard
+`NaN`/`Infinity` tokens, and numeric literals that overflow to infinity are
+rejected even in incidental metadata excluded from logical comparisons.
+
 An optional pair of measured physical byte counts can make a **real
 allocation decrease** a hard gate. Foldy's `Size` is logical size, **not** a
 physical allocation measurement; don't subtract it to claim savings.
