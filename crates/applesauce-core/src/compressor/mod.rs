@@ -485,6 +485,52 @@ mod tests {
         assert!(output[crate::BLOCK_SIZE..].iter().all(|&byte| byte == 0xa5));
     }
 
+    #[test]
+    fn full_native_lz_blocks_round_trip_without_touching_destination_tail() {
+        // Full LZVN/LZFSE blocks require an overflow guard to distinguish
+        // an exact 64 KiB decode from a truncated stream.
+        for kind in [Kind::Lzvn, Kind::Lzfse] {
+            let Some(mut compressor) = kind.compressor() else {
+                continue;
+            };
+            let payload = vec![0x42; crate::BLOCK_SIZE];
+            let mut encoded = vec![0; payload.len() + 1024];
+            let used = compressor.compress(&mut encoded, &payload, 5).unwrap();
+            encoded.truncate(used);
+            if kind == Kind::Lzvn {
+                assert_ne!(encoded[0], 0x06, "LZVN fixture must be compressed");
+            }
+
+            let mut output = vec![0xa5; crate::BLOCK_SIZE + 128];
+            let size = compressor.decompress(&mut output, &encoded).unwrap();
+            assert_eq!(size, crate::BLOCK_SIZE, "{kind}");
+            assert_eq!(&output[..size], payload.as_slice(), "{kind}");
+            assert!(
+                output[crate::BLOCK_SIZE..].iter().all(|&byte| byte == 0xa5),
+                "{kind} modified destination tail"
+            );
+        }
+    }
+
+    #[cfg(feature = "lzvn")]
+    #[test]
+    fn overlong_compressed_lzvn_block_fails_without_modifying_caller_output() {
+        // The low-level codec can encode 64 KiB + 1 bytes, but a native
+        // decmpfs block must reject it without leaking the overflow byte.
+        let payload = vec![0x42; crate::BLOCK_SIZE + 1];
+        let mut encoded = vec![0; payload.len() + 1024];
+        let used = Lzvn::new().compress(&mut encoded, &payload, 0).unwrap();
+        encoded.truncate(used);
+        assert_ne!(encoded[0], 0x06, "fixture must use compressed framing");
+
+        let mut output = vec![0xa5; crate::BLOCK_SIZE + 128];
+        let error = Compressor::lzvn()
+            .decompress(&mut output, &encoded)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        assert!(output.iter().all(|&byte| byte == 0xa5));
+    }
+
     #[cfg(feature = "zlib")]
     #[test]
     fn overlong_compressed_block_cannot_overwrite_past_native_boundary() {
