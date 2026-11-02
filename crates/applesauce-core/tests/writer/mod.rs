@@ -308,6 +308,47 @@ fn resource_fork_writer_rejects_extra_block_without_mutation() {
     assert_eq!(resource_fork[blocks[1].offset as usize], 0x22);
 }
 
+
+#[test]
+fn writer_rejects_blocks_larger_than_the_native_decoder_ceiling() {
+    // Writer and Reader must agree on the largest encoded block. Rejecting
+    // this at the writer boundary prevents publishing an unreadable fork.
+    let over_limit = vec![0xa5; BLOCK_SIZE * 16 + 1];
+    let at_limit = vec![0xa5; BLOCK_SIZE * 16];
+
+    for kind in Kind::ALL.into_iter().filter(|kind| kind.supported()) {
+        // A rejected single-block write must leave inline storage reusable.
+        let mut inline = Writer::new(kind, 1, never_called_open).unwrap();
+        assert_eq!(
+            inline.add_block(&over_limit).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{kind}"
+        );
+        inline.add_block(&[0x42]).unwrap();
+        let mut metadata = Vec::new();
+        inline.finish_decmpfs_data(&mut metadata).unwrap();
+        assert_eq!(
+            decmpfs::Value::from_data(&metadata).unwrap().extra_data,
+            &[0x42],
+            "{kind}"
+        );
+
+        // On a resource fork, reject before touching the underlying writer.
+        // The ceiling itself remains permitted; the bytes here are synthetic
+        // framing tests, not a claim that this payload decodes as a codec.
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut fork = near_limit_writer(kind, kind.header_size(2), std::rc::Rc::clone(&writes));
+        assert_eq!(
+            fork.add_block(&over_limit).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{kind}"
+        );
+        assert_eq!(writes.get(), 0, "{kind} wrote a rejected block");
+        fork.add_block(&at_limit).unwrap();
+        assert_eq!(writes.get(), 1, "{kind} rejected the boundary length");
+    }
+}
+
 struct FailAfterPartialWrite {
     cursor: Cursor<Vec<u8>>,
     writes: usize,
