@@ -167,6 +167,51 @@ class FamilyContractTests(unittest.TestCase):
                 self.assertEqual(1, self.execute("--zgx-before", str(b),
                                                  "--zgx-after", str(a))[0])
 
+    def test_zgx_requires_concrete_nonnegative_ordered_source_spans(self):
+        valid = self.write("valid.jsonl", zgx())
+        invalid_spans = (
+            None, -1, True, "1", [3, 2], [-1, 1], [1, -1],
+            [1, True], [1, None], [1], [1, 2, 3],
+        )
+        for span in invalid_spans:
+            for receipt in (False, True):
+                with self.subTest(span=repr(span), receipt=receipt):
+                    hit = (
+                        {"path": "logs/session.jsonl", "span": span,
+                         "snippet": "canary"}
+                        if receipt else
+                        ["logs/session.jsonl", span, "canary", ["rg"]]
+                    )
+                    invalid = self.write("invalid.jsonl", zgx(hits=[hit]))
+                    # Invalid evidence must fail even if both snapshots
+                    # contain the same malformed span.
+                    for before, after in (
+                        (valid, invalid), (invalid, valid), (invalid, invalid)
+                    ):
+                        rc, _, err = self.execute(
+                            "--zgx-before", str(before), "--zgx-after", str(after)
+                        )
+                        self.assertEqual(1, rc)
+                        self.assertIn("invalid source span", err)
+
+        # Missing receipt spans must not be treated as equivalent to null.
+        missing = self.write("missing.jsonl", zgx(hits=[
+            {"path": "logs/session.jsonl", "snippet": "canary"}
+        ]))
+        self.assertEqual(
+            1, self.execute("--zgx-before", str(valid),
+                            "--zgx-after", str(missing))[0]
+        )
+        for span in (0, [0, 0], [1, 2]):
+            with self.subTest(valid_span=span):
+                good = self.write("good.jsonl", zgx(hits=[
+                    ["logs/session.jsonl", span, "canary", ["rg"]]
+                ]))
+                rc, _, err = self.execute(
+                    "--zgx-before", str(good), "--zgx-after", str(good)
+                )
+                self.assertEqual(0, rc, err)
+
     def test_trace_records_and_non_ascii_separator_in_snippets(self):
         b = self.base / "before.jsonl"
         b.write_text(json.dumps({"type": "leg", "name": "rg"}) + "\n" +
