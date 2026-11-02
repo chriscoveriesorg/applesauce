@@ -159,6 +159,12 @@ pub fn write_archive<R: Read, W: Write + Seek>(
         if encoded.is_empty() || encoded.len() > bounded_encoded_len(clear_len) {
             return Err(invalid("encoder produced an invalid chunk length"));
         }
+        // Never report a successful staged archive on encode-only evidence:
+        // prove the public buffer decoder reconstructs the exact chunk bytes.
+        let decoded = codec.decode_exact(&encoded, clear_len)?;
+        if decoded != clear {
+            return Err(invalid("encoder failed exact-byte chunk round-trip"));
+        }
         let stored_len = u32::try_from(encoded.len())
             .map_err(|_| invalid("encoded chunk length exceeds field width"))?;
         destination.write_all(&encoded)?;
@@ -460,6 +466,50 @@ mod tests {
         assert_eq!(file_codec(0xE05).unwrap(), Codec::Lzmesh);
         for id in [3, 4, 11, 12, 13, 14, 15, 16, 0x702] {
             assert!(file_codec(id).is_err());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos27_writer_rejects_wrong_source_lengths_and_occupied_staging() {
+        // Only generated data. Failure must not publish a valid archive magic.
+        let clear = vec![0x5au8; MIN_CHUNK_BYTES + 1];
+        for codec in [Codec::Lzraven, Codec::Lzmesh] {
+            if !codec.is_supported() {
+                continue;
+            }
+            let mut short = Cursor::new(Vec::new());
+            assert!(write_archive(
+                &clear[..clear.len() - 1],
+                &mut short,
+                clear.len() as u64,
+                codec,
+                MIN_CHUNK_BYTES,
+            )
+            .is_err());
+            assert!(ArchiveReader::open(Cursor::new(short.into_inner())).is_err());
+
+            let mut extra = Cursor::new(Vec::new());
+            assert!(write_archive(
+                &clear[..],
+                &mut extra,
+                (clear.len() - 1) as u64,
+                codec,
+                MIN_CHUNK_BYTES,
+            )
+            .is_err());
+            assert!(ArchiveReader::open(Cursor::new(extra.into_inner())).is_err());
+
+            let mut occupied = Cursor::new(vec![0xa5]);
+            assert!(write_archive(
+                &clear[..],
+                &mut occupied,
+                clear.len() as u64,
+                codec,
+                MIN_CHUNK_BYTES,
+            )
+            .is_err());
+            assert_eq!(occupied.into_inner(), vec![0xa5]);
         }
     }
 
