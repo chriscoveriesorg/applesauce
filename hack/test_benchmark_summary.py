@@ -108,7 +108,28 @@ class BenchmarkSummaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate benchmark case"):
                 summary.summarize(manifest, criterion, output)
 
-            for invalid_size in ("0", "-1"):
+            # The standalone summarizer must not interpret arbitrary
+            # manifest identifiers as filesystem paths into Criterion output.
+            for field, invalid in (
+                ("suite", "../smoke"),
+                ("suite", "unknown"),
+                ("workload", "../chat-jsonl"),
+                ("codec", "../../lzfse"),
+                ("codec", "lzvn"),
+                ("scratch_mode", "../reused-scratch"),
+            ):
+                with self.subTest(field=field, invalid=invalid):
+                    original = row[field]
+                    row[field] = invalid
+                    with manifest.open("w", newline="", encoding="utf-8") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=summary.FIELDS)
+                        writer.writeheader()
+                        writer.writerow(row)
+                    with self.assertRaisesRegex(ValueError, "unsupported benchmark identity"):
+                        summary.summarize(manifest, criterion, output)
+                    row[field] = original
+
+            for invalid_size in ("0", "-1", "8192", "065536"):
                 row["input_bytes"] = invalid_size
                 with manifest.open("w", newline="", encoding="utf-8") as handle:
                     writer = csv.DictWriter(handle, fieldnames=summary.FIELDS)
@@ -118,6 +139,15 @@ class BenchmarkSummaryTests(unittest.TestCase):
                     summary.summarize(manifest, criterion, output)
 
             row["input_bytes"] = "65536"
+            row["chunk_bytes"] = "1"
+            with manifest.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=summary.FIELDS)
+                writer.writeheader()
+                writer.writerow(row)
+            with self.assertRaisesRegex(ValueError, "invalid benchmark chunk size"):
+                summary.summarize(manifest, criterion, output)
+            row["chunk_bytes"] = "65536"
+
             for encoded_bytes, ratio in (
                 ("0", "0"),
                 ("8192", "nan"),
