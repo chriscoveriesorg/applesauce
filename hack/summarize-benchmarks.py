@@ -91,18 +91,21 @@ def summarize(manifest: Path, criterion: Path, output: Path) -> list[dict[str, s
         size = int(row["input_bytes"])
         if size <= 0:
             raise ValueError(f"invalid benchmark input size: {size}")
-        # Ratios are reported as compression evidence. Never print a forged
-        # or non-finite ratio just because Criterion timings are present.
+        # Ratios are reported as compression evidence. The benchmark
+        # allocates 2 * piece.len() + 64 KiB per encoded piece; reject
+        # physically impossible payload counts even when the ratio agrees.
+        # Bound before division so giant integers cannot overflow a float.
         encoded_bytes = int(row["encoded_bytes"])
         ratio = float(row["encoded_over_input_ratio"])
-        try:
-            actual_ratio = encoded_bytes / size
-        except OverflowError as error:
-            raise ValueError(
-                f"invalid encoded size or ratio in benchmark row {index}"
-            ) from error
-        if encoded_bytes <= 0 or not math.isfinite(ratio) or not math.isclose(
-            ratio, actual_ratio, rel_tol=0, abs_tol=1e-8
+        if row["layout"] not in ("whole", "independent-64k"):
+            raise ValueError(f"invalid benchmark layout in row {index}")
+        pieces = 1 if row["layout"] == "whole" else (size + 65535) // 65536
+        max_encoded_bytes = 2 * size + 65536 * pieces
+        if (
+            encoded_bytes <= 0
+            or encoded_bytes > max_encoded_bytes
+            or not math.isfinite(ratio)
+            or not math.isclose(ratio, encoded_bytes / size, rel_tol=0, abs_tol=1e-8)
         ):
             raise ValueError(f"invalid encoded size or ratio in benchmark row {index}")
         for operation in ("encode", "decode"):
