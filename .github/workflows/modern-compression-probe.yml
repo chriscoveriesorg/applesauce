@@ -91,6 +91,41 @@ jobs:
           PY
           printf '## Native decmpfs registration clues\n\nRead-only catalogue hints captured in `decmpfs-catalogue-hints.json`. Presence or absence of a declaration is not proof of a registered decoder or a Raven/Mesh format.\n' \
             >> "$GITHUB_STEP_SUMMARY"
+      - name: Inventory existing Apple system on-disk decmpfs types (read-only)
+        run: |
+          set -euo pipefail
+          # This walks Apple system paths only. It NEVER writes a decmpfs xattr,
+          # creates a compressed file, or probes unknown types in the kernel.
+          python3 -m unittest discover -s hack -p 'test_native_type_probe.py' \
+            2>&1 | tee "$PROBE_RESULTS/native-type-probe-tests.log"
+          python3 hack/native-type-probe.py --max-files 30000 --max-seconds 60 \
+            --output "$PROBE_RESULTS/native-on-disk-types.json" \
+            2>&1 | tee "$PROBE_RESULTS/native-on-disk-types.stdout.log"
+          python3 - "$PROBE_RESULTS/native-on-disk-types.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = json.load(stream)
+          assert report["schema_version"] == 1
+          assert report["kind"] == "existing-system-decmpfs-headers-readonly"
+          assert report["files_seen"] > 0
+          # A scan that opened no valid headers is not evidence of on-disk types.
+          assert 0 < report["headers_read"] <= report["compressed_flagged"] <= report["files_seen"]
+          assert sum(item["count"] for item in report["types"].values()) == report["headers_read"]
+          assert not report["native_raven_mesh_writes_permitted"]
+          assert not report["kernel_decoder_proven"]
+          assert not report["codec_identity_proven"]
+          for raw in ("15", "16"):
+              if raw in report["types"]:
+                  assert report["types"][raw]["known_format"] is None
+          print("PASS: read-only system header inventory remains fail-closed")
+          PY
+          {
+            printf '## Pre-existing native file headers (read-only)\n\n'
+            printf 'On-disk types and scan coverage are in \`native-on-disk-types.json\`. '
+            printf 'These files predate this run. No kernel writer was exercised. '
+            printf 'Type observation alone proves neither a registered decoder nor Raven/Mesh identity.\n\n'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Compile and exercise SDK buffer codecs (no APFS conversion)
         run: |
           set -euo pipefail
