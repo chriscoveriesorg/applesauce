@@ -88,6 +88,27 @@ class FamilyContractTests(unittest.TestCase):
                 self.assertEqual(1, self.execute("--foldy-before", str(b),
                                                  "--foldy-after", str(a))[0])
 
+    def test_missing_or_malformed_foldy_scan_fields_fail_closed(self):
+        before = self.write("b.json", foldy())
+        for field in ("errors", "mount_skips"):
+            for bad in (None, False, {}, ""):
+                with self.subTest(field=field, value=repr(bad)):
+                    after = foldy()
+                    after[field] = bad
+                    path = self.write("a.json", after)
+                    rc, _, err = self.execute("--foldy-before", str(before),
+                                              "--foldy-after", str(path))
+                    self.assertEqual(1, rc)
+                    self.assertIn("incomplete Foldy scan", err)
+            with self.subTest(field=field, value="missing"):
+                after = foldy()
+                del after[field]
+                path = self.write("a.json", after)
+                rc, _, err = self.execute("--foldy-before", str(before),
+                                          "--foldy-after", str(path))
+                self.assertEqual(1, rc)
+                self.assertIn("incomplete Foldy scan", err)
+
     def test_zgx_snippet_span_and_order_changes_fail(self):
         b = self.write("before.jsonl", zgx(hits=[
             ["first.jsonl", 1, "canary", ["rg"]], ["second.jsonl", [2, 4], "canary", ["rg"]]]))
