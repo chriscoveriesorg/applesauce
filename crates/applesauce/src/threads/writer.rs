@@ -371,7 +371,9 @@ mod tests {
             let original = BufReader::with_capacity(7, Cursor::new(expected.as_slice()));
             let restored = BufReader::with_capacity(4096, Cursor::new(actual));
             assert_eq!(
-                ensure_identical_files(original, restored).unwrap_err().kind(),
+                ensure_identical_files(original, restored)
+                    .unwrap_err()
+                    .kind(),
                 error_kind
             );
         }
