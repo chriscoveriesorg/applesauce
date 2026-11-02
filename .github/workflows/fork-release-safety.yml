@@ -1,0 +1,29 @@
+name: Fork release safety
+
+on:
+  push:
+    paths:
+      - 'dist-workspace.toml'
+      - '.github/workflows/applesauce-cli-release.yml'
+      - '.github/workflows/release-plz.yml'
+      - '.github/workflows/fork-release-safety.yml'
+      - 'hack/test_fork_release.py'
+  pull_request:
+    paths:
+      - 'dist-workspace.toml'
+      - '.github/workflows/applesauce-cli-release.yml'
+      - '.github/workflows/release-plz.yml'
+      - '.github/workflows/fork-release-safety.yml'
+      - 'hack/test_fork_release.py'
+
+permissions:
+  contents: read
+
+jobs:
+  fork-release-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check fork binary release and tag gates
+        run: python3 -m unittest discover -s hack -p 'test_fork_release.py' -v

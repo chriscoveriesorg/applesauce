@@ -8,17 +8,14 @@ cargo-dist-version = "0.33.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "homebrew"]
+installers = ["shell"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 # Which actions to run on pull requests
 pr-run-mode = "plan"
-# A GitHub repo to push Homebrew formulas to
-tap = "Dr-Emann/homebrew-tap"
-# Publish jobs to run in CI
-publish-jobs = ["homebrew"]
-# Customize the Homebrew formula name
-formula = "applesauce"
+# Fork releases publish verified GitHub binaries and a shell installer. Never
+# write into the upstream maintainer's Homebrew tap from this fork.
+publish-jobs = []
 # A prefix git tags must include for dist to care about them
 tag-namespace = "applesauce-cli"
 # Whether to install an updater program

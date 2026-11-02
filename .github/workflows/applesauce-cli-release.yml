@@ -16,6 +16,7 @@
 name: Release
 permissions:
   "contents": "write"
+  "actions": "read"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -60,6 +61,30 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          fetch-depth: 0
+      - name: Require CI-green main and exact version before fork release
+        if: ${{ github.event_name == 'push' && github.repository == 'chriscoveriesorg/applesauce' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "applesauce-cli") | .version')
+          if [ "$GITHUB_REF_NAME" != "applesauce-cli/v$version" ]; then
+            echo "Release tag must match applesauce-cli/v$version" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Release commit must be reachable from main" >&2
+            exit 1
+          fi
+          green=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/cargo.yml/runs?head_sha=${GITHUB_SHA}&event=push&per_page=100" \
+            --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')
+          if [ "$green" -lt 1 ]; then
+            echo "Main CI must pass on this exact commit before tagging a stable fork release" >&2
+            exit 1
+          fi
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -296,7 +321,7 @@ jobs:
       PLAN: ${{ needs.plan.outputs.val }}
       GITHUB_USER: "axo bot"
       GITHUB_EMAIL: "admin+bot@axo.dev"
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    if: ${{ github.repository == 'Dr-Emann/applesauce' && (!fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases) }}
     steps:
       - uses: actions/checkout@v6
         with:
