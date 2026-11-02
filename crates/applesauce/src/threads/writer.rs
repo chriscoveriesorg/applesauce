@@ -7,6 +7,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::os::macos::fs::MetadataExt;
+use std::os::unix::fs::MetadataExt as UnixMetadataExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::{cmp, io, ptr};
 use tempfile::NamedTempFile;
@@ -147,6 +149,7 @@ impl Handler {
 
         let new_file = {
             let _entered = tracing::debug_span!("rename tmp file").entered();
+            ensure_source_path_matches_open_file(&item.file, &item.context.path)?;
             tmp_file.persist(&item.context.path)?
         };
         if let Some(resetter) = &item.context.parent_resetter {
@@ -223,6 +226,7 @@ impl Handler {
             item.context.orig_metadata.st_flags() & !libc::UF_COMPRESSED,
         )?;
 
+        ensure_source_path_matches_open_file(&item.file, &item.context.path)?;
         let new_file = tmp_file.persist(&item.context.path)?;
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
@@ -305,6 +309,25 @@ fn copy_metadata(src: &File, dst: &File) -> io::Result<()> {
     }
 }
 
+// The reader holds an open file descriptor, but the pathname used by persist
+// may have been replaced while compression or decompression was running.
+// Never overwrite a different inode or a symlink at the original path.
+// This narrows the race; it cannot make the identity check and rename atomic.
+fn ensure_source_path_matches_open_file(source: &File, path: &Path) -> io::Result<()> {
+    let opened = source.metadata()?;
+    let current = path.symlink_metadata()?;
+    if !current.file_type().is_file()
+        || UnixMetadataExt::dev(&opened) != UnixMetadataExt::dev(&current)
+        || UnixMetadataExt::ino(&opened) != UnixMetadataExt::ino(&current)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "source path changed during processing; refusing to replace it",
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) -> io::Result<()> {
     loop {
         let l = lhs.fill_buf()?;
@@ -338,8 +361,53 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_identical_files;
+    use super::{ensure_identical_files, ensure_source_path_matches_open_file};
+    use std::fs::{self, File};
     use std::io::{BufReader, Cursor, ErrorKind};
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn publication_guard_rejects_replaced_path_and_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let moved = dir.path().join("moved");
+        fs::write(&path, b"generated original bytes").unwrap();
+        let source = File::open(&path).unwrap();
+        ensure_source_path_matches_open_file(&source, &path).unwrap();
+
+        fs::rename(&path, &moved).unwrap();
+        fs::write(&path, b"unrelated replacement").unwrap();
+        assert_eq!(
+            ensure_source_path_matches_open_file(&source, &path)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+
+        fs::remove_file(&path).unwrap();
+        symlink(&moved, &path).unwrap();
+        assert_eq!(
+            ensure_source_path_matches_open_file(&source, &path)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn publication_guard_rejects_missing_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        fs::write(&path, b"generated original bytes").unwrap();
+        let source = File::open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            ensure_source_path_matches_open_file(&source, &path)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotFound
+        );
+    }
 
     fn generated_bytes() -> Vec<u8> {
         (0..(2 * 65536 + 13))
