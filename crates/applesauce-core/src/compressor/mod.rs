@@ -467,6 +467,26 @@ mod tests {
 
     #[cfg(feature = "zlib")]
     #[test]
+    fn full_native_zlib_block_round_trips_without_touching_destination_tail() {
+        // A complete 64 KiB compressed logical block must still decode
+        // exactly, even when the caller supplies a larger output buffer.
+        let payload = vec![0x42; crate::BLOCK_SIZE];
+        let mut encoded = vec![0; payload.len() + 1024];
+        let used = Zlib::new().compress(&mut encoded, &payload, 5).unwrap();
+        encoded.truncate(used);
+        assert_ne!(encoded[0], 0xff, "fixture must use compressed framing");
+
+        let mut output = vec![0xa5; crate::BLOCK_SIZE + 128];
+        let size = Compressor::zlib()
+            .decompress(&mut output, &encoded)
+            .unwrap();
+        assert_eq!(size, crate::BLOCK_SIZE);
+        assert_eq!(&output[..size], payload.as_slice());
+        assert!(output[crate::BLOCK_SIZE..].iter().all(|&byte| byte == 0xa5));
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
     fn overlong_compressed_block_cannot_overwrite_past_native_boundary() {
         // Exercise a real compressed (not stored-marker) stream. The lower
         // level codec can encode more than one filesystem logical block; the
