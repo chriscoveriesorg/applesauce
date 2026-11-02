@@ -3,7 +3,7 @@ use crate::{seq_queue, set_flags, times, xattr};
 use applesauce_core::compressor::Kind;
 use applesauce_core::decmpfs;
 use resource_fork::ResourceFork;
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::os::macos::fs::MetadataExt;
@@ -149,7 +149,11 @@ impl Handler {
 
         let new_file = {
             let _entered = tracing::debug_span!("rename tmp file").entered();
-            ensure_source_path_matches_open_file(&item.file, &item.context.path)?;
+            ensure_source_path_matches_open_file(
+                &item.file,
+                &item.context.path,
+                &item.context.orig_metadata,
+            )?;
             tmp_file.persist(&item.context.path)?
         };
         if let Some(resetter) = &item.context.parent_resetter {
@@ -226,7 +230,11 @@ impl Handler {
             item.context.orig_metadata.st_flags() & !libc::UF_COMPRESSED,
         )?;
 
-        ensure_source_path_matches_open_file(&item.file, &item.context.path)?;
+        ensure_source_path_matches_open_file(
+            &item.file,
+            &item.context.path,
+            &item.context.orig_metadata,
+        )?;
         let new_file = tmp_file.persist(&item.context.path)?;
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
@@ -309,22 +317,38 @@ fn copy_metadata(src: &File, dst: &File) -> io::Result<()> {
     }
 }
 
-// The reader holds an open file descriptor, but the pathname used by persist
-// may have been replaced while compression or decompression was running.
-// Never overwrite a different inode or a symlink at the original path.
-// This narrows the race; it cannot make the identity check and rename atomic.
+// Compare the original scan's source snapshot with both the open descriptor
+// and the pathname about to be replaced. Inode identity alone misses edits to
+// the same inode (including same-length rewrites) and replacement between scan
+// and open. ctime catches ordinary edits even if mtime is restored; atime is
+// deliberately excluded because reading the source may update it.
+// This is a best-effort race guard, NOT an atomic conditional rename or a
+// checksum. An edit after the final stat can still race with publication.
 // We intentionally require a regular file, not merely a non-directory.
 #[allow(clippy::filetype_is_file)]
-fn ensure_source_path_matches_open_file(source: &File, path: &Path) -> io::Result<()> {
+fn same_source_snapshot(expected: &Metadata, actual: &Metadata) -> bool {
+    actual.file_type().is_file()
+        && UnixMetadataExt::dev(expected) == UnixMetadataExt::dev(actual)
+        && UnixMetadataExt::ino(expected) == UnixMetadataExt::ino(actual)
+        && UnixMetadataExt::nlink(expected) == UnixMetadataExt::nlink(actual)
+        && expected.len() == actual.len()
+        && UnixMetadataExt::mtime(expected) == UnixMetadataExt::mtime(actual)
+        && UnixMetadataExt::mtime_nsec(expected) == UnixMetadataExt::mtime_nsec(actual)
+        && UnixMetadataExt::ctime(expected) == UnixMetadataExt::ctime(actual)
+        && UnixMetadataExt::ctime_nsec(expected) == UnixMetadataExt::ctime_nsec(actual)
+}
+
+fn ensure_source_path_matches_open_file(
+    source: &File,
+    path: &Path,
+    scanned: &Metadata,
+) -> io::Result<()> {
     let opened = source.metadata()?;
     let current = path.symlink_metadata()?;
-    if !current.file_type().is_file()
-        || UnixMetadataExt::dev(&opened) != UnixMetadataExt::dev(&current)
-        || UnixMetadataExt::ino(&opened) != UnixMetadataExt::ino(&current)
-    {
+    if !same_source_snapshot(scanned, &opened) || !same_source_snapshot(scanned, &current) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "source path changed during processing; refusing to replace it",
+            "source changed during processing; refusing to replace it",
         ));
     }
     Ok(())
@@ -367,6 +391,7 @@ mod tests {
     use std::fs::{self, File};
     use std::io::{BufReader, Cursor, ErrorKind};
     use std::os::unix::fs::symlink;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn publication_guard_rejects_replaced_path_and_symlink() {
@@ -374,13 +399,14 @@ mod tests {
         let path = dir.path().join("source");
         let moved = dir.path().join("moved");
         fs::write(&path, b"generated original bytes").unwrap();
+        let scanned = fs::metadata(&path).unwrap();
         let source = File::open(&path).unwrap();
-        ensure_source_path_matches_open_file(&source, &path).unwrap();
+        ensure_source_path_matches_open_file(&source, &path, &scanned).unwrap();
 
         fs::rename(&path, &moved).unwrap();
         fs::write(&path, b"unrelated replacement").unwrap();
         assert_eq!(
-            ensure_source_path_matches_open_file(&source, &path)
+            ensure_source_path_matches_open_file(&source, &path, &scanned)
                 .unwrap_err()
                 .kind(),
             ErrorKind::InvalidData
@@ -389,7 +415,7 @@ mod tests {
         fs::remove_file(&path).unwrap();
         symlink(&moved, &path).unwrap();
         assert_eq!(
-            ensure_source_path_matches_open_file(&source, &path)
+            ensure_source_path_matches_open_file(&source, &path, &scanned)
                 .unwrap_err()
                 .kind(),
             ErrorKind::InvalidData
@@ -401,13 +427,77 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source");
         fs::write(&path, b"generated original bytes").unwrap();
+        let scanned = fs::metadata(&path).unwrap();
         let source = File::open(&path).unwrap();
         fs::remove_file(&path).unwrap();
         assert_eq!(
-            ensure_source_path_matches_open_file(&source, &path)
+            ensure_source_path_matches_open_file(&source, &path, &scanned)
                 .unwrap_err()
                 .kind(),
             ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn publication_guard_rejects_same_length_source_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let original = b"generated original bytes";
+        fs::write(&path, original).unwrap();
+        let scanned = fs::metadata(&path).unwrap();
+        let source = File::open(&path).unwrap();
+
+        // The pathname and inode remain identical, and the logical size is
+        // unchanged. Force a distinct mtime so the test is deterministic on
+        // filesystems with coarse timestamp granularity.
+        fs::write(&path, vec![b'Z'; original.len()]).unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(12_345))
+            .unwrap();
+        assert_eq!(source.metadata().unwrap().len(), scanned.len());
+        assert_eq!(
+            ensure_source_path_matches_open_file(&source, &path, &scanned)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn publication_guard_rejects_replacement_between_scan_and_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let moved = dir.path().join("moved");
+        fs::write(&path, b"generated original bytes").unwrap();
+        let scanned = fs::metadata(&path).unwrap();
+        fs::rename(&path, &moved).unwrap();
+        fs::write(&path, b"generated replacement bytes").unwrap();
+        let replacement = File::open(&path).unwrap();
+        assert_eq!(
+            ensure_source_path_matches_open_file(&replacement, &path, &scanned)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn publication_guard_rejects_new_hard_link_after_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let other = dir.path().join("new-hard-link");
+        fs::write(&path, b"generated original bytes").unwrap();
+        let scanned = fs::metadata(&path).unwrap();
+        let source = File::open(&path).unwrap();
+        fs::hard_link(&path, &other).unwrap();
+        assert_eq!(
+            ensure_source_path_matches_open_file(&source, &path, &scanned)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
         );
     }
 
