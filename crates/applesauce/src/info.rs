@@ -74,7 +74,13 @@ pub enum FileCompressionState {
 impl AfscFileInfo {
     #[must_use]
     pub fn compressed_fraction(&self) -> f64 {
-        self.on_disk_size as f64 / self.stat_size as f64
+        // An empty logical file has no compression savings. Avoid 0/0,
+        // which otherwise leaks NaN into consumers of this public API.
+        if self.stat_size == 0 {
+            1.0
+        } else {
+            self.on_disk_size as f64 / self.stat_size as f64
+        }
     }
 }
 
@@ -92,7 +98,13 @@ pub struct AfscFolderInfo {
 impl AfscFolderInfo {
     #[must_use]
     pub fn compressed_fraction(&self) -> f64 {
-        self.total_compressed_size as f64 / self.total_uncompressed_size as f64
+        // Empty directories (and directories containing only empty files)
+        // have no bytes to save; report 0% savings rather than NaN.
+        if self.total_uncompressed_size == 0 {
+            1.0
+        } else {
+            self.total_compressed_size as f64 / self.total_uncompressed_size as f64
+        }
     }
 
     #[must_use]
@@ -254,4 +266,46 @@ fn decmpfs_info_from_bytes(data: &[u8]) -> Result<DecmpfsInfo, decmpfs::DecodeEr
         attribute_size: data.len().try_into().unwrap(),
         orig_file_size: value.uncompressed_size,
     })
+}
+
+#[cfg(test)]
+mod fraction_tests {
+    use super::{AfscFileInfo, AfscFolderInfo};
+
+    #[test]
+    fn empty_file_and_folder_report_finite_zero_savings() {
+        let file = AfscFileInfo {
+            is_compressed: false,
+            on_disk_size: 0,
+            stat_size: 0,
+            xattr_count: 0,
+            total_xattr_size: 0,
+            resource_fork_size: None,
+            decmpfs_info: None,
+        };
+        assert_eq!(file.compressed_fraction(), 1.0);
+
+        let empty = AfscFolderInfo::default();
+        assert_eq!(empty.compressed_fraction(), 1.0);
+        assert_eq!(empty.compression_savings_fraction(), 0.0);
+
+        // Empty logical files may still occupy metadata blocks.
+        let metadata_only = AfscFolderInfo {
+            total_compressed_size: 4096,
+            ..AfscFolderInfo::default()
+        };
+        assert_eq!(metadata_only.compressed_fraction(), 1.0);
+        assert_eq!(metadata_only.compression_savings_fraction(), 0.0);
+    }
+
+    #[test]
+    fn nonempty_folder_ratios_are_unchanged() {
+        let folder = AfscFolderInfo {
+            total_uncompressed_size: 1000,
+            total_compressed_size: 250,
+            ..AfscFolderInfo::default()
+        };
+        assert_eq!(folder.compressed_fraction(), 0.25);
+        assert_eq!(folder.compression_savings_fraction(), 0.75);
+    }
 }
