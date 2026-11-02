@@ -64,7 +64,8 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
 
     let progress = CaptureProgress::default();
     let mut compressor = FileCompressor::new();
-    let stats = compressor.recursive_compress([path.as_path()], Kind::Lzfse, 1.0, 0, &progress, true);
+    let stats =
+        compressor.recursive_compress([path.as_path()], Kind::Lzfse, 1.0, 0, &progress, true);
     assert_no_errors(&progress);
     assert_eq!(stats.compressed_file_count_final.load(Ordering::Relaxed), 1);
 
@@ -106,7 +107,8 @@ fn native_lzfse_inline_type11_generated_jsonl() {
 #[test]
 fn native_lzfse_multiblock_type12_kernel_readback() {
     // Multiple independent blocks, including a partial final block.
-    let input = b"{\"role\":\"assistant\",\"content\":\"generated lzfse multiblock fixture\"}\n".repeat(4096);
+    let input =
+        b"{\"role\":\"assistant\",\"content\":\"generated lzfse multiblock fixture\"}\n".repeat(4096);
     assert!(input.len() > 2 * applesauce_core::BLOCK_SIZE);
     assert_ne!(input.len() % applesauce_core::BLOCK_SIZE, 0);
     generated_native_round_trip(&input, 12);
