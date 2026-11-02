@@ -78,17 +78,20 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
     assert_eq!(fs::read(&path).unwrap(), input);
     let mut reopened = File::open(&path).unwrap();
     let mut offsets = vec![0, input.len() / 2, input.len() - 32];
-    if input.len() > applesauce_core::BLOCK_SIZE + 32 {
-        offsets.extend([
-            applesauce_core::BLOCK_SIZE - 16,
-            applesauce_core::BLOCK_SIZE,
-        ]);
+    if input.len() >= applesauce_core::BLOCK_SIZE {
+        offsets.push(applesauce_core::BLOCK_SIZE - 16);
+    }
+    if input.len() > applesauce_core::BLOCK_SIZE {
+        offsets.push(applesauce_core::BLOCK_SIZE);
     }
     for offset in offsets {
         reopened.seek(SeekFrom::Start(offset as u64)).unwrap();
+        // A final block can contain only one byte. Read exactly what is
+        // present instead of skipping offsets close to the end of the file.
+        let width = (input.len() - offset).min(32);
         let mut bytes = [0u8; 32];
-        reopened.read_exact(&mut bytes).unwrap();
-        assert_eq!(&bytes, &input[offset..offset + bytes.len()]);
+        reopened.read_exact(&mut bytes[..width]).unwrap();
+        assert_eq!(&bytes[..width], &input[offset..offset + width]);
     }
     assert_eq!(
         fs::metadata(&path).unwrap().modified().unwrap(),
@@ -111,6 +114,30 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
 fn native_lzfse_inline_type11_generated_jsonl() {
     let input = b"{\"role\":\"assistant\",\"content\":\"lzfse inline fixture\"}\n".repeat(256);
     generated_native_round_trip(&input, 11);
+}
+
+
+#[test]
+fn native_lzfse_exact_block_edges_and_one_byte_tail() {
+    // Exercise both sides of the decmpfs type 11 -> type 12 transition,
+    // including a one-byte final block and a full final 64 KiB block.
+    // The inputs are synthetic, compressible and never touch user files.
+    let pattern = b"{\"role\":\"assistant\",\"content\":\"generated LZFSE boundary\"}\n";
+    for size in [
+        applesauce_core::BLOCK_SIZE,
+        applesauce_core::BLOCK_SIZE + 1,
+        2 * applesauce_core::BLOCK_SIZE,
+        2 * applesauce_core::BLOCK_SIZE + 1,
+    ] {
+        let mut input = pattern.repeat(size.div_ceil(pattern.len()));
+        input.truncate(size);
+        let expected_type = if size == applesauce_core::BLOCK_SIZE {
+            11
+        } else {
+            12
+        };
+        generated_native_round_trip(&input, expected_type);
+    }
 }
 
 #[test]
