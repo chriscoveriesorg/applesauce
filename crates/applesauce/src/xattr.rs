@@ -198,6 +198,22 @@ pub fn set<F: XattrSource + ?Sized>(
     }
 }
 
+/// Remove an attribute if it exists. Missing attributes are already clean;
+/// permission or I/O failures must not be mistaken for successful removal.
+pub fn remove_if_present<F: XattrSource + ?Sized>(f: &F, xattr_name: &CStr) -> io::Result<()> {
+    // SAFETY: f is a valid xattr source and xattr_name is NUL terminated.
+    let rc = unsafe { f.remove_xattr(xattr_name) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOATTR) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
 /// Read an xattr without allocating more than the caller's format permits.
 /// A size probe can report untrusted metadata, so enforce the limit before
 /// allocating and again after fetching the value.
@@ -508,6 +524,54 @@ mod tests {
         .unwrap();
         assert_eq!(names, [b"x".to_vec()]);
         assert_eq!(xattr.lists.get(), 2);
+    }
+
+    #[test]
+    fn remove_if_present_ignores_missing_xattrs_but_propagates_real_failures() {
+        struct RemovalMock {
+            errno: Option<c_int>,
+            calls: Cell<usize>,
+        }
+
+        impl XattrSource for RemovalMock {
+            unsafe fn get_xattr(&self, _: &CStr, _: *mut u8, _: usize) -> ssize_t {
+                panic!("removal must not probe the attribute")
+            }
+            unsafe fn set_xattr(&self, _: &CStr, _: *const u8, _: usize, _: u32) -> c_int {
+                panic!("removal must not set an attribute")
+            }
+            unsafe fn remove_xattr(&self, name: &CStr) -> c_int {
+                assert_eq!(name, decmpfs::XATTR_NAME);
+                self.calls.set(self.calls.get() + 1);
+                if let Some(errno) = self.errno {
+                    // SAFETY: macOS provides a valid thread-local errno pointer.
+                    unsafe { *libc::__error() = errno };
+                    -1
+                } else {
+                    0
+                }
+            }
+            unsafe fn list_xattr(&self, _: *mut u8, _: usize) -> ssize_t {
+                panic!("removal must not list attributes")
+            }
+        }
+
+        for (errno, expected_kind) in [
+            (None, None),
+            (Some(libc::ENOATTR), None),
+            (Some(libc::EPERM), Some(io::ErrorKind::PermissionDenied)),
+        ] {
+            let source = RemovalMock {
+                errno,
+                calls: Cell::new(0),
+            };
+            let result = remove_if_present(&source, decmpfs::XATTR_NAME);
+            match expected_kind {
+                None => assert!(result.is_ok()),
+                Some(kind) => assert_eq!(result.unwrap_err().kind(), kind),
+            }
+            assert_eq!(source.calls.get(), 1);
+        }
     }
 
     #[test]
