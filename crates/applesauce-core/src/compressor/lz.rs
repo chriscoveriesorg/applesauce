@@ -45,6 +45,9 @@ const SCRATCH_ALIGNMENT: usize = 64;
 
 pub struct Lz<I: Impl> {
     buf: NonNull<u8>,
+    // Reused overflow-guard output for full native blocks. The decoder may
+    // need one extra byte to distinguish a valid full block from truncation.
+    decode_guard: Vec<u8>,
     _impl: PhantomData<I>,
 }
 
@@ -63,6 +66,7 @@ impl<I: Impl> Lz<I> {
         let buf = NonNull::new(buf).unwrap_or_else(|| alloc::handle_alloc_error(layout));
         Self {
             buf,
+            decode_guard: Vec::new(),
             _impl: PhantomData,
         }
     }
@@ -147,15 +151,34 @@ impl<I: Impl> CompressorImpl for Lz<I> {
                 return Ok(src.len());
             }
         }
-        // SAFETY:
-        // dst is valid to write up to len bytes
-        // src is initialised for len bytes
-        // buf is valid to write up to scratch size bytes
+        // Native decmpfs allows an exact 64 KiB logical block. When the
+        // native caller bounds its destination to 64 KiB, decoding directly
+        // would make an exact fill indistinguishable from truncated output.
+        // Decode into a reusable 64 KiB + 1 guard, reject overflow, and copy
+        // verified bytes only after the decoder has completed successfully.
+        // This also leaves caller-owned output unchanged on decode failure.
+        if dst.len() == crate::BLOCK_SIZE {
+            let guard_len = crate::BLOCK_SIZE + 1;
+            if self.decode_guard.len() != guard_len {
+                self.decode_guard
+                    .try_reserve_exact(guard_len - self.decode_guard.len())
+                    .map_err(io::Error::other)?;
+                self.decode_guard.resize(guard_len, 0);
+            }
+            // SAFETY: The guard is writable for guard_len bytes, src is
+            // initialized, and buf is valid for the decoder scratch size.
+            let len = unsafe { I::decode(&mut self.decode_guard, src, self.buf) };
+            if len == 0 || len > dst.len() || len >= guard_len {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            dst[..len].copy_from_slice(&self.decode_guard[..len]);
+            return Ok(len);
+        }
+
+        // SAFETY: dst is writable for its length, src is initialized, and
+        // buf is valid for the decoder scratch size.
         let len = unsafe { I::decode(dst, src, self.buf) };
-        // A full destination may mean truncated decoding. Reject it before
-        // returning bytes, including unexpected oversized decoder results.
-        // A one-byte destination is therefore insufficient for one byte of
-        // compressed output; callers must provide an overflow guard.
+        // Without a guard, an exact fill may conceal truncated decoding.
         if len == 0 || len >= dst.len() {
             return Err(io::ErrorKind::WriteZero.into());
         }
@@ -223,6 +246,50 @@ mod tests {
         unsafe fn decode(_: &mut [u8], _: &[u8], _: NonNull<u8>) -> usize {
             0
         }
+    }
+
+    // Model exact full-block and one-byte-overflow decoder results without
+    // touching the filesystem or depending on a particular native codec.
+    struct FullBlockDecoder<const OVERLONG: bool>;
+
+    // SAFETY: The fixture writes only within the supplied destination and
+    // does not use scratch. The reported length matches bytes written.
+    unsafe impl<const OVERLONG: bool> Impl for FullBlockDecoder<OVERLONG> {
+        fn scratch_size() -> usize {
+            0
+        }
+
+        unsafe fn encode(_: &mut [u8], _: &[u8], _: NonNull<u8>) -> usize {
+            0
+        }
+
+        unsafe fn decode(dst: &mut [u8], src: &[u8], _: NonNull<u8>) -> usize {
+            let size = crate::BLOCK_SIZE + usize::from(OVERLONG);
+            if src.is_empty() || dst.len() < size {
+                return 0;
+            }
+            dst[..size].fill(src[0]);
+            size
+        }
+    }
+
+    #[test]
+    fn exact_native_block_decodes_with_guard_and_overflow_does_not_modify_caller() {
+        let mut output = vec![0xa5; crate::BLOCK_SIZE];
+        let mut valid = Lz::<FullBlockDecoder<false>>::new();
+        assert_eq!(
+            valid.decompress(&mut output, &[0x42]).unwrap(),
+            crate::BLOCK_SIZE
+        );
+        assert!(output.iter().all(|&byte| byte == 0x42));
+
+        output.fill(0xa5);
+        let mut overlong = Lz::<FullBlockDecoder<true>>::new();
+        assert_eq!(
+            overlong.decompress(&mut output, &[0x42]).unwrap_err().kind(),
+            io::ErrorKind::WriteZero
+        );
+        assert!(output.iter().all(|&byte| byte == 0xa5));
     }
 
     #[test]
