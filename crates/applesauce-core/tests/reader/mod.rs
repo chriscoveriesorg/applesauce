@@ -183,7 +183,7 @@ fn resource_fork_resizes_fail_closed_before_and_during_block_reads() {
                 match self.change {
                     Change::GrowBefore => self.cursor.get_mut().push(0xa5),
                     Change::ShrinkBefore => {
-                        self.cursor.get_mut().pop();
+                        let _ = self.cursor.get_mut().pop();
                     }
                     Change::GrowDuring => unreachable!(),
                 }
