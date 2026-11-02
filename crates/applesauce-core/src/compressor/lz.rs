@@ -286,7 +286,10 @@ mod tests {
         output.fill(0xa5);
         let mut overlong = Lz::<FullBlockDecoder<true>>::new();
         assert_eq!(
-            overlong.decompress(&mut output, &[0x42]).unwrap_err().kind(),
+            overlong
+                .decompress(&mut output, &[0x42])
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::WriteZero
         );
         assert!(output.iter().all(|&byte| byte == 0xa5));
