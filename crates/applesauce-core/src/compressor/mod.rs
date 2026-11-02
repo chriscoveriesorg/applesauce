@@ -121,6 +121,16 @@ impl Compressor {
                 "cannot compress an empty block",
             ));
         }
+        // The native decmpfs framing describes independent 64 KiB logical
+        // blocks. A larger input could produce a perfectly valid buffer-codec
+        // stream that the filesystem reader cannot interpret as one block.
+        // Larger buffer workloads belong in apple_buffer instead.
+        if src.len() > crate::BLOCK_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native compressed block exceeds 64 KiB",
+            ));
+        }
         match self.0 {
             #[cfg(feature = "zlib")]
             Data::Zlib(ref mut i) => i.compress(dst, src, level),
@@ -134,7 +144,7 @@ impl Compressor {
     }
 
     pub fn decompress(&mut self, dst: &mut [u8], src: &[u8]) -> io::Result<usize> {
-        match self.0 {
+        let decoded_size = match self.0 {
             #[cfg(feature = "zlib")]
             Data::Zlib(ref mut i) => i.decompress(dst, src),
             #[cfg(feature = "lzfse")]
@@ -143,7 +153,17 @@ impl Compressor {
             Data::Lzvn(ref mut i) => i.decompress(dst, src),
             #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
             Data::Lzbitmap(ref mut i) => i.decompress(dst, src),
+        }?;
+        // Keep stored-marker fallbacks subject to the same 64 KiB logical
+        // block limit as compressed output. A large caller-owned destination
+        // must not turn malformed decmpfs data into an accepted block.
+        if decoded_size > crate::BLOCK_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native decoded block exceeds 64 KiB",
+            ));
         }
+        Ok(decoded_size)
     }
 
     pub fn finish<W: io::Write + io::Seek>(
@@ -349,6 +369,46 @@ mod tests {
                 assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{kind}");
                 assert!(output.iter().all(|&byte| byte == 0xa5), "{kind}");
             }
+        }
+    }
+
+    #[test]
+    fn native_compression_rejects_overlong_input_before_touching_destination() {
+        let oversized = vec![0x5a; crate::BLOCK_SIZE + 1];
+        for kind in Kind::ALL {
+            let Some(mut compressor) = kind.compressor() else {
+                continue;
+            };
+            let mut output = vec![0xa5; oversized.len() + 1024];
+            let error = compressor.compress(&mut output, &oversized, 5).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{kind}");
+            assert!(output.iter().all(|&byte| byte == 0xa5), "{kind}");
+        }
+    }
+
+    #[test]
+    fn stored_blocks_cannot_decode_beyond_the_native_block_boundary() {
+        // ZLIB, LZVN and opt-in LZBitmap support raw-block markers. Their
+        // decoders accept any destination that fits the declared raw bytes;
+        // the public native compressor must still enforce decmpfs's limit.
+        for (kind, marker) in [
+            (Kind::Zlib, 0xff),
+            (Kind::Lzvn, 0x06),
+            (Kind::Lzbitmap, 0xff),
+        ] {
+            let Some(mut compressor) = kind.compressor() else {
+                continue;
+            };
+            let mut stored = vec![marker];
+            stored.extend_from_slice(&vec![0x42; crate::BLOCK_SIZE]);
+            let mut output = vec![0; crate::BLOCK_SIZE + 1024];
+            let size = compressor.decompress(&mut output, &stored).unwrap();
+            assert_eq!(size, crate::BLOCK_SIZE, "{kind}");
+            assert_eq!(&output[..size], &stored[1..], "{kind}");
+
+            stored.push(0x42);
+            let error = compressor.decompress(&mut output, &stored).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{kind}");
         }
     }
 
