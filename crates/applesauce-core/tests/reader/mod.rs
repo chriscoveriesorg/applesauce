@@ -315,10 +315,7 @@ fn same_length_resource_fork_table_mutation_is_rejected_at_open() {
     let mut fork = Vec::new();
     let mut writer = {
         let rfork_ref = &mut fork;
-        Writer::new(kind, BLOCK_SIZE as u64 + 1, move || {
-            Cursor::new(rfork_ref)
-        })
-        .unwrap()
+        Writer::new(kind, BLOCK_SIZE as u64 + 1, move || Cursor::new(rfork_ref)).unwrap()
     };
     writer.add_block(&[0x11, 0x12]).unwrap();
     writer.add_block(&[0x21, 0x22]).unwrap();
