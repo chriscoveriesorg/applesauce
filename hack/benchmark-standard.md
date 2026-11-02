@@ -12,6 +12,16 @@ workflow](https://github.com/chriscoveriesorg/applesauce/actions/workflows/bench
 download its `applesauce-criterion-…` artifact. Runs use the macOS 27
 `xcode-27` runner, stable Rust, and pinned `Cargo.lock` dependencies.
 
+**Alternative owner-triggered STANDARD run when workflow dispatch is unavailable:**
+the authenticated repository owner `chriscoveries` can comment exactly
+`/applesauce-benchmark standard` on the existing [benchmark PR #4](https://github.com/chriscoveriesorg/applesauce/pull/4).
+Only that user, that PR, and that exact command can allocate the benchmark
+runner; other issue or pull-request comments do nothing. This runs the current
+**default-branch** commit, not the old PR branch or commenter-supplied code.
+`environment.txt` records the trigger comment URL, event and exact tested SHA;
+the artifact is named `applesauce-criterion-standard-<run ID>-<attempt>`.
+The workflow-dispatch button remains available for smoke/standard/extended.
+
 | Suite | Generated workloads | Uncompressed sizes | Layouts | Scratch comparison | Typical use |
 |---|---|---|---|---|---|
 | `smoke` | Chat JSONL-like, entropy | 64 KiB | Whole | Both | Correctness/quick measurement |
