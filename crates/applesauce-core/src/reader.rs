@@ -179,9 +179,7 @@ impl<R: Read + Seek> Reader<R> {
                 // Offset tables are untrusted. Reject wildly oversized encoded
                 // blocks before reserving memory or seeking into a sparse fork.
                 // A valid logical block expands to at most 64 KiB.
-                if u64::from(block.compressed_size)
-                    > compressor::MAX_COMPRESSED_BLOCK_BYTES as u64
-                {
+                if block.compressed_size > compressor::MAX_COMPRESSED_BLOCK_BYTES as u32 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "native compressed block exceeds defensive size ceiling",
