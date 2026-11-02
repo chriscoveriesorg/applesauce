@@ -266,8 +266,14 @@ mod tests {
             .map(|index| (index % 251) as u8)
             .collect();
         let mut reader = OneByteReader(&input);
-        assert_eq!(read_chunk(&mut reader, BLOCK_SIZE).unwrap(), input[..BLOCK_SIZE]);
-        assert_eq!(read_chunk(&mut reader, BLOCK_SIZE).unwrap(), input[BLOCK_SIZE..]);
+        assert_eq!(
+            read_chunk(&mut reader, BLOCK_SIZE).unwrap(),
+            input[..BLOCK_SIZE]
+        );
+        assert_eq!(
+            read_chunk(&mut reader, BLOCK_SIZE).unwrap(),
+            input[BLOCK_SIZE..]
+        );
         assert!(read_chunk(&mut reader, BLOCK_SIZE).unwrap().is_empty());
     }
 
@@ -287,7 +293,10 @@ mod tests {
         let next = read_chunk(&mut cursor, BLOCK_SIZE + 100).unwrap();
         assert_eq!(next, input[7..7 + BLOCK_SIZE]);
         assert_eq!(cursor.position(), (7 + BLOCK_SIZE) as u64);
-        assert_eq!(read_chunk(&mut cursor, BLOCK_SIZE).unwrap(), input[7 + BLOCK_SIZE..]);
+        assert_eq!(
+            read_chunk(&mut cursor, BLOCK_SIZE).unwrap(),
+            input[7 + BLOCK_SIZE..]
+        );
     }
 
     #[test]
