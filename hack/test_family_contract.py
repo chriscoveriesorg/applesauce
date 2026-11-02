@@ -109,6 +109,43 @@ class FamilyContractTests(unittest.TestCase):
                 self.assertEqual(1, rc)
                 self.assertIn("incomplete Foldy scan", err)
 
+    def test_nonfinite_json_numbers_fail_closed_even_in_ignored_metadata(self):
+        # Default json.loads accepts NaN/Infinity and converts 1e999 to inf.
+        # The ignored Foldy mtime and ZGX ranking score must not allow a
+        # malformed receipt to pass, even when both snapshots are identical.
+        for token in ("NaN", "Infinity", "-Infinity", "1e999"):
+            for source in ("foldy", "zgx"):
+                with self.subTest(token=token, source=source):
+                    if source == "foldy":
+                        payload = json.dumps(foldy())
+                        original = '"mtime_ns": 1'
+                        field = "--foldy"
+                        extension = "json"
+                    else:
+                        payload = json.dumps(zgx())
+                        original = '"score": 0.91'
+                        field = "--zgx"
+                        extension = "jsonl"
+                    self.assertIn(original, payload)
+                    malformed = payload.replace(
+                        original, original.split(":")[0] + ": " + token, 1
+                    )
+                    valid_path = self.base / f"valid-{source}.{extension}"
+                    invalid_path = self.base / f"invalid-{source}.{extension}"
+                    valid_path.write_text(payload + "\n", encoding="utf-8")
+                    invalid_path.write_text(malformed + "\n", encoding="utf-8")
+                    for before, after in (
+                        (valid_path, invalid_path),
+                        (invalid_path, valid_path),
+                        (invalid_path, invalid_path),
+                    ):
+                        rc, _, err = self.execute(
+                            f"{field}-before", str(before),
+                            f"{field}-after", str(after),
+                        )
+                        self.assertEqual(1, rc)
+                        self.assertIn("JSON", err)
+
     def test_duplicate_foldy_json_keys_fail_closed(self):
         before = self.write("b.json", foldy())
         valid = json.dumps(foldy())
