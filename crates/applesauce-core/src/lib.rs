@@ -1,4 +1,5 @@
 pub mod apple_buffer;
+pub mod cold_archive;
 pub mod compressor;
 pub mod decmpfs;
 pub mod guarded_buffer;
