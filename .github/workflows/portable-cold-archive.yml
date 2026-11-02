@@ -33,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked -p applesauce-core cold_archive::tests:: -- --nocapture
-          cargo test --locked -p applesauce-core --no-default-features cold_archive::tests:: -- --nocapture
+          cargo test --locked -p applesauce-core --no-default-features --features zlib cold_archive::tests:: -- --nocapture
       - name: Check formatting and cross-platform clippy
         run: |
           set -euo pipefail
