@@ -112,6 +112,10 @@ jobs:
           { rustc --version; cargo --version; } | tee "$PROBE_RESULTS/rust-toolchain.txt"
           cargo test --locked -p applesauce-core --all-features apple_buffer::tests:: \
             2>&1 | tee "$PROBE_RESULTS/rust-buffer-tests.log"
+          # Exercise native decmpfs block bounds on the macOS 27 host too.
+          # Generated in-memory fixtures only; no APFS filesystem writes.
+          cargo test --locked -p applesauce-core --all-features compressor::tests:: \
+            2>&1 | tee "$PROBE_RESULTS/native-compressor-tests.log"
           cargo test --locked -p applesauce-cli --features lzbitmap codecs::tests:: \
             2>&1 | tee "$PROBE_RESULTS/rust-cli-tests.log"
       - name: Smoke-check versioned benchmark fixtures and speed harness

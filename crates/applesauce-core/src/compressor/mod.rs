@@ -156,15 +156,37 @@ impl Compressor {
                 "native compressed block exceeds defensive size ceiling",
             ));
         }
+        // Stored-marker blocks are copied directly into the caller's buffer
+        // by their codec backends. Reject an overlong logical block before
+        // that copy, so malformed input cannot modify output on this path.
+        let stored_marker = match self.kind() {
+            Kind::Zlib | Kind::Lzbitmap => Some(0xff),
+            Kind::Lzvn => Some(0x06),
+            Kind::Lzfse => None,
+        };
+        if src.len() > crate::BLOCK_SIZE + 1
+            && stored_marker.is_some_and(|marker| src.first() == Some(&marker))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native stored block exceeds 64 KiB",
+            ));
+        }
+        // A compressed payload can expand past a native 64 KiB logical
+        // block before the post-decode size check runs. Bound the destination
+        // handed to every codec so malformed data cannot overwrite the
+        // caller's output beyond the logical block boundary.
+        let bounded_len = dst.len().min(crate::BLOCK_SIZE);
+        let bounded_dst = &mut dst[..bounded_len];
         let decoded_size = match self.0 {
             #[cfg(feature = "zlib")]
-            Data::Zlib(ref mut i) => i.decompress(dst, src),
+            Data::Zlib(ref mut i) => i.decompress(bounded_dst, src),
             #[cfg(feature = "lzfse")]
-            Data::Lzfse(ref mut i) => i.decompress(dst, src),
+            Data::Lzfse(ref mut i) => i.decompress(bounded_dst, src),
             #[cfg(feature = "lzvn")]
-            Data::Lzvn(ref mut i) => i.decompress(dst, src),
+            Data::Lzvn(ref mut i) => i.decompress(bounded_dst, src),
             #[cfg(all(target_os = "macos", feature = "lzbitmap"))]
-            Data::Lzbitmap(ref mut i) => i.decompress(dst, src),
+            Data::Lzbitmap(ref mut i) => i.decompress(bounded_dst, src),
         }?;
         // Keep stored-marker fallbacks subject to the same 64 KiB logical
         // block limit as compressed output. A large caller-owned destination
@@ -433,9 +455,112 @@ mod tests {
             assert_eq!(&output[..size], &stored[1..], "{kind}");
 
             stored.push(0x42);
+            output.fill(0xa5);
             let error = compressor.decompress(&mut output, &stored).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{kind}");
+            assert!(
+                output.iter().all(|&byte| byte == 0xa5),
+                "{kind} modified output for an oversized stored block"
+            );
         }
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn full_native_zlib_block_round_trips_without_touching_destination_tail() {
+        // A complete 64 KiB compressed logical block must still decode
+        // exactly, even when the caller supplies a larger output buffer.
+        let payload = vec![0x42; crate::BLOCK_SIZE];
+        let mut encoded = vec![0; payload.len() + 1024];
+        let used = Zlib::new().compress(&mut encoded, &payload, 5).unwrap();
+        encoded.truncate(used);
+        assert_ne!(encoded[0], 0xff, "fixture must use compressed framing");
+
+        let mut output = vec![0xa5; crate::BLOCK_SIZE + 128];
+        let size = Compressor::zlib()
+            .decompress(&mut output, &encoded)
+            .unwrap();
+        assert_eq!(size, crate::BLOCK_SIZE);
+        assert_eq!(&output[..size], payload.as_slice());
+        assert!(output[crate::BLOCK_SIZE..].iter().all(|&byte| byte == 0xa5));
+    }
+
+    #[test]
+    fn full_native_lz_blocks_round_trip_without_touching_destination_tail() {
+        // Full LZVN/LZFSE/LZBitmap blocks require an overflow guard to
+        // distinguish an exact 64 KiB decode from a truncated stream.
+        for kind in [Kind::Lzvn, Kind::Lzfse, Kind::Lzbitmap] {
+            let Some(mut compressor) = kind.compressor() else {
+                continue;
+            };
+            let payload = vec![0x42; crate::BLOCK_SIZE];
+            let mut encoded = vec![0; payload.len() + 1024];
+            let used = compressor.compress(&mut encoded, &payload, 5).unwrap();
+            encoded.truncate(used);
+            if kind == Kind::Lzvn {
+                assert_ne!(encoded[0], 0x06, "LZVN fixture must be compressed");
+            }
+            if kind == Kind::Lzbitmap {
+                assert_ne!(encoded[0], 0xff, "LZBitmap fixture must be compressed");
+            }
+
+            let mut output = vec![0xa5; crate::BLOCK_SIZE + 128];
+            let size = compressor.decompress(&mut output, &encoded).unwrap();
+            assert_eq!(size, crate::BLOCK_SIZE, "{kind}");
+            assert_eq!(&output[..size], payload.as_slice(), "{kind}");
+            assert!(
+                output[crate::BLOCK_SIZE..].iter().all(|&byte| byte == 0xa5),
+                "{kind} modified destination tail"
+            );
+        }
+    }
+
+    #[cfg(feature = "lzvn")]
+    #[test]
+    fn overlong_compressed_lzvn_block_fails_without_modifying_caller_output() {
+        // The low-level codec can encode 64 KiB + 1 bytes, but a native
+        // decmpfs block must reject it without leaking the overflow byte.
+        let payload = vec![0x42; crate::BLOCK_SIZE + 1];
+        let mut encoded = vec![0; payload.len() + 1024];
+        let used = Lzvn::new().compress(&mut encoded, &payload, 0).unwrap();
+        encoded.truncate(used);
+        assert_ne!(encoded[0], 0x06, "fixture must use compressed framing");
+
+        let mut output = vec![0xa5; crate::BLOCK_SIZE + 128];
+        let error = Compressor::lzvn()
+            .decompress(&mut output, &encoded)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        assert!(output.iter().all(|&byte| byte == 0xa5));
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn overlong_compressed_block_cannot_overwrite_past_native_boundary() {
+        // Exercise a real compressed (not stored-marker) stream. The lower
+        // level codec can encode more than one filesystem logical block; the
+        // native wrapper must refuse it without writing past 64 KiB.
+        let payload = vec![0x42; crate::BLOCK_SIZE + 1];
+        let mut encoded = vec![0; payload.len() + 1024];
+        let used = Zlib::new().compress(&mut encoded, &payload, 5).unwrap();
+        encoded.truncate(used);
+        assert_ne!(encoded[0], 0xff, "fixture must use compressed framing");
+
+        let mut output = vec![0xa5; crate::BLOCK_SIZE + 128];
+        let error = Compressor::zlib()
+            .decompress(&mut output, &encoded)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::Other | io::ErrorKind::InvalidData
+            ),
+            "unexpected decompression error: {error}"
+        );
+        assert!(
+            output[crate::BLOCK_SIZE..].iter().all(|&byte| byte == 0xa5),
+            "overlong compressed stream modified bytes past the native block boundary"
+        );
     }
 
     #[cfg(not(all(target_os = "macos", feature = "lzbitmap")))]

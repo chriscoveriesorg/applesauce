@@ -4,7 +4,9 @@ name: Continuous integration
 
 jobs:
   ci:
-    runs-on: macos-latest
+    # Use the same provisioned macOS runner that executes the native codec probe.
+    # The macos-latest matrix has been cancelled before runner assignment.
+    runs-on: xcode-27
     strategy:
       matrix:
         rust:
