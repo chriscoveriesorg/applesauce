@@ -389,8 +389,8 @@ mod tests {
     use super::{ensure_identical_files, ensure_source_path_matches_open_file};
     use std::fs::{self, File};
     use std::io::{BufReader, Cursor, ErrorKind};
-    use std::time::{Duration, SystemTime};
     use std::os::unix::fs::symlink;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn publication_guard_rejects_replaced_path_and_symlink() {
