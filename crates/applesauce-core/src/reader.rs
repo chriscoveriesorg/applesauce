@@ -176,6 +176,15 @@ impl<R: Read + Seek> Reader<R> {
                     Some(block) => block,
                     None => return Ok(false),
                 };
+                // Offset tables are untrusted. Reject wildly oversized encoded
+                // blocks before reserving memory or seeking into a sparse fork.
+                // A valid logical block expands to at most 64 KiB.
+                if block.compressed_size > compressor::MAX_COMPRESSED_BLOCK_BYTES as u32 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "native compressed block exceeds defensive size ceiling",
+                    ));
+                }
                 // Recheck physical EOF before reading. A fork resized after
                 // its offset table was validated is not a consistent snapshot.
                 // Seek via BufReader itself so cached bytes are invalidated.
@@ -231,5 +240,57 @@ impl<R: Read + Seek> Reader<R> {
             }
             State::ResourceFork { block_infos, .. } => block_infos.len(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SeekOnly {
+        length: u64,
+    }
+
+    impl Read for SeekOnly {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            panic!("oversized encoded blocks must be rejected before payload reads");
+        }
+    }
+
+    impl Seek for SeekOnly {
+        fn seek(&mut self, offset: SeekFrom) -> io::Result<u64> {
+            match offset {
+                SeekFrom::End(0) => Ok(self.length),
+                _ => panic!("oversized encoded blocks must be rejected before seeking"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_fork_block_without_read_or_allocation() {
+        let over_limit = (compressor::MAX_COMPRESSED_BLOCK_BYTES + 1) as u32;
+        let mut reader = Reader {
+            kind: compressor::Kind::Zlib,
+            state: State::ResourceFork {
+                block_infos: vec![BlockInfo {
+                    offset: 0,
+                    compressed_size: over_limit,
+                }],
+                expected_fork_len: u64::from(over_limit),
+                reader: BufReader::new(SeekOnly {
+                    length: u64::from(over_limit),
+                }),
+            },
+            failed: false,
+        };
+        let mut output = vec![0xa5; 8];
+        let error = reader.read_block_into(&mut output).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(output, vec![0xa5; 8]);
+        assert_eq!(reader.remaining_blocks(), 1);
+        assert_eq!(
+            reader.read_block_into(&mut output).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
     }
 }

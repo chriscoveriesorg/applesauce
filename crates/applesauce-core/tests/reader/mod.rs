@@ -239,7 +239,7 @@ fn sparse_resource_fork_does_not_allocate_its_declared_block_before_reading() {
 
     // The LZ table has two absolute offsets for a single block. A forged
     // seekable fork can report 32 MiB while only supplying the eight table
-    // bytes. This must fail after at most one bounded read allocation.
+    // bytes. Reject that impossible block before reading or allocating.
     let Some(kind) = Kind::ALL
         .into_iter()
         .find(|kind| *kind != Kind::Zlib && kind.supported())
@@ -283,7 +283,7 @@ fn sparse_resource_fork_does_not_allocate_its_declared_block_before_reading() {
     let mut output = vec![0xa5, 0x5a];
     assert_eq!(
         reader.read_block_into(&mut output).unwrap_err().kind(),
-        std::io::ErrorKind::UnexpectedEof
+        std::io::ErrorKind::InvalidData
     );
     assert_eq!(output, [0xa5, 0x5a]);
     assert!(

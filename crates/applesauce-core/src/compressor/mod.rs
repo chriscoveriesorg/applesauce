@@ -27,6 +27,12 @@ mod lzvn;
 #[cfg(feature = "zlib")]
 mod zlib;
 
+/// Defensive ceiling for one native decmpfs encoded block. A logical block
+/// expands to at most 64 KiB; allow 16x overhead for unusual but valid
+/// encoders while rejecting attacker-controlled multi-megabyte blocks before
+/// decoder work or resource-fork allocation. This is not an APFS codec ID.
+pub(crate) const MAX_COMPRESSED_BLOCK_BYTES: usize = crate::BLOCK_SIZE * 16;
+
 pub(crate) trait CompressorImpl {
     /// The offset to start data at, for the specified number of blocks
     #[must_use]
@@ -144,6 +150,12 @@ impl Compressor {
     }
 
     pub fn decompress(&mut self, dst: &mut [u8], src: &[u8]) -> io::Result<usize> {
+        if src.len() > MAX_COMPRESSED_BLOCK_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native compressed block exceeds defensive size ceiling",
+            ));
+        }
         let decoded_size = match self.0 {
             #[cfg(feature = "zlib")]
             Data::Zlib(ref mut i) => i.decompress(dst, src),
@@ -383,6 +395,20 @@ mod tests {
             let error = compressor.compress(&mut output, &oversized, 5).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{kind}");
             assert!(output.iter().all(|&byte| byte == 0xa5), "{kind}");
+        }
+    }
+
+    #[test]
+    fn oversized_native_payload_is_rejected_before_decoder_touches_output() {
+        let oversized = vec![0xff; MAX_COMPRESSED_BLOCK_BYTES + 1];
+        for kind in Kind::ALL {
+            let Some(mut compressor) = kind.compressor() else {
+                continue;
+            };
+            let mut output = [0xa5; 64];
+            let error = compressor.decompress(&mut output, &oversized).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{kind}");
+            assert_eq!(output, [0xa5; 64], "{kind}");
         }
     }
 
