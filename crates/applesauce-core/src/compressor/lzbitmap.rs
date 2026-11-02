@@ -145,14 +145,33 @@ mod tests {
         let size = compressor.compress(&mut encoded, &input, 0).unwrap();
         assert!(size < input.len());
         encoded.truncate(size);
-        for capacity in [1, input.len() - 1, input.len()] {
+        for capacity in [1, input.len() - 1] {
             assert!(compressor
                 .decompress(&mut vec![0; capacity], &encoded)
                 .is_err());
         }
+        // A complete full-size block is valid when decoded with a private
+        // overflow guard; only a truncated or oversized stream must fail.
+        let mut exact = vec![0; input.len()];
+        let exact_size = compressor.decompress(&mut exact, &encoded).unwrap();
+        assert_eq!(exact_size, input.len());
+        assert_eq!(exact, input);
+
         let mut decoded = vec![0; input.len() + 1];
         let size = compressor.decompress(&mut decoded, &encoded).unwrap();
         assert_eq!(&decoded[..size], input);
+    }
+
+    #[test]
+    fn oversized_compressed_block_does_not_modify_full_native_destination() {
+        let mut compressor = native_compressor();
+        let input = vec![b'a'; crate::BLOCK_SIZE + 1];
+        let encoded = Codec::Lzbitmap.encode(&input).unwrap();
+        assert_ne!(encoded[0], STORED_MARKER, "fixture must be compressed");
+
+        let mut output = vec![0xa5; crate::BLOCK_SIZE];
+        assert!(compressor.decompress(&mut output, &encoded).is_err());
+        assert!(output.iter().all(|&byte| byte == 0xa5));
     }
 
     #[test]
