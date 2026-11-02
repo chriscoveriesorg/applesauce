@@ -56,7 +56,14 @@ def median_ns(root: Path, row: dict[str, str], operation: str) -> float:
         duration = float(value)
     except (ValueError, OverflowError) as error:
         raise ValueError(f"invalid {operation} median in {path}") from error
-    if not math.isfinite(duration) or duration <= 0:
+    # Medians are serialized with five fractional nanosecond digits. A
+    # positive value that rounds to zero would misrepresent the measurement
+    # and can produce infinite throughput despite passing the finite check.
+    if (
+        not math.isfinite(duration)
+        or duration <= 0
+        or f"{duration:.5f}" == "0.00000"
+    ):
         raise ValueError(f"invalid {operation} median in {path}")
     return duration
 
