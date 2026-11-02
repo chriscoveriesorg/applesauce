@@ -26,6 +26,7 @@ system-lzfse = ["lzfse"]
 [dependencies]
 libc = "0.2.186"
 tracing = "0.1.44"
+sha2 = "0.11.1"
 libdeflater = { version = "1.25.2", optional = true }
 
 # pin to an exact version, since we depend on internal implementation details
@@ -34,7 +35,6 @@ lzfse-sys = { version = "=2.0.0", optional = true }
 [dev-dependencies]
 rand = "0.10.1"
 criterion = { version = "0.8.2", features = ["html_reports"] }
-sha2 = "0.11.1"
 
 [[bench]]
 name = "bench"
