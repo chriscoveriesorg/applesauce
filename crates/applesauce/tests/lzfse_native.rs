@@ -100,15 +100,14 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
 
 #[test]
 fn native_lzfse_inline_type11_generated_jsonl() {
-    let input = b"{\"role\":\"assistant\",\"content\":\"generated lzfse inline fixture\"}\n".repeat(32);
+    let input = b"{\"role\":\"assistant\",\"content\":\"lzfse inline fixture\"}\n".repeat(32);
     generated_native_round_trip(&input, 11);
 }
 
 #[test]
 fn native_lzfse_multiblock_type12_kernel_readback() {
     // Multiple independent blocks, including a partial final block.
-    let input =
-        b"{\"role\":\"assistant\",\"content\":\"generated lzfse multiblock fixture\"}\n".repeat(4096);
+    let input = b"{\"role\":\"assistant\",\"content\":\"lzfse multiblock fixture\"}\n".repeat(4096);
     assert!(input.len() > 2 * applesauce_core::BLOCK_SIZE);
     assert_ne!(input.len() % applesauce_core::BLOCK_SIZE, 0);
     generated_native_round_trip(&input, 12);
