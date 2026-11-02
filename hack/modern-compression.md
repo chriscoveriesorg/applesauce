@@ -73,6 +73,32 @@ LZRAVEN, LZMESH and LZBitmap before scanning or mutating anything. Legacy defaul
 continue working with upstream Applesauce. Restore does not need an available
 encoder. See [sessions integration](https://github.com/chriscoveriesorg/compress-agent-sessions/blob/main/docs/experimental-lzraven.md).
 
+## Read-only native decoder catalogue evidence (macOS 27)
+
+The automatic macOS 27 probe now runs `hack/decmpfs_catalogue_probe.py` after
+its read-only `kmutil`/`ioreg` inventory. It inspects the recorded component
+text and candidate AppleFSCompression bundle `Info.plist` personalities,
+capturing exact `com.apple.AppleFSCompression.providesTypeN` and
+`com.apple.AppleFSCompression.TypeN` declarations. It records SHA-256
+provenance and an explicitly inconclusive `decmpfs-catalogue-hints.json`.
+Pure-Python synthetic tests reject fake prefixes, oversized or malformed
+evidence, symlinks and unbounded candidate lists.
+
+The report **always** retains `kernel_decoder_proven=false`,
+`codec_identity_proven=false` and
+`native_raven_mesh_writes_permitted=false`. Such declarations can guide
+static research; missing declarations do **not** establish lack of support.
+The JSON does not register a decoder, probe a kernel type or identify the
+framing of a stored file. A native writer still requires the separate
+owner-approved disposable-volume qualification defined in the roadmap.
+
+To inspect only supplied, synthetic evidence on any host:
+
+```sh
+python3 -m unittest discover -s hack -p 'test_decmpfs_catalogue_probe.py'
+python3 hack/decmpfs_catalogue_probe.py --component-log FILE.txt --info-plist FILE.plist
+```
+
 ## Read-only benchmarks
 
 ```sh

@@ -70,6 +70,27 @@ jobs:
             /usr/bin/kmutil showloaded 2>&1 | /usr/bin/grep -E 'AppleFSCompression|decmpfs' || true
             /usr/sbin/ioreg -l -w 0 -p IOService | /usr/bin/grep -E 'AppleFSCompression|providesType' | /usr/bin/head -n 40 || true
           } | tee "$PROBE_RESULTS/filesystem-components.txt"
+      - name: Inspect native decoder catalogue declarations (read-only, candidate hints only)
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s hack -p 'test_decmpfs_catalogue_probe.py' \
+            2>&1 | tee "$PROBE_RESULTS/decmpfs-catalogue-tests.log"
+          python3 hack/decmpfs_catalogue_probe.py \
+            --component-log "$PROBE_RESULTS/filesystem-components.txt" --system \
+            | tee "$PROBE_RESULTS/decmpfs-catalogue-hints.json"
+          python3 - "$PROBE_RESULTS/decmpfs-catalogue-hints.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              report = json.load(handle)
+          assert report["schema_version"] == 1
+          assert report["kind"] == "read-only-decmpfs-catalogue-hints"
+          assert report["kernel_decoder_proven"] is False
+          assert report["codec_identity_proven"] is False
+          assert report["native_raven_mesh_writes_permitted"] is False
+          PY
+          printf '## Native decmpfs registration clues\n\nRead-only catalogue hints captured in `decmpfs-catalogue-hints.json`. Presence or absence of a declaration is not proof of a registered decoder or a Raven/Mesh format.\n' \
+            >> "$GITHUB_STEP_SUMMARY"
       - name: Compile and exercise SDK buffer codecs (no APFS conversion)
         run: |
           set -euo pipefail
