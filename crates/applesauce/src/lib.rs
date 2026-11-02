@@ -290,6 +290,7 @@ mod tests {
     use std::collections::HashMap;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
     use std::time::SystemTime;
     use std::{fs, iter};
@@ -304,7 +305,7 @@ mod tests {
 
         // A scan can account for physical metadata blocks without logical
         // bytes; this must not produce NaN or infinite savings.
-        stats.compressed_size_final.store(4096, std::sync::atomic::Ordering::Relaxed);
+        stats.compressed_size_final.store(4096, Ordering::Relaxed);
         assert_eq!(stats.compression_savings(), 0.0);
         assert_eq!(stats.compression_change_portion(), 0.0);
     }
@@ -312,9 +313,9 @@ mod tests {
     #[test]
     fn nonempty_scan_statistics_preserve_existing_ratios() {
         let stats = Stats::default();
-        stats.total_file_sizes.store(1000, std::sync::atomic::Ordering::Relaxed);
-        stats.compressed_size_start.store(800, std::sync::atomic::Ordering::Relaxed);
-        stats.compressed_size_final.store(200, std::sync::atomic::Ordering::Relaxed);
+        stats.total_file_sizes.store(1000, Ordering::Relaxed);
+        stats.compressed_size_start.store(800, Ordering::Relaxed);
+        stats.compressed_size_final.store(200, Ordering::Relaxed);
         assert_eq!(stats.compression_savings(), 0.8);
         assert_eq!(stats.compression_change_portion(), 0.75);
     }
