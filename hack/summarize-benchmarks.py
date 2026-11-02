@@ -95,8 +95,14 @@ def summarize(manifest: Path, criterion: Path, output: Path) -> list[dict[str, s
         # or non-finite ratio just because Criterion timings are present.
         encoded_bytes = int(row["encoded_bytes"])
         ratio = float(row["encoded_over_input_ratio"])
+        try:
+            actual_ratio = encoded_bytes / size
+        except OverflowError as error:
+            raise ValueError(
+                f"invalid encoded size or ratio in benchmark row {index}"
+            ) from error
         if encoded_bytes <= 0 or not math.isfinite(ratio) or not math.isclose(
-            ratio, encoded_bytes / size, rel_tol=0, abs_tol=1e-8
+            ratio, actual_ratio, rel_tol=0, abs_tol=1e-8
         ):
             raise ValueError(f"invalid encoded size or ratio in benchmark row {index}")
         for operation in ("encode", "decode"):
