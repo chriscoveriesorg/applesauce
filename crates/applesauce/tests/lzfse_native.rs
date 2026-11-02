@@ -100,7 +100,7 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
 
 #[test]
 fn native_lzfse_inline_type11_generated_jsonl() {
-    let input = b"{\"role\":\"assistant\",\"content\":\"lzfse inline fixture\"}\n".repeat(32);
+    let input = b"{\"role\":\"assistant\",\"content\":\"lzfse inline fixture\"}\n".repeat(256);
     generated_native_round_trip(&input, 11);
 }
 
