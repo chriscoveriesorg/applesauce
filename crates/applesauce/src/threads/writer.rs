@@ -161,6 +161,12 @@ impl Handler {
     fn write_uncompressed_file(&mut self, item: WorkItem) -> io::Result<()> {
         let mut tmp_file = tmp_file_for(&item)?;
         copy_xattrs(&item.file, tmp_file.as_file())?;
+        // COPYFILE_XATTR may preserve com.apple.decmpfs from the compressed
+        // source. A restored plain file must not publish stale compression
+        // metadata, even when the compressed flag is subsequently cleared.
+        // Operate only on the temporary destination; fail closed if removal
+        // is denied, and tolerate filesystems that did not copy the attribute.
+        xattr::remove_if_present(tmp_file.as_file(), decmpfs::XATTR_NAME)?;
 
         let decmpfs_data = xattr::read(
             item.file.as_ref(),
