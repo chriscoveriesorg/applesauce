@@ -37,12 +37,15 @@ pub(super) struct Handler {
     writer: writer::Sender,
 }
 
-// A bounded reader preserves the 64 KiB chunk contract while allowing the
-// standard library to initialize only bytes actually read. Creating a
-// &mut [u8] over a Vec whose length was unsafely extended is undefined behavior.
-fn read_chunk<R: Read>(reader: R) -> io::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(BLOCK_SIZE);
-    reader.take(BLOCK_SIZE as u64).read_to_end(&mut buf)?;
+// Read at most the remaining logical bytes, capped at 64 KiB. Reserving
+// only the required capacity avoids a 64 KiB allocation for each tiny final
+// block. Allocation failure is reported instead of panicking; read_to_end
+// initializes only bytes actually read.
+fn read_chunk<R: Read>(reader: R, limit: usize) -> io::Result<Vec<u8>> {
+    let limit = limit.min(BLOCK_SIZE);
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(limit).map_err(io::Error::other)?;
+    reader.take(limit as u64).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -147,7 +150,9 @@ impl Handler {
                 }
             };
 
-            let buf = read_chunk(file)?;
+            let remaining = expected_len - total_read;
+            let limit = remaining.min(BLOCK_SIZE as u64) as usize;
+            let buf = read_chunk(file, limit)?;
             if buf.is_empty() {
                 break;
             }
@@ -231,7 +236,7 @@ mod tests {
             let mut cursor = Cursor::new(&input);
             let mut recovered = Vec::new();
             loop {
-                let chunk = read_chunk(&mut cursor).unwrap();
+                let chunk = read_chunk(&mut cursor, BLOCK_SIZE).unwrap();
                 if chunk.is_empty() {
                     break;
                 }
@@ -261,8 +266,56 @@ mod tests {
             .map(|index| (index % 251) as u8)
             .collect();
         let mut reader = OneByteReader(&input);
-        assert_eq!(read_chunk(&mut reader).unwrap(), input[..BLOCK_SIZE]);
-        assert_eq!(read_chunk(&mut reader).unwrap(), input[BLOCK_SIZE..]);
-        assert!(read_chunk(&mut reader).unwrap().is_empty());
+        assert_eq!(
+            read_chunk(&mut reader, BLOCK_SIZE).unwrap(),
+            input[..BLOCK_SIZE]
+        );
+        assert_eq!(
+            read_chunk(&mut reader, BLOCK_SIZE).unwrap(),
+            input[BLOCK_SIZE..]
+        );
+        assert!(read_chunk(&mut reader, BLOCK_SIZE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chunk_reader_obeys_remaining_byte_budget() {
+        let input: Vec<u8> = (0..BLOCK_SIZE + 13).map(|i| (i % 251) as u8).collect();
+        let mut cursor = Cursor::new(input.as_slice());
+        let first = read_chunk(&mut cursor, 7).unwrap();
+        assert_eq!(first, input[..7]);
+        assert_eq!(cursor.position(), 7);
+
+        // A zero remaining budget must not touch the reader.
+        assert!(read_chunk(&mut cursor, 0).unwrap().is_empty());
+        assert_eq!(cursor.position(), 7);
+
+        // An accidental oversized request still respects the 64 KiB limit.
+        let next = read_chunk(&mut cursor, BLOCK_SIZE + 100).unwrap();
+        assert_eq!(next, input[7..7 + BLOCK_SIZE]);
+        assert_eq!(cursor.position(), (7 + BLOCK_SIZE) as u64);
+        assert_eq!(
+            read_chunk(&mut cursor, BLOCK_SIZE).unwrap(),
+            input[7 + BLOCK_SIZE..]
+        );
+    }
+
+    #[test]
+    fn chunk_reader_returns_read_errors_after_partial_input() {
+        struct FailingReader(bool);
+        impl Read for FailingReader {
+            fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    Err(io::Error::other("synthetic read failure"))
+                } else {
+                    self.0 = true;
+                    dst[0] = 0x42;
+                    Ok(1)
+                }
+            }
+        }
+        assert_eq!(
+            read_chunk(FailingReader(false), 8).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
     }
 }
