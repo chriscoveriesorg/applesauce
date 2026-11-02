@@ -1,6 +1,6 @@
 use crate::decmpfs::{BlockInfo, Storage};
 use crate::{compressor, decmpfs};
-use std::io::{self, BufReader, Cursor, Read, Seek};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 
 pub trait Open {
     type ResourceFork: Read + Seek;
@@ -23,7 +23,7 @@ enum State<R> {
     ResourceFork {
         // Stored in reverse order, so that we can pop() them off
         block_infos: Vec<BlockInfo>,
-        last_offset: u32,
+        expected_fork_len: u64,
         reader: BufReader<R>,
     },
 }
@@ -95,14 +95,28 @@ impl<R: Read + Seek> Reader<R> {
                 let mut blocks_info =
                     kind.read_block_info(&mut rfork, decmpfs_value.uncompressed_size)?;
 
-                // Seek back to the beginning of the resource fork
+                // The validated table fixes the expected physical fork size,
+                // including ZLIB's fixed trailer. Keep this snapshot so a
+                // later resize cannot silently change the bytes we read.
+                let last_block = blocks_info.last().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "resource fork has no blocks")
+                })?;
+                let expected_fork_len = u64::from(last_block.offset)
+                    + u64::from(last_block.compressed_size)
+                    + kind.trailer_size();
+                if rfork.seek(SeekFrom::End(0))? != expected_fork_len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "resource fork changed size during metadata validation",
+                    ));
+                }
                 rfork.rewind()?;
                 // Reverse the block infos so that we can pop() them off
                 blocks_info.reverse();
 
                 State::ResourceFork {
                     block_infos: blocks_info,
-                    last_offset: 0,
+                    expected_fork_len,
                     reader: rfork,
                 }
             }
@@ -139,15 +153,23 @@ impl<R: Read + Seek> Reader<R> {
             State::Xattr(cursor) => cursor.read_to_end(dst).map(|bytes_read| bytes_read > 0),
             State::ResourceFork {
                 block_infos,
-                last_offset,
+                expected_fork_len,
                 reader,
             } => {
                 let block = match block_infos.last().copied() {
                     Some(block) => block,
                     None => return Ok(false),
                 };
-                let diff = i64::from(block.offset) - i64::from(*last_offset);
-                reader.seek_relative(diff)?;
+                // Recheck physical EOF before reading. A fork resized after
+                // its offset table was validated is not a consistent snapshot.
+                // Seek via BufReader itself so cached bytes are invalidated.
+                if reader.seek(SeekFrom::End(0))? != *expected_fork_len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "resource fork size changed before block read",
+                    ));
+                }
+                reader.seek(SeekFrom::Start(u64::from(block.offset)))?;
 
                 // A forged sparse fork can advertise a huge block while
                 // providing almost no readable payload. Do not allocate the
@@ -164,10 +186,15 @@ impl<R: Read + Seek> Reader<R> {
                     remaining -= chunk;
                 }
 
-                *last_offset = block
-                    .offset
-                    .checked_add(block.compressed_size)
-                    .ok_or(io::ErrorKind::InvalidData)?;
+                // Detect resizes that happened while the payload was read.
+                // read_block_into will roll back the appended bytes and poison
+                // the reader on either mismatch.
+                if reader.seek(SeekFrom::End(0))? != *expected_fork_len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "resource fork size changed during block read",
+                    ));
+                }
                 block_infos.pop();
                 Ok(true)
             }

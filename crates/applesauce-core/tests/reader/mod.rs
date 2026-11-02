@@ -142,6 +142,98 @@ fn resource_fork_reader_preserves_large_compressed_block_bytes() {
 }
 
 #[test]
+fn resource_fork_resizes_fail_closed_before_and_during_block_reads() {
+    use applesauce_core::writer::Writer;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Clone, Copy)]
+    enum Change {
+        GrowBefore,
+        ShrinkBefore,
+        GrowDuring,
+    }
+
+    struct MutatingFork {
+        cursor: Cursor<Vec<u8>>,
+        trigger: Arc<AtomicBool>,
+        change: Change,
+    }
+
+    impl Read for MutatingFork {
+        fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.cursor.read(dst)?;
+            if count > 0
+                && matches!(self.change, Change::GrowDuring)
+                && self.trigger.swap(false, Ordering::SeqCst)
+            {
+                self.cursor.get_mut().push(0xa5);
+            }
+            Ok(count)
+        }
+    }
+
+    impl Seek for MutatingFork {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            if matches!(pos, SeekFrom::End(0))
+                && !matches!(self.change, Change::GrowDuring)
+                && self.trigger.swap(false, Ordering::SeqCst)
+            {
+                match self.change {
+                    Change::GrowBefore => self.cursor.get_mut().push(0xa5),
+                    Change::ShrinkBefore => {
+                        let _ = self.cursor.get_mut().pop();
+                    }
+                    Change::GrowDuring => unreachable!(),
+                }
+            }
+            self.cursor.seek(pos)
+        }
+    }
+
+    let mut resource_fork = Vec::new();
+    let mut writer = Writer::new(Kind::default(), 1, {
+        let rfork_ref = &mut resource_fork;
+        move || Cursor::new(rfork_ref)
+    })
+    .unwrap();
+    writer.force_resource_fork().unwrap();
+    writer.add_block(&[0x42]).unwrap();
+    let mut metadata = Vec::new();
+    writer.finish_decmpfs_data(&mut metadata).unwrap();
+
+    for change in [Change::GrowBefore, Change::ShrinkBefore, Change::GrowDuring] {
+        let trigger = Arc::new(AtomicBool::new(false));
+        let mut reader = Reader::new(&metadata, {
+            let trigger = Arc::clone(&trigger);
+            let bytes = resource_fork.clone();
+            move || MutatingFork {
+                cursor: Cursor::new(bytes),
+                trigger,
+                change,
+            }
+        })
+        .unwrap();
+
+        // Mutate only after the offset table has been validated. Both
+        // pre-read and in-flight resizes must discard output and poison the
+        // reader instead of returning bytes from a changed fork.
+        trigger.store(true, Ordering::SeqCst);
+        let mut output = vec![0xa5, 0x5a];
+        let error = reader.read_block_into(&mut output).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(output, [0xa5, 0x5a]);
+        assert_eq!(reader.remaining_blocks(), 1);
+        assert_eq!(
+            reader.read_block_into(&mut output).unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(output, [0xa5, 0x5a]);
+    }
+}
+
+#[test]
 fn sparse_resource_fork_does_not_allocate_its_declared_block_before_reading() {
     use std::io::{Read, Seek, SeekFrom};
 
