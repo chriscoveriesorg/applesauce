@@ -54,11 +54,7 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
     generated_native_round_trip_with_check(input, expected_type, |_| {});
 }
 
-fn generated_native_round_trip_with_check(
-    input: &[u8],
-    expected_type: u32,
-    check: impl Fn(&Path),
-) {
+fn generated_native_round_trip_with_check(input: &[u8], expected_type: u32, check: impl Fn(&Path)) {
     assert!(Kind::Lzfse.supported());
     assert!(input.len() >= 32);
 
