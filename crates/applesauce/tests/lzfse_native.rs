@@ -116,7 +116,6 @@ fn native_lzfse_inline_type11_generated_jsonl() {
     generated_native_round_trip(&input, 11);
 }
 
-
 #[test]
 fn native_lzfse_exact_block_edges_and_one_byte_tail() {
     // Exercise both sides of the decmpfs type 11 -> type 12 transition,
