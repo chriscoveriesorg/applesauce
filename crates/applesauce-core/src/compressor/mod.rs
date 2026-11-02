@@ -487,9 +487,9 @@ mod tests {
 
     #[test]
     fn full_native_lz_blocks_round_trip_without_touching_destination_tail() {
-        // Full LZVN/LZFSE blocks require an overflow guard to distinguish
-        // an exact 64 KiB decode from a truncated stream.
-        for kind in [Kind::Lzvn, Kind::Lzfse] {
+        // Full LZVN/LZFSE/LZBitmap blocks require an overflow guard to
+        // distinguish an exact 64 KiB decode from a truncated stream.
+        for kind in [Kind::Lzvn, Kind::Lzfse, Kind::Lzbitmap] {
             let Some(mut compressor) = kind.compressor() else {
                 continue;
             };
@@ -499,6 +499,9 @@ mod tests {
             encoded.truncate(used);
             if kind == Kind::Lzvn {
                 assert_ne!(encoded[0], 0x06, "LZVN fixture must be compressed");
+            }
+            if kind == Kind::Lzbitmap {
+                assert_ne!(encoded[0], 0xff, "LZBitmap fixture must be compressed");
             }
 
             let mut output = vec![0xa5; crate::BLOCK_SIZE + 128];
