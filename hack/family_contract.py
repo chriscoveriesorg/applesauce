@@ -105,9 +105,19 @@ def _stable_hit(hit: object) -> tuple[str, str, str | None]:
         raise ContractError("ZGX returned a non-file hit; expected file hit protocol")
     if not isinstance(path, str) or not path:
         raise ContractError("ZGX hit is missing its logical path")
-    if not (span is None or isinstance(span, int) and not isinstance(span, bool)
-            or isinstance(span, list) and len(span) == 2
-            and all(isinstance(n, int) and not isinstance(n, bool) for n in span)):
+    # A missing or nonsensical span cannot attest that search still points
+    # to the same logical bytes after compression. Accept both zero-based
+    # offsets and ordered inclusive ranges without assuming a line base.
+    if type(span) is int:
+        valid_span = span >= 0
+    elif isinstance(span, list) and len(span) == 2:
+        valid_span = (
+            all(type(n) is int and n >= 0 for n in span)
+            and span[0] <= span[1]
+        )
+    else:
+        valid_span = False
+    if not valid_span:
         raise ContractError("ZGX hit has an invalid source span")
     if snippet is not None and not isinstance(snippet, str):
         raise ContractError("ZGX hit has a non-text snippet")
