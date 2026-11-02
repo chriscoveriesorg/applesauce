@@ -2,7 +2,9 @@
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+import stat
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).with_name('native-type-probe.py')
 SPEC = importlib.util.spec_from_file_location('native_type_probe', SCRIPT)
@@ -73,6 +75,62 @@ class ReadOnlyNativeInventoryTests(unittest.TestCase):
         self.assertEqual(r['types'], {})
         self.assertFalse(r['native_raven_mesh_writes_permitted'])
         self.assertIn('Missing type is not evidence', r['coverage_note'])
+
+    def test_scan_refuses_missing_nofollow_support(self):
+        with mock.patch.object(probe.os, 'O_NOFOLLOW', 0):
+            with self.assertRaisesRegex(OSError, 'O_NOFOLLOW'):
+                probe.scan_roots([], max_files=1, max_seconds=1,
+                                 attribute_reader=lambda fd: header(8))
+
+    def test_scan_rejects_changed_metadata_after_xattr_read(self):
+        # Simulate a compressed, generated-only file whose metadata changes
+        # while the pinned descriptor's xattr is being read. No real file is
+        # opened and no macOS filesystem state is changed.
+        before = SimpleNamespace(st_mode=stat.S_IFREG | 0o444,
+                                 st_flags=probe.UF_COMPRESSED,
+                                 st_dev=1, st_ino=2, st_size=256,
+                                 st_mtime_ns=10, st_ctime_ns=10)
+        changed = SimpleNamespace(**vars(before))
+        changed.st_ctime_ns = 11
+        with mock.patch.object(probe.os.path, 'islink', return_value=False), \
+             mock.patch.object(probe.os.path, 'isdir', return_value=True), \
+             mock.patch.object(probe.os, 'walk',
+                               return_value=[('/synthetic', [], ['sample'])]), \
+             mock.patch.object(probe.os, 'stat', return_value=before), \
+             mock.patch.object(probe.os, 'fstat',
+                               side_effect=[before, changed]) as fstat, \
+             mock.patch.object(probe.os, 'open', return_value=123) as opened, \
+             mock.patch.object(probe.os, 'close') as closed:
+            report = probe.scan_roots(['/synthetic'], max_files=1,
+                                      max_seconds=1,
+                                      attribute_reader=lambda fd: header(8))
+        self.assertEqual(report['files_seen'], 1)
+        self.assertEqual(report['headers_read'], 0)
+        self.assertEqual(report['errors']['file-changed'], 1)
+        self.assertEqual(report['types'], {})
+        self.assertEqual(fstat.call_count, 2)
+        opened.assert_called_once()
+        closed.assert_called_once_with(123)
+
+    def test_scan_accepts_unchanged_pinned_header(self):
+        before = SimpleNamespace(st_mode=stat.S_IFREG | 0o444,
+                                 st_flags=probe.UF_COMPRESSED,
+                                 st_dev=1, st_ino=2, st_size=256,
+                                 st_mtime_ns=10, st_ctime_ns=10)
+        with mock.patch.object(probe.os.path, 'islink', return_value=False), \
+             mock.patch.object(probe.os.path, 'isdir', return_value=True), \
+             mock.patch.object(probe.os, 'walk',
+                               return_value=[('/synthetic', [], ['sample'])]), \
+             mock.patch.object(probe.os, 'stat', return_value=before), \
+             mock.patch.object(probe.os, 'fstat', return_value=before), \
+             mock.patch.object(probe.os, 'open', return_value=123), \
+             mock.patch.object(probe.os, 'close'):
+            report = probe.scan_roots(['/synthetic'], max_files=1,
+                                      max_seconds=1,
+                                      attribute_reader=lambda fd: header(8))
+        self.assertEqual(report['headers_read'], 1)
+        self.assertEqual(report['types']['8']['count'], 1)
+        self.assertEqual(report['errors'], {})
 
     def test_constants_match_apple_header(self):
         self.assertEqual(probe.XATTR_SHOWCOMPRESSION, 0x20)
