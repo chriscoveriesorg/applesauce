@@ -1,0 +1,41 @@
+name: Portable cold-file archive checks
+
+# Additional independent Linux coverage for the file-format parser and
+# malformed-index fixtures. The macOS 27 codec runner remains mandatory for
+# genuine LZRAVEN/LZMESH encode/decode and release qualification.
+on:
+  pull_request:
+    paths:
+      - 'crates/applesauce-core/**'
+      - 'Cargo.lock'
+      - '.github/workflows/portable-cold-archive.yml'
+  push:
+    branches: [main, 'feature/seekable-raven-mesh-fskit-backend-*']
+    paths:
+      - 'crates/applesauce-core/**'
+      - 'Cargo.lock'
+      - '.github/workflows/portable-cold-archive.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and test portable archive parser on Linux
+        run: |
+          set -euo pipefail
+          cargo test --locked -p applesauce-core cold_archive::tests:: -- --nocapture
+          cargo test --locked -p applesauce-core --no-default-features --features zlib cold_archive::tests:: -- --nocapture
+      - name: Check formatting and cross-platform clippy
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --locked -p applesauce-core --all-targets -- -D warnings
