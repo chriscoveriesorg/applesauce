@@ -300,6 +300,7 @@ fn sparse_resource_fork_does_not_allocate_its_declared_block_before_reading() {
 #[test]
 fn same_length_resource_fork_table_mutation_is_rejected_at_open() {
     use applesauce_core::writer::Writer;
+    use applesauce_core::BLOCK_SIZE;
     use std::io::{Read, Seek, SeekFrom};
 
     let Some(kind) = Kind::ALL
@@ -325,6 +326,7 @@ fn same_length_resource_fork_table_mutation_is_rejected_at_open() {
     writer.finish_decmpfs_data(&mut metadata).unwrap();
     assert!(Reader::new(&metadata, || Cursor::new(fork.clone())).is_ok());
 
+    #[derive(Debug)]
     struct MutatingFork {
         bytes: Cursor<Vec<u8>>,
         eof_checks: usize,
