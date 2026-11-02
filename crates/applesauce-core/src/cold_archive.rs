@@ -63,6 +63,15 @@ fn bounded_encoded_len(clear_len: usize) -> usize {
     clear_len * 2 + MIN_CHUNK_BYTES
 }
 
+// Archive inputs are bounded but can be 8 MiB per chunk. Return a recoverable
+// allocation error instead of invoking vec![0; size]'s infallible growth.
+fn allocate_buffer(size: usize) -> io::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(size).map_err(io::Error::other)?;
+    buffer.resize(size, 0);
+    Ok(buffer)
+}
+
 fn file_codec(raw: u32) -> io::Result<Codec> {
     match raw {
         0xD05 => Ok(Codec::Lzraven),
@@ -144,11 +153,11 @@ pub fn write_archive<R: Read, W: Write + Seek>(
     // Repeated 64 KiB chunks would otherwise pay Apple's scratch setup and
     // three heap allocations per chunk, obscuring codec throughput.
     let mut scratch = codec.reusable_scratch()?;
-    let mut clear_storage = vec![0u8; chunk_size];
-    let mut encoded_storage = vec![0u8; bounded_encoded_len(chunk_size)];
+    let mut clear_storage = allocate_buffer(chunk_size)?;
+    let mut encoded_storage = allocate_buffer(bounded_encoded_len(chunk_size))?;
     // Apple's decoder can fill the entire destination on truncated output.
     // The extra byte detects overlong results before any staged success.
-    let mut decoded_storage = vec![0u8; chunk_size + 1];
+    let mut decoded_storage = allocate_buffer(chunk_size + 1)?;
 
     let table_bytes = count * ENTRY_BYTES;
     destination.seek(SeekFrom::Start(0))?;
@@ -475,6 +484,7 @@ mod tests {
 
     #[test]
     fn size_bounds_reject_excessive_table_or_read() {
+        assert!(allocate_buffer(usize::MAX).is_err());
         assert!(chunk_count(0, MIN_CHUNK_BYTES).is_err());
         assert!(chunk_count(1, MIN_CHUNK_BYTES - 1).is_err());
         assert!(chunk_count(1, MAX_CHUNK_BYTES * 2).is_err());
