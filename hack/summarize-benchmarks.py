@@ -70,7 +70,12 @@ def summarize(manifest: Path, criterion: Path, output: Path) -> list[dict[str, s
     if not rows:
         raise ValueError("empty benchmark manifest")
     seen_cases: set[tuple[str, ...]] = set()
-    for row in rows:
+    for index, row in enumerate(rows, 1):
+        # DictReader puts surplus cells under None and fills missing cells
+        # with None. Do not silently discard either kind of malformed row
+        # when the summarizer is run independently of the matrix validator.
+        if None in row or any(not isinstance(row.get(field), str) for field in FIELDS):
+            raise ValueError(f"malformed benchmark manifest row {index}: missing or extra columns")
         if row["verified_roundtrip"] != "true":
             raise ValueError(f"unverified benchmark: {row}")
         if row["schema_version"] != "1" or row["fixture_version"] != "1":
@@ -86,6 +91,20 @@ def summarize(manifest: Path, criterion: Path, output: Path) -> list[dict[str, s
         size = int(row["input_bytes"])
         if size <= 0:
             raise ValueError(f"invalid benchmark input size: {size}")
+        # Ratios are reported as compression evidence. Never print a forged
+        # or non-finite ratio just because Criterion timings are present.
+        encoded_bytes = int(row["encoded_bytes"])
+        ratio = float(row["encoded_over_input_ratio"])
+        try:
+            actual_ratio = encoded_bytes / size
+        except OverflowError as error:
+            raise ValueError(
+                f"invalid encoded size or ratio in benchmark row {index}"
+            ) from error
+        if encoded_bytes <= 0 or not math.isfinite(ratio) or not math.isclose(
+            ratio, actual_ratio, rel_tol=0, abs_tol=1e-8
+        ):
+            raise ValueError(f"invalid encoded size or ratio in benchmark row {index}")
         for operation in ("encode", "decode"):
             ns = median_ns(criterion, row, operation)
             row[f"{operation}_median_ns"] = f"{ns:.5f}"

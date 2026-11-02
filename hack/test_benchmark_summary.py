@@ -114,6 +114,43 @@ class BenchmarkSummaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid benchmark input size"):
                     summary.summarize(manifest, criterion, output)
 
+            row["input_bytes"] = "65536"
+            for encoded_bytes, ratio in (
+                ("0", "0"),
+                ("8192", "nan"),
+                ("8192", "inf"),
+                ("8192", "0.500"),
+                ("1" + "0" * 400, "0.125"),
+            ):
+                with self.subTest(encoded_bytes=encoded_bytes, ratio=ratio):
+                    row["encoded_bytes"] = encoded_bytes
+                    row["encoded_over_input_ratio"] = ratio
+                    with manifest.open("w", newline="", encoding="utf-8") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=summary.FIELDS)
+                        writer.writeheader()
+                        writer.writerow(row)
+                    with self.assertRaisesRegex(ValueError, "invalid encoded size or ratio"):
+                        summary.summarize(manifest, criterion, output)
+
+            row["encoded_bytes"] = "8192"
+            row["encoded_over_input_ratio"] = "0.125"
+            with manifest.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=summary.FIELDS)
+                writer.writeheader()
+                writer.writerow(row)
+            valid_lines = manifest.read_text(encoding="utf-8").splitlines()
+            for malformed_row in (
+                valid_lines[1] + ",unexpected",
+                valid_lines[1].rsplit(",", 1)[0],
+            ):
+                with self.subTest(malformed_row=malformed_row):
+                    manifest.write_text(
+                        "\n".join((valid_lines[0], malformed_row)) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "malformed benchmark manifest row"):
+                        summary.summarize(manifest, criterion, output)
+
 
 if __name__ == "__main__":
     unittest.main()
