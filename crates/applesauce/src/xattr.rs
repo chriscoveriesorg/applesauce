@@ -284,7 +284,10 @@ fn raw_names<F: XattrSource + ?Sized>(f: &F) -> io::Result<Vec<u8>> {
         if rc < 0 {
             let e = io::Error::last_os_error();
             return match e.raw_os_error() {
-                Some(libc::ENOTSUP | libc::EPERM) => Ok(Vec::new()),
+                // Unsupported filesystems have no xattr names. Permission failures
+                // must reach callers: reporting an empty list would silently
+                // misstate metadata on a file whose attributes are unreadable.
+                Some(libc::ENOTSUP) => Ok(Vec::new()),
                 _ => Err(e),
             };
         }
@@ -478,6 +481,44 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(xattr.probes.get(), MAX_XATTR_READ_ATTEMPTS);
         assert_eq!(xattr.reads.get(), MAX_XATTR_READ_ATTEMPTS);
+    }
+
+    #[test]
+    fn unreadable_xattr_names_fail_closed_instead_of_appearing_empty() {
+        // Listing can fail at the initial size probe. EPERM is not evidence
+        // that there are no attributes: callers must see the denial.
+        struct DeniedNames(c_int);
+        impl XattrSource for DeniedNames {
+            unsafe fn get_xattr(&self, _: &CStr, _: *mut u8, _: usize) -> ssize_t {
+                panic!("not a value lookup")
+            }
+            unsafe fn set_xattr(&self, _: &CStr, _: *const u8, _: usize, _: u32) -> c_int {
+                panic!("not an attribute mutation")
+            }
+            unsafe fn remove_xattr(&self, _: &CStr) -> c_int {
+                panic!("not an attribute mutation")
+            }
+            unsafe fn list_xattr(&self, names: *mut u8, size: usize) -> ssize_t {
+                assert!(names.is_null());
+                assert_eq!(size, 0);
+                // SAFETY: macOS supplies the thread-local errno slot.
+                unsafe { *libc::__error() = self.0 };
+                -1
+            }
+        }
+
+        let err = with_names(&DeniedNames(libc::EPERM), |_| {
+            panic!("a denied list must never call the visitor")
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+
+        // An explicitly unsupported xattr API still has no names to report.
+        with_names(&DeniedNames(libc::ENOTSUP), |_| {
+            panic!("unsupported xattrs must not call the visitor")
+        })
+        .unwrap();
     }
 
     #[test]
