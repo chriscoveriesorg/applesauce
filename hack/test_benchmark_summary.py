@@ -120,6 +120,7 @@ class BenchmarkSummaryTests(unittest.TestCase):
                 ("8192", "nan"),
                 ("8192", "inf"),
                 ("8192", "0.500"),
+                ("1" + "0" * 400, "0.125"),
             ):
                 with self.subTest(encoded_bytes=encoded_bytes, ratio=ratio):
                     row["encoded_bytes"] = encoded_bytes
