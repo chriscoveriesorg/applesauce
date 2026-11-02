@@ -308,7 +308,6 @@ fn resource_fork_writer_rejects_extra_block_without_mutation() {
     assert_eq!(resource_fork[blocks[1].offset as usize], 0x22);
 }
 
-
 #[test]
 fn writer_rejects_blocks_larger_than_the_native_decoder_ceiling() {
     // Writer and Reader must agree on the largest encoded block. Rejecting
