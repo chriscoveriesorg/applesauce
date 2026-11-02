@@ -93,6 +93,15 @@ impl<O: Open> Writer<O> {
                 "cannot add an empty compressed block or a block to an empty file",
             ));
         }
+        // Reader rejects encoded blocks larger than this defensive ceiling.
+        // Match it here before writing xattrs or fork bytes so the writer
+        // cannot publish a block that its paired reader will refuse.
+        if new_block.len() > compressor::MAX_COMPRESSED_BLOCK_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "compressed block exceeds native decoder size ceiling",
+            ));
+        }
         let compressed_size = u32::try_from(new_block.len()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
