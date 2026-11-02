@@ -313,6 +313,8 @@ fn copy_metadata(src: &File, dst: &File) -> io::Result<()> {
 // may have been replaced while compression or decompression was running.
 // Never overwrite a different inode or a symlink at the original path.
 // This narrows the race; it cannot make the identity check and rename atomic.
+// We intentionally require a regular file, not merely a non-directory.
+#[allow(clippy::filetype_is_file)]
 fn ensure_source_path_matches_open_file(source: &File, path: &Path) -> io::Result<()> {
     let opened = source.metadata()?;
     let current = path.symlink_metadata()?;
