@@ -121,6 +121,9 @@ class BenchmarkSummaryTests(unittest.TestCase):
                 ("8192", "inf"),
                 ("8192", "0.500"),
                 ("1" + "0" * 400, "0.125"),
+                # Mathematically consistent but larger than the encoder's
+                # 2 * input + 64 KiB output buffer.
+                ("196609", str(196609 / 65536)),
             ):
                 with self.subTest(encoded_bytes=encoded_bytes, ratio=ratio):
                     row["encoded_bytes"] = encoded_bytes
