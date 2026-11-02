@@ -44,7 +44,10 @@ def read_foldy(path: Path) -> tuple[tuple[str, str], dict[str, tuple[str, int, s
     doc = _json_document(path)
     if doc.get("schema") != "foldy_local_inventory/1":
         raise ContractError(f"{path}: unsupported Foldy inventory schema")
-    if doc.get("status") != "complete" or doc.get("errors") or doc.get("mount_skips"):
+    # Missing, null, or malformed error/skip fields are not evidence of a
+    # complete scan. Require both arrays to be explicitly present and empty.
+    if (doc.get("status") != "complete" or doc.get("errors") != []
+            or doc.get("mount_skips") != []):
         raise ContractError(f"{path}: incomplete Foldy scan; do not compare partial evidence")
     if doc.get("sha256_content") is not True:
         raise ContractError(f"{path}: Foldy inventory must be created with --sha256")
