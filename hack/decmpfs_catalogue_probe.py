@@ -8,8 +8,10 @@ readback or filesystem write is implied by a positive or negative result.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
+import os
 import plistlib
 import re
 import stat
@@ -32,22 +34,36 @@ SYSTEM_ROOTS = (
 
 
 def read_limited(path: Path, limit: int) -> bytes:
-    if path.is_symlink():
-        raise ValueError(f"refusing symlink: {path}")
+    # A separate is_symlink/stat check can race with opening a replacement
+    # symlink. Require O_NOFOLLOW at open time; fail closed if unavailable.
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("platform lacks O_NOFOLLOW for safe evidence reads")
+    # Nonblocking open also prevents a substituted FIFO from hanging the probe.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
     try:
-        metadata = path.stat()
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError(f"input must be a regular file: {path}")
-        if metadata.st_size > limit:
-            raise ValueError(f"input exceeds {limit} bytes: {path}")
-        with path.open("rb") as stream:
+        fd = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError(f"refusing symlink: {path}") from error
+        raise ValueError(f"cannot read {path}: {error}") from error
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError(f"input must be a regular file: {path}")
+            if before.st_size > limit:
+                raise ValueError(f"input exceeds {limit} bytes: {path}")
             data = stream.read(limit + 1)
+            after = os.fstat(stream.fileno())
     except OSError as error:
         raise ValueError(f"cannot read {path}: {error}") from error
     if len(data) > limit:
         raise ValueError(f"input exceeds {limit} bytes: {path}")
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+    ):
+        raise ValueError(f"input changed while reading: {path}")
     return data
-
 
 def markers_in_log(data: bytes) -> list[dict]:
     try:
