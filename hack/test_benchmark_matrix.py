@@ -16,6 +16,34 @@ SPEC.loader.exec_module(matrix)
 
 
 class MatrixTests(unittest.TestCase):
+    def test_standard_runner_requires_explicit_trusted_owner_trigger(self):
+        # The comment fallback must never benchmark untrusted PR code or run
+        # on arbitrary issue comments. Keep this contract under ordinary CI.
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "benchmark-codecs.yml"
+        ).read_text(encoding="utf-8")
+        event_block = workflow.split("\npermissions:", 1)[0]
+        self.assertIn("  workflow_dispatch:", event_block)
+        self.assertIn("  issue_comment:\n    types: [created]", event_block)
+        self.assertNotIn("  push:", event_block)
+        self.assertNotIn("  pull_request:", event_block)
+        for required in (
+            "github.event.issue.number == 4",
+            "github.event.issue.pull_request != null",
+            "github.event.comment.user.login == 'chriscoveries'",
+            "github.event.comment.body == '/applesauce-benchmark standard'",
+            "github.event_name == 'workflow_dispatch'",
+            "github.event_name == 'issue_comment' && 'standard' || inputs.suite",
+            "permissions:\n  contents: read",
+            "cargo bench --locked -p applesauce-core --bench modern_buffer",
+            "actions/upload-artifact@v4",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, workflow)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
