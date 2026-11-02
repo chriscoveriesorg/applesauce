@@ -166,7 +166,11 @@ impl Stats {
         let compressed_size = self
             .compressed_size_final
             .load(std::sync::atomic::Ordering::Relaxed);
-        1.0 - (compressed_size as f64 / total_file_sizes as f64)
+        if total_file_sizes == 0 {
+            0.0
+        } else {
+            1.0 - (compressed_size as f64 / total_file_sizes as f64)
+        }
     }
 
     #[must_use]
@@ -179,7 +183,12 @@ impl Stats {
             .load(std::sync::atomic::Ordering::Relaxed);
         // This is reversed because we're looking at the change in compression:
         // we want a smaller final size to be a positive change in compression
-        (compressed_size_start as f64 - compressed_size_final as f64) / compressed_size_start as f64
+        if compressed_size_start == 0 {
+            0.0
+        } else {
+            (compressed_size_start as f64 - compressed_size_final as f64)
+                / compressed_size_start as f64
+        }
     }
 }
 
@@ -286,6 +295,29 @@ mod tests {
     use std::{fs, iter};
     use tempfile::TempDir;
     use walkdir::WalkDir;
+
+    #[test]
+    fn empty_scan_statistics_are_finite() {
+        let stats = Stats::default();
+        assert_eq!(stats.compression_savings(), 0.0);
+        assert_eq!(stats.compression_change_portion(), 0.0);
+
+        // A scan can account for physical metadata blocks without logical
+        // bytes; this must not produce NaN or infinite savings.
+        stats.compressed_size_final.store(4096, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(stats.compression_savings(), 0.0);
+        assert_eq!(stats.compression_change_portion(), 0.0);
+    }
+
+    #[test]
+    fn nonempty_scan_statistics_preserve_existing_ratios() {
+        let stats = Stats::default();
+        stats.total_file_sizes.store(1000, std::sync::atomic::Ordering::Relaxed);
+        stats.compressed_size_start.store(800, std::sync::atomic::Ordering::Relaxed);
+        stats.compressed_size_final.store(200, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(stats.compression_savings(), 0.8);
+        assert_eq!(stats.compression_change_portion(), 0.75);
+    }
 
     struct NoProgress;
     impl Task for NoProgress {
