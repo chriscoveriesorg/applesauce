@@ -29,9 +29,19 @@ def _read_text(path: Path) -> str:
         raise ContractError(f"cannot read evidence file {path}: {exc}") from exc
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    """Reject ambiguous duplicate keys at every JSON object depth."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ContractError(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
+
+
 def _json_document(path: Path) -> dict:
     try:
-        doc = json.loads(_read_text(path))
+        doc = json.loads(_read_text(path), object_pairs_hook=_unique_json_object)
     except json.JSONDecodeError as exc:
         raise ContractError(f"invalid JSON document {path}: {exc.msg}") from exc
     if not isinstance(doc, dict):
@@ -115,7 +125,7 @@ def read_zgx(path: Path) -> list[tuple[str, str, str | None]]:
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
+            record = json.loads(line, object_pairs_hook=_unique_json_object)
         except json.JSONDecodeError as exc:
             raise ContractError(f"{path}: invalid ZGX JSONL: {exc.msg}") from exc
         if not isinstance(record, dict):
