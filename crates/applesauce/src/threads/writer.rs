@@ -330,6 +330,7 @@ fn same_source_snapshot(expected: &Metadata, actual: &Metadata) -> bool {
     actual.file_type().is_file()
         && UnixMetadataExt::dev(expected) == UnixMetadataExt::dev(actual)
         && UnixMetadataExt::ino(expected) == UnixMetadataExt::ino(actual)
+        && UnixMetadataExt::nlink(expected) == UnixMetadataExt::nlink(actual)
         && expected.len() == actual.len()
         && UnixMetadataExt::mtime(expected) == UnixMetadataExt::mtime(actual)
         && UnixMetadataExt::mtime_nsec(expected) == UnixMetadataExt::mtime_nsec(actual)
@@ -477,6 +478,23 @@ mod tests {
         let replacement = File::open(&path).unwrap();
         assert_eq!(
             ensure_source_path_matches_open_file(&replacement, &path, &scanned)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn publication_guard_rejects_new_hard_link_after_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let other = dir.path().join("new-hard-link");
+        fs::write(&path, b"generated original bytes").unwrap();
+        let scanned = fs::metadata(&path).unwrap();
+        let source = File::open(&path).unwrap();
+        fs::hard_link(&path, &other).unwrap();
+        assert_eq!(
+            ensure_source_path_matches_open_file(&source, &path, &scanned)
                 .unwrap_err()
                 .kind(),
             ErrorKind::InvalidData
