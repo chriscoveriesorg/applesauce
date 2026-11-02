@@ -55,11 +55,21 @@ def _finite_json_float(value: str) -> float:
     return number
 
 
+def _bounded_json_int(value: str) -> int:
+    # JSON evidence should not need arbitrary-precision integer literals.
+    # Bound them before int() to avoid excessive work and Python's global
+    # integer-string conversion limit raising an uncaught ValueError.
+    if len(value.lstrip("-")) > 128:
+        raise ContractError("oversized JSON integer literal")
+    return int(value)
+
+
 def _parse_evidence_json(text: str) -> object:
     return json.loads(
         text,
         object_pairs_hook=_unique_json_object,
         parse_constant=_reject_nonstandard_json_constant,
+        parse_int=_bounded_json_int,
         parse_float=_finite_json_float,
     )
 
