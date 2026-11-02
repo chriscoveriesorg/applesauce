@@ -17,7 +17,10 @@ use std::sync::OnceLock;
 
 const STORED_MARKER: u8 = 0xff;
 
-pub(super) struct Lzbitmap;
+pub(super) struct Lzbitmap {
+    // Reused one-byte overflow guard for full native logical blocks.
+    decode_guard: Vec<u8>,
+}
 
 impl Lzbitmap {
     pub(super) fn supported() -> bool {
@@ -28,7 +31,9 @@ impl Lzbitmap {
     }
 
     pub(super) fn new() -> Option<Self> {
-        Self::supported().then_some(Self)
+        Self::supported().then(|| Self {
+            decode_guard: Vec::new(),
+        })
     }
 }
 
@@ -70,9 +75,25 @@ impl CompressorImpl for Lzbitmap {
             return Ok(rest.len());
         }
 
-        // Apple's decoder returns a full destination even when output was
-        // truncated. Like the other LZ backends, require one spare output byte
-        // so callers cannot mistake a successfully decoded prefix for a block.
+        // Apple's decoder may return a full destination for truncated
+        // output. An exact 64 KiB native block needs one spare guard byte;
+        // decode into reusable scratch and copy only verified bytes back.
+        if dst.len() == crate::BLOCK_SIZE {
+            let guard_len = crate::BLOCK_SIZE + 1;
+            if self.decode_guard.len() != guard_len {
+                self.decode_guard
+                    .try_reserve_exact(guard_len - self.decode_guard.len())
+                    .map_err(io::Error::other)?;
+                self.decode_guard.resize(guard_len, 0);
+            }
+            let size = Codec::Lzbitmap.decode_into(&mut self.decode_guard, src)?;
+            if size == 0 || size > dst.len() {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            dst[..size].copy_from_slice(&self.decode_guard[..size]);
+            return Ok(size);
+        }
+
         let size = Codec::Lzbitmap.decode_into(dst, src)?;
         if size == dst.len() {
             return Err(io::ErrorKind::WriteZero.into());
