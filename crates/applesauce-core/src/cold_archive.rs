@@ -153,11 +153,15 @@ pub fn write_archive<R: Read, W: Write + Seek>(
     // Repeated 64 KiB chunks would otherwise pay Apple's scratch setup and
     // three heap allocations per chunk, obscuring codec throughput.
     let mut scratch = codec.reusable_scratch()?;
-    let mut clear_storage = allocate_buffer(chunk_size)?;
-    let mut encoded_storage = allocate_buffer(bounded_encoded_len(chunk_size))?;
+    // A one-byte archive configured with 8 MiB chunks still needs only one
+    // byte of plaintext storage. Bound the working set by the largest
+    // chunk this particular archive will contain.
+    let max_clear_len = logical_size.min(chunk_size as u64) as usize;
+    let mut clear_storage = allocate_buffer(max_clear_len)?;
+    let mut encoded_storage = allocate_buffer(bounded_encoded_len(max_clear_len))?;
     // Apple's decoder can fill the entire destination on truncated output.
     // The extra byte detects overlong results before any staged success.
-    let mut decoded_storage = allocate_buffer(chunk_size + 1)?;
+    let mut decoded_storage = allocate_buffer(max_clear_len + 1)?;
 
     let table_bytes = count * ENTRY_BYTES;
     destination.seek(SeekFrom::Start(0))?;
