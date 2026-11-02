@@ -30,7 +30,10 @@ fn decode_guarded(
 ) -> io::Result<usize> {
     let expected = checked_expected_size(guarded_dst.len())?;
     if encoded.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty compressed input"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty compressed input",
+        ));
     }
     // Match the allocating helper's defensive encoded-input ceiling. This is
     // a local buffer-format bound, not a general-purpose archive size limit.
@@ -137,10 +140,7 @@ mod tests {
             );
         }
         let mut dest = [0; 3];
-        assert_eq!(
-            decode_guarded(&mut dest, &[0x01], |_, _| Ok(2)).unwrap(),
-            2
-        );
+        assert_eq!(decode_guarded(&mut dest, &[0x01], |_, _| Ok(2)).unwrap(), 2);
     }
 
     #[cfg(target_os = "macos")]
@@ -170,7 +170,9 @@ mod tests {
                 assert_eq!(scratch.decode_exact_into(exact, &encoded).unwrap(), size);
                 assert_eq!(&exact[..size], plain.as_slice(), "{codec:?} {size}");
                 if size > 1 {
-                    assert!(codec.decode_exact_into(&mut dest[..size], &encoded).is_err());
+                    assert!(codec
+                        .decode_exact_into(&mut dest[..size], &encoded)
+                        .is_err());
                     assert!(scratch
                         .decode_exact_into(&mut dest[..size], &encoded)
                         .is_err());
