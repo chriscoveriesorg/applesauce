@@ -157,21 +157,41 @@ impl Codec {
         Ok(decoded)
     }
 
-    /// Small positive control using generated data, never a user's files.
-    /// Scratch-size zero is legal and is intentionally not used as a probe.
+    /// Positive controls use generated data, never a user's files. Check
+    /// tiny inputs, repeated JSONL, high-entropy bytes, and zero-filled
+    /// input crossing the 64 KiB boundary. A buffer round trip is not proof
+    /// of native APFS `decmpfs` support.
     pub fn verify_roundtrip(self) -> io::Result<()> {
-        let input =
+        let chat =
             b"{\"role\":\"assistant\",\"message\":\"applesauce buffer self-test\"}\n".repeat(256);
-        let encoded = self.encode(&input)?;
-        let decoded = self.decode_exact(&encoded, input.len())?;
-        if decoded != input {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "buffer round-trip mismatch",
-            ));
+        let entropy = verification_entropy();
+        let zeros = vec![0u8; crate::BLOCK_SIZE + 1];
+        for input in [&[0xa5][..], &chat[..], &entropy[..], &zeros[..]] {
+            let encoded = self.encode(input)?;
+            let decoded = self.decode_exact(&encoded, input.len())?;
+            if decoded.as_slice() != input {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "buffer round-trip mismatch",
+                ));
+            }
         }
         Ok(())
     }
+}
+
+// Deterministic, non-user input for the native capability smoke test.
+// The extra byte exercises codecs at the independent 64 KiB block boundary.
+fn verification_entropy() -> Vec<u8> {
+    let mut state = 0x69a5_6be3_d12f_7031u64;
+    (0..crate::BLOCK_SIZE + 1)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
 }
 
 /// Caller-owned, reusable and 64-byte-aligned scratch buffers for one codec.
@@ -592,6 +612,15 @@ mod tests {
                 "{codec:?}"
             );
         }
+    }
+
+    #[test]
+    fn capability_probe_entropy_is_repeatable_and_crosses_block_boundary() {
+        let first = verification_entropy();
+        assert_eq!(first.len(), crate::BLOCK_SIZE + 1);
+        assert_eq!(first, verification_entropy());
+        assert_ne!(&first[..4096], &first[4096..8192]);
+        assert!(first.iter().any(|&byte| byte != 0));
     }
 
     #[test]
