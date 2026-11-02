@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -39,9 +40,33 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
+def _reject_nonstandard_json_constant(value: str) -> None:
+    # The stdlib decoder otherwise accepts NaN and Infinity, which are not
+    # JSON and can hide in metadata that this checker intentionally ignores.
+    raise ContractError(f"nonstandard JSON constant {value!r}")
+
+
+def _finite_json_float(value: str) -> float:
+    # Even a syntactically valid JSON exponent can overflow Python's float
+    # (for example 1e999). Do not accept nonfinite evidence silently.
+    number = float(value)
+    if not math.isfinite(number):
+        raise ContractError("nonfinite JSON numeric literal")
+    return number
+
+
+def _parse_evidence_json(text: str) -> object:
+    return json.loads(
+        text,
+        object_pairs_hook=_unique_json_object,
+        parse_constant=_reject_nonstandard_json_constant,
+        parse_float=_finite_json_float,
+    )
+
+
 def _json_document(path: Path) -> dict:
     try:
-        doc = json.loads(_read_text(path), object_pairs_hook=_unique_json_object)
+        doc = _parse_evidence_json(_read_text(path))
     except json.JSONDecodeError as exc:
         raise ContractError(f"invalid JSON document {path}: {exc.msg}") from exc
     if not isinstance(doc, dict):
@@ -135,7 +160,7 @@ def read_zgx(path: Path) -> list[tuple[str, str, str | None]]:
         if not line.strip():
             continue
         try:
-            record = json.loads(line, object_pairs_hook=_unique_json_object)
+            record = _parse_evidence_json(line)
         except json.JSONDecodeError as exc:
             raise ContractError(f"{path}: invalid ZGX JSONL: {exc.msg}") from exc
         if not isinstance(record, dict):
