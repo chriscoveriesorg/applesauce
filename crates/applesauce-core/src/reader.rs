@@ -110,6 +110,22 @@ impl<R: Read + Seek> Reader<R> {
                         "resource fork changed size during metadata validation",
                     ));
                 }
+                // A same-length edit can change table offsets without changing
+                // EOF. Reparse the framing after the first validation and
+                // reject a different layout rather than combining metadata
+                // observed at different moments. This is not a checksum of
+                // the compressed payload and cannot prevent all concurrent
+                // same-length rewrites.
+                let confirmed_blocks =
+                    kind.read_block_info(&mut rfork, decmpfs_value.uncompressed_size)?;
+                if confirmed_blocks != blocks_info
+                    || rfork.seek(SeekFrom::End(0))? != expected_fork_len
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "resource fork changed during metadata validation",
+                    ));
+                }
                 rfork.rewind()?;
                 // Reverse the block infos so that we can pop() them off
                 blocks_info.reverse();

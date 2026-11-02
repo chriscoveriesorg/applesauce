@@ -297,6 +297,67 @@ fn sparse_resource_fork_does_not_allocate_its_declared_block_before_reading() {
     );
 }
 
+#[test]
+fn same_length_resource_fork_table_mutation_is_rejected_at_open() {
+    use applesauce_core::writer::Writer;
+    use applesauce_core::BLOCK_SIZE;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Some(kind) = Kind::ALL
+        .into_iter()
+        .find(|kind| *kind != Kind::Zlib && kind.supported())
+    else {
+        return;
+    };
+
+    // Two LZ blocks have a 12-byte table and four bytes of payload.
+    // Both offset layouts are individually valid and have identical EOF.
+    let mut fork = Vec::new();
+    let mut writer = {
+        let rfork_ref = &mut fork;
+        Writer::new(kind, BLOCK_SIZE as u64 + 1, move || Cursor::new(rfork_ref)).unwrap()
+    };
+    writer.add_block(&[0x11, 0x12]).unwrap();
+    writer.add_block(&[0x21, 0x22]).unwrap();
+    let mut metadata = Vec::new();
+    writer.finish_decmpfs_data(&mut metadata).unwrap();
+    assert!(Reader::new(&metadata, || Cursor::new(fork.clone())).is_ok());
+
+    #[derive(Debug)]
+    struct MutatingFork {
+        bytes: Cursor<Vec<u8>>,
+        eof_checks: usize,
+    }
+
+    impl Read for MutatingFork {
+        fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
+            self.bytes.read(dst)
+        }
+    }
+
+    impl Seek for MutatingFork {
+        fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+            if matches!(from, SeekFrom::End(0)) {
+                self.eof_checks += 1;
+                if self.eof_checks == 3 {
+                    // The first parser has completed. Change only the
+                    // boundary between the two blocks (14 -> 15), leaving
+                    // the table, payload and physical fork length intact.
+                    self.bytes.get_mut()[4..8].copy_from_slice(&15u32.to_le_bytes());
+                }
+            }
+            self.bytes.seek(from)
+        }
+    }
+
+    let error = Reader::new(&metadata, || MutatingFork {
+        bytes: Cursor::new(fork),
+        eof_checks: 0,
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
 #[cfg(feature = "zlib")]
 #[test]
 fn partial_resource_fork_read_preserves_output_and_fails_closed() {
