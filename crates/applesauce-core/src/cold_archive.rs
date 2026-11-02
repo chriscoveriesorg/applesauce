@@ -43,10 +43,10 @@ fn u64_at(bytes: &[u8]) -> u64 {
 }
 
 fn chunk_count(logical_size: u64, chunk_size: usize) -> io::Result<usize> {
-    if !(MIN_CHUNK_BYTES..=MAX_CHUNK_BYTES).contains(&chunk_size)
-        || !chunk_size.is_power_of_two()
-    {
-        return Err(bad_input("archive chunk size must be a power of two from 64 KiB to 8 MiB"));
+    if !(MIN_CHUNK_BYTES..=MAX_CHUNK_BYTES).contains(&chunk_size) || !chunk_size.is_power_of_two() {
+        return Err(bad_input(
+            "archive chunk size must be a power of two from 64 KiB to 8 MiB",
+        ));
     }
     if logical_size == 0 {
         return Err(bad_input("archive logical size must be nonzero"));
@@ -124,7 +124,9 @@ pub fn write_archive<R: Read, W: Write + Seek>(
     chunk_size: usize,
 ) -> io::Result<ArchiveStats> {
     if !matches!(codec, Codec::Lzraven | Codec::Lzmesh) {
-        return Err(bad_input("cold-file archive only supports LZRAVEN and LZMESH buffers"));
+        return Err(bad_input(
+            "cold-file archive only supports LZRAVEN and LZMESH buffers",
+        ));
     }
     let count = chunk_count(logical_size, chunk_size)?;
     if !codec.is_supported() {
@@ -134,7 +136,9 @@ pub fn write_archive<R: Read, W: Write + Seek>(
         ));
     }
     if destination.seek(SeekFrom::End(0))? != 0 {
-        return Err(bad_input("archive destination must be a new empty staging file"));
+        return Err(bad_input(
+            "archive destination must be a new empty staging file",
+        ));
     }
     let table_bytes = count * ENTRY_BYTES;
     destination.seek(SeekFrom::Start(0))?;
@@ -171,7 +175,9 @@ pub fn write_archive<R: Read, W: Write + Seek>(
     }
     let mut extra = [0u8; 1];
     if source.read(&mut extra)? != 0 {
-        return Err(bad_input("source has extra bytes after declared logical size"));
+        return Err(bad_input(
+            "source has extra bytes after declared logical size",
+        ));
     }
     if remaining != 0 {
         return Err(invalid("archive writer missed source bytes"));
@@ -299,7 +305,9 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let mut encoded = vec![0u8; entry.stored_len as usize];
         self.source.seek(SeekFrom::Start(entry.offset))?;
         self.source.read_exact(&mut encoded)?;
-        let decoded = self.codec.decode_exact(&encoded, entry.clear_len as usize)?;
+        let decoded = self
+            .codec
+            .decode_exact(&encoded, entry.clear_len as usize)?;
         let digest: [u8; 32] = Sha256::digest(&decoded).into();
         if digest != entry.clear_sha256 {
             return Err(invalid("archive chunk SHA-256 mismatch"));
@@ -314,7 +322,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
             return Err(bad_input("archive read exceeds 8 MiB per call"));
         }
         if offset > self.logical_size || length as u64 > self.logical_size - offset {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read beyond archive EOF"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "read beyond archive EOF",
+            ));
         }
         let mut result = vec![0u8; length];
         if length == 0 {
@@ -432,8 +443,11 @@ mod tests {
         assert!(chunk_count(0, MIN_CHUNK_BYTES).is_err());
         assert!(chunk_count(1, MIN_CHUNK_BYTES - 1).is_err());
         assert!(chunk_count(1, MAX_CHUNK_BYTES * 2).is_err());
-        assert!(chunk_count(MAX_CHUNKS as u64 * MAX_CHUNK_BYTES as u64 + 1,
-                            MAX_CHUNK_BYTES).is_err());
+        assert!(chunk_count(
+            MAX_CHUNKS as u64 * MAX_CHUNK_BYTES as u64 + 1,
+            MAX_CHUNK_BYTES
+        )
+        .is_err());
         let mut reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
         assert!(reader.read_range(0, MAX_READ_BYTES + 1).is_err());
         assert!(reader.read_range(1, 1).is_err());
@@ -465,8 +479,14 @@ mod tests {
                 };
             }
             let mut output = Cursor::new(Vec::new());
-            let stats = write_archive(&clear[..], &mut output, clear.len() as u64,
-                                      codec, MIN_CHUNK_BYTES).unwrap();
+            let stats = write_archive(
+                &clear[..],
+                &mut output,
+                clear.len() as u64,
+                codec,
+                MIN_CHUNK_BYTES,
+            )
+            .unwrap();
             assert_eq!(stats.logical_size, clear.len() as u64);
             assert_eq!(stats.chunk_count, 3);
             assert_eq!(stats.archive_bytes, output.get_ref().len() as u64);
@@ -475,11 +495,16 @@ mod tests {
             let stored = output.into_inner();
             let mut archive = ArchiveReader::open(Cursor::new(stored.clone())).unwrap();
             archive.verify_all().unwrap();
-            for (start, length) in [(0, 1), (MIN_CHUNK_BYTES - 9, 29),
-                                    (MIN_CHUNK_BYTES, MIN_CHUNK_BYTES + 2),
-                                    (clear.len() - 17, 17)] {
-                assert_eq!(archive.read_range(start as u64, length).unwrap(),
-                           &clear[start..start + length]);
+            for (start, length) in [
+                (0, 1),
+                (MIN_CHUNK_BYTES - 9, 29),
+                (MIN_CHUNK_BYTES, MIN_CHUNK_BYTES + 2),
+                (clear.len() - 17, 17),
+            ] {
+                assert_eq!(
+                    archive.read_range(start as u64, length).unwrap(),
+                    &clear[start..start + length]
+                );
             }
             let mut sentinel = vec![0xa5u8; 100];
             let mut damaged = stored.clone();
@@ -491,7 +516,9 @@ mod tests {
             let mut bad_hash = stored;
             bad_hash[32] ^= 1;
             assert!(ArchiveReader::open(Cursor::new(bad_hash))
-                .unwrap().verify_all().is_err());
+                .unwrap()
+                .verify_all()
+                .is_err());
         }
     }
 }
