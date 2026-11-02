@@ -2,10 +2,12 @@
 
 import importlib.util
 import json
+import os
 import plistlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -88,6 +90,49 @@ class DecoderCatalogueTests(unittest.TestCase):
         link.symlink_to(path)
         with self.assertRaisesRegex(ValueError, "symlink"):
             mod.build_report(link, [])
+
+    def test_symlink_substituted_at_open_is_refused(self):
+        # Deterministically replace a regular input after a hypothetical
+        # pre-open path check. O_NOFOLLOW must reject the replacement.
+        path = self.root / "evidence.txt"
+        path.write_bytes(b"original")
+        target = self.root / "other.txt"
+        target.write_bytes(b"not approved evidence")
+        real_open = os.open
+
+        def replace_then_open(file, flags):
+            path.unlink()
+            path.symlink_to(target)
+            return real_open(file, flags)
+
+        with mock.patch.object(mod.os, "open", side_effect=replace_then_open):
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                mod.read_limited(path, 128)
+
+    def test_modified_file_during_read_is_refused(self):
+        path = self.root / "evidence.txt"
+        path.write_bytes(b"original")
+        real_fstat = os.fstat
+        calls = 0
+
+        def mutate_before_second_stat(fd):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                path.write_bytes(b"modified after read")
+            return real_fstat(fd)
+
+        with mock.patch.object(mod.os, "fstat", side_effect=mutate_before_second_stat):
+            with self.assertRaisesRegex(ValueError, "changed while reading"):
+                mod.read_limited(path, 128)
+        self.assertEqual(calls, 2)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFO")
+    def test_nonregular_fifo_refused_without_blocking(self):
+        path = self.root / "evidence.pipe"
+        os.mkfifo(path)
+        with self.assertRaisesRegex(ValueError, "regular file"):
+            mod.read_limited(path, 128)
 
     def test_malformed_plists_and_personalities_refused(self):
         path = self.plist({})
