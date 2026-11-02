@@ -71,6 +71,11 @@ impl<'a> ResourceFork<'a> {
 
 impl io::Write for ResourceFork<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // An empty write must not create or change a resource-fork xattr.
+        // In particular, avoid calling fsetxattr for a zero-length buffer.
+        if buf.is_empty() {
+            return Ok(0);
+        }
         let len: u32 = buf
             .len()
             .try_into()
@@ -274,6 +279,28 @@ mod tests {
         assert!(!xattr::is_present(&path, XATTR_NAME).unwrap());
         assert_eq!(rfork.seek(SeekFrom::End(0)).unwrap(), 0);
         assert!(!xattr::is_present(&path, XATTR_NAME).unwrap());
+    }
+
+    #[test]
+    fn empty_write_does_not_create_or_mutate_resource_fork() {
+        let file = NamedTempFile::new().unwrap();
+        let mut rfork = ResourceFork::new(file.as_file());
+        let path = CString::new(file.path().as_os_str().as_bytes()).unwrap();
+
+        rfork.set_position(12);
+        assert_eq!(rfork.write(&[]).unwrap(), 0);
+        assert_eq!(rfork.position(), 12);
+        assert!(!xattr::is_present(&path, XATTR_NAME).unwrap());
+
+        rfork.rewind().unwrap();
+        rfork.write_all(b"alpha").unwrap();
+        let resource_path = file.path().join("..namedfork/rsrc");
+        let original = fs::read(&resource_path).unwrap();
+
+        rfork.set_position(2);
+        assert_eq!(rfork.write(&[]).unwrap(), 0);
+        assert_eq!(rfork.position(), 2);
+        assert_eq!(fs::read(resource_path).unwrap(), original);
     }
 
     #[test]
