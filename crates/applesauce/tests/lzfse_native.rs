@@ -7,7 +7,7 @@ use applesauce::compressor::Kind;
 use applesauce::progress::{Progress, SkipReason, Task};
 use applesauce::{info, FileCompressor};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -51,6 +51,14 @@ fn assert_no_errors(progress: &CaptureProgress) {
 }
 
 fn generated_native_round_trip(input: &[u8], expected_type: u32) {
+    generated_native_round_trip_with_check(input, expected_type, |_| {});
+}
+
+fn generated_native_round_trip_with_check(
+    input: &[u8],
+    expected_type: u32,
+    check: impl Fn(&Path),
+) {
     assert!(Kind::Lzfse.supported());
     assert!(input.len() >= 32);
 
@@ -60,6 +68,7 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("generated-lzfse.jsonl");
     fs::write(&path, input).unwrap();
+    check(&path);
     let original_modified = fs::metadata(&path).unwrap().modified().unwrap();
 
     let progress = CaptureProgress::default();
@@ -76,6 +85,7 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
     assert_eq!(metadata.orig_file_size, input.len() as u64);
 
     assert_eq!(fs::read(&path).unwrap(), input);
+    check(&path);
     let mut reopened = File::open(&path).unwrap();
     let mut offsets = vec![0, input.len() / 2, input.len() - 32];
     if input.len() >= applesauce_core::BLOCK_SIZE {
@@ -104,6 +114,7 @@ fn generated_native_round_trip(input: &[u8], expected_type: u32) {
     assert_no_errors(&progress);
     assert!(!info::get(&path).unwrap().is_compressed);
     assert_eq!(fs::read(&path).unwrap(), input);
+    check(&path);
     assert_eq!(
         fs::metadata(&path).unwrap().modified().unwrap(),
         original_modified
@@ -146,4 +157,45 @@ fn native_lzfse_multiblock_type12_kernel_readback() {
     assert!(input.len() > 2 * applesauce_core::BLOCK_SIZE);
     assert_ne!(input.len() % applesauce_core::BLOCK_SIZE, 0);
     generated_native_round_trip(&input, 12);
+}
+
+#[test]
+fn native_lzfse_preserves_buffered_log_search_spans_across_blocks() {
+    // A long generated JSONL record crosses two 64 KiB native boundaries.
+    // The marker straddles the first boundary. Small buffered reads model
+    // line-oriented search/index consumers without involving private logs.
+    let marker = b"generated-unique-search-marker";
+    let mut first_line = b"{\"role\":\"assistant\",\"content\":\"".to_vec();
+    first_line.resize(applesauce_core::BLOCK_SIZE - marker.len() / 2, b'a');
+    let expected_marker_offset = first_line.len();
+    first_line.extend_from_slice(marker);
+    first_line.resize(2 * applesauce_core::BLOCK_SIZE + 29, b'b');
+    first_line.extend_from_slice(b"\"}\n");
+    let second_line = b"{\"role\":\"user\",\"content\":\"short generated line\"}\n";
+    let second_offset = first_line.len();
+    let mut input = first_line.clone();
+    input.extend_from_slice(second_line);
+
+    generated_native_round_trip_with_check(&input, 12, |path| {
+        let mut reader = BufReader::with_capacity(257, File::open(path).unwrap());
+        let mut observed = Vec::new();
+        let mut hits = Vec::new();
+        let mut offset = 0;
+        loop {
+            let mut line = Vec::new();
+            let length = reader.read_until(b'\n', &mut line).unwrap();
+            if length == 0 {
+                break;
+            }
+            if let Some(local) = line.windows(marker.len()).position(|bytes| bytes == marker) {
+                hits.push(offset + local);
+            }
+            observed.push((offset, line));
+            offset += length;
+        }
+        assert_eq!(hits, [expected_marker_offset]);
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0], (0, first_line.clone()));
+        assert_eq!(observed[1], (second_offset, second_line.to_vec()));
+    });
 }
