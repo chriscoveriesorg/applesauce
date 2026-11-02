@@ -296,7 +296,7 @@ mod tests {
         impl Read for FailingReader {
             fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
                 if self.0 {
-                    Err(io::Error::new(io::ErrorKind::Other, "synthetic read failure"))
+                    Err(io::Error::other("synthetic read failure"))
                 } else {
                     self.0 = true;
                     dst[0] = 0x42;
