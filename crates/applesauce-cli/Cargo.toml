@@ -4,7 +4,7 @@ version = "0.5.30"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "A command-line interface for compressing and decompressing files using macos transparent compression"
-repository = "https://github.com/Dr-Emann/applesauce"
+repository = "https://github.com/chriscoveriesorg/applesauce"
 readme = "../../README.md"
 
 [[bin]]
