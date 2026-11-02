@@ -135,8 +135,19 @@ def scan_roots(roots, *, max_files=30000, max_seconds=60, attribute_reader=None,
     report = new_report()
     errors = Counter()
     started = clock()
+    # A missing no-follow primitive must never silently turn this into a
+    # path-following scan, even on an unexpected Python/macOS environment.
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise OSError(errno.ENOTSUP, "O_NOFOLLOW is required for read-only inventory")
     open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    open_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    open_flags |= nofollow | getattr(os, "O_NONBLOCK", 0)
+
+    def file_identity(info):
+        # Metadata changes during an xattr read invalidate the observation.
+        return (info.st_dev, info.st_ino, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns,
+                getattr(info, "st_flags", 0))
     for root in roots:
         if clock() - started > max_seconds:
             report["timed_out"] = True
@@ -172,16 +183,18 @@ def scan_roots(roots, *, max_files=30000, max_seconds=60, attribute_reader=None,
                     fd = os.open(path, open_flags)
                     try:
                         after = os.fstat(fd)
-                        if (before.st_ino, before.st_dev, before.st_size) != (
-                            after.st_ino, after.st_dev, after.st_size
-                        ) or not stat.S_ISREG(after.st_mode) or not (
-                            getattr(after, "st_flags", 0) & UF_COMPRESSED
-                        ):
+                        if (file_identity(before) != file_identity(after)
+                                or not stat.S_ISREG(after.st_mode)
+                                or not (getattr(after, "st_flags", 0) & UF_COMPRESSED)):
                             errors["file-changed"] += 1
                             continue
                         raw = reader(fd)
                         header = parse_header(raw)
-                        record_header(report, header, after)
+                        final = os.fstat(fd)
+                        if file_identity(after) != file_identity(final):
+                            errors["file-changed"] += 1
+                            continue
+                        record_header(report, header, final)
                     finally:
                         os.close(fd)
                 except (OSError, ValueError) as error:
