@@ -198,6 +198,25 @@ impl Handler {
             ));
         }
 
+        // The --verify flag must also guard decompression publication.
+        // Compare the staged plaintext with the kernel-visible logical bytes
+        // of the original compressed file before replacing anything. Manual
+        // restore can work on older hosts without kernel decoding, but asking
+        // for this independent comparison must fail closed on such a host.
+        if item.context.operation.verify {
+            let _entered = tracing::info_span!("verify restored file").entered();
+            let mut original = BufReader::new(item.file.as_ref());
+            let mut restored = BufReader::new(tmp_file.as_file_mut());
+            original.rewind()?;
+            restored.rewind()?;
+            ensure_identical_files(original, restored).map_err(|e| {
+                io::Error::other(format!(
+                    "restored file verification failed: {e}; {} unchanged",
+                    item.context.path.display()
+                ))
+            })?;
+        }
+
         copy_metadata(&item.file, tmp_file.as_file())?;
         set_flags(
             tmp_file.as_file(),
@@ -314,5 +333,49 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
 
         lhs.consume(min_len);
         rhs.consume(min_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_identical_files;
+    use std::io::{BufReader, Cursor, ErrorKind};
+
+    fn generated_bytes() -> Vec<u8> {
+        (0..(2 * 65536 + 13))
+            .map(|index| (index % 251) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn staged_restore_verification_accepts_exact_bytes_with_different_read_buffers() {
+        let expected = generated_bytes();
+        let original = BufReader::with_capacity(7, Cursor::new(expected.as_slice()));
+        let restored = BufReader::with_capacity(4096, Cursor::new(expected.as_slice()));
+        ensure_identical_files(original, restored).unwrap();
+    }
+
+    #[test]
+    fn staged_restore_verification_rejects_corruption_and_length_changes() {
+        let expected = generated_bytes();
+        let mut corrupted = expected.clone();
+        corrupted[65536] ^= 0xff;
+        let mut longer = expected.clone();
+        longer.push(0x42);
+
+        for (actual, error_kind) in [
+            (corrupted.as_slice(), ErrorKind::InvalidData),
+            (&expected[..expected.len() - 1], ErrorKind::UnexpectedEof),
+            (longer.as_slice(), ErrorKind::UnexpectedEof),
+        ] {
+            let original = BufReader::with_capacity(7, Cursor::new(expected.as_slice()));
+            let restored = BufReader::with_capacity(4096, Cursor::new(actual));
+            assert_eq!(
+                ensure_identical_files(original, restored)
+                    .unwrap_err()
+                    .kind(),
+                error_kind
+            );
+        }
     }
 }
