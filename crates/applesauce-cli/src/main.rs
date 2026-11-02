@@ -82,10 +82,10 @@ struct Decompress {
     #[arg(long)]
     manual: bool,
 
-    /// Verify that the compressed file has the same contents as the original before replacing it
+    /// Verify restored bytes against the compressed source's logical contents before replacing it
     ///
-    /// This is an extra safety check to ensure that the compressed file is exactly the same as the
-    /// original file.
+    /// Requires the OS to read the compressed source, including with --manual.
+    /// If kernel decoding is unavailable, verification fails without replacing the source.
     #[arg(long)]
     verify: bool,
 }
