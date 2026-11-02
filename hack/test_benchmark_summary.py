@@ -72,6 +72,9 @@ class BenchmarkSummaryTests(unittest.TestCase):
             invalid_values = (
                 0, -1, float("nan"), float("inf"), -float("inf"),
                 None, True, "2.5", [], {}, 10 ** 400,
+                # Positive finite medians must not print as 0.00000 ns;
+                # subnormal values could otherwise produce infinite MiB/s.
+                1e-320, 1e-6,
             )
             for invalid in invalid_values:
                 with self.subTest(invalid=repr(invalid)):
