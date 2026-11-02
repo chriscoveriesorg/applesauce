@@ -47,9 +47,12 @@ stdlib-only. It checks two independent before/after evidence pairs:
   because Applesauce can atomically replace the on-disk representation.
 - ZGX `query --json` output: exactly one `type: final` record (optionally
   preceded by trace records), at least one hit, identical **ordered** paths,
-  source spans and snippets. Supports protocol-4 positional and `--receipt`
-  object hits. Ranking scores, search-leg tags, cache receipts and latency are
-  excluded from this logical-content invariant.
+  source spans and snippets. File hits must include a concrete nonnegative
+  source offset or an ordered two-element nonnegative range; missing, null,
+  boolean, negative, or reversed spans are not integrity evidence. Supports
+  protocol-4 positional and `--receipt` object hits. Ranking scores,
+  search-leg tags, cache receipts and latency are excluded from this
+  logical-content invariant.
 
 An optional pair of measured physical byte counts can make a **real
 allocation decrease** a hard gate. Foldy's `Size` is logical size, **not** a
