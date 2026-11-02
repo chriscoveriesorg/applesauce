@@ -109,6 +109,49 @@ class FamilyContractTests(unittest.TestCase):
                 self.assertEqual(1, rc)
                 self.assertIn("incomplete Foldy scan", err)
 
+    def test_duplicate_foldy_json_keys_fail_closed(self):
+        before = self.write("b.json", foldy())
+        valid = json.dumps(foldy())
+        old_digest = '"sha256": "' + "a" * 64 + '"'
+        duplicate_digest = '"sha256": "' + "b" * 64 + '", ' + old_digest
+        cases = {
+            "top-level status": valid.replace(
+                '"status": "complete"', '"status": "partial", "status": "complete"', 1),
+            "nested SHA256": valid.replace(old_digest, duplicate_digest, 1),
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(valid, payload)
+                after = self.base / "a.json"
+                after.write_text(payload + "\n", encoding="utf-8")
+                rc, _, err = self.execute("--foldy-before", str(before),
+                                          "--foldy-after", str(after))
+                self.assertEqual(1, rc)
+                self.assertIn("duplicate JSON object key", err)
+
+    def test_duplicate_zgx_jsonl_keys_fail_closed(self):
+        before = self.write("b.jsonl", zgx())
+        final = json.dumps(zgx())
+        object_hit = json.dumps(zgx(hits=[
+            {"path": "logs/session.jsonl", "span": [1, 1], "snippet": "canary"}]))
+        cases = {
+            "final record type": (
+                final, final.replace('"type": "final"',
+                                     '"type": "leg", "type": "final"', 1)),
+            "nested hit span": (
+                object_hit, object_hit.replace('"span": [1, 1]',
+                                               '"span": [2, 2], "span": [1, 1]', 1)),
+        }
+        for name, (valid, payload) in cases.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(valid, payload)
+                after = self.base / "a.jsonl"
+                after.write_text(payload + "\n", encoding="utf-8")
+                rc, _, err = self.execute("--zgx-before", str(before),
+                                          "--zgx-after", str(after))
+                self.assertEqual(1, rc)
+                self.assertIn("duplicate JSON object key", err)
+
     def test_zgx_snippet_span_and_order_changes_fail(self):
         b = self.write("before.jsonl", zgx(hits=[
             ["first.jsonl", 1, "canary", ["rg"]], ["second.jsonl", [2, 4], "canary", ["rg"]]]))
