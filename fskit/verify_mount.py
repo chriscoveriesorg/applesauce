@@ -360,10 +360,15 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         if not hasattr(os, "O_NONBLOCK"):
             self.skipTest("nonblocking opens unavailable")
         real_open = os.open
+        restored_parent = self.restored.parent.resolve(strict=True)
         probed = []
 
         def deny_writes(path, flags, *args, **kwargs):
-            if (Path(path) == self.restored
+            # On macOS tempfile may spell /var as /private/var. Match the
+            # canonical parent without following a replaced file leaf.
+            candidate = Path(path)
+            if (candidate.name == self.restored.name
+                    and candidate.parent.resolve(strict=True) == restored_parent
                     and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)):
                 probed.append(flags & os.O_ACCMODE)
                 self.assertTrue(flags & os.O_NONBLOCK,
