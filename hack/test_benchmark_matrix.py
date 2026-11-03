@@ -44,6 +44,23 @@ class MatrixTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, workflow)
 
+    def test_manifest_is_workspace_absolute_and_mac_smoke_checks_it(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/benchmark-codecs.yml").read_text()
+        probe = (root / ".github/workflows/modern-compression-probe.yml").read_text()
+        self.assertIn(
+            "APPLESAUCE_BENCH_MANIFEST: ${{ github.workspace }}/target/applesauce-bench/manifest.csv",
+            workflow,
+        )
+        self.assertIn(
+            "APPLESAUCE_BENCH_MANIFEST: ${{ runner.temp }}/applesauce-smoke-manifest/nested/manifest.csv",
+            probe,
+        )
+        self.assertIn(
+            'python3 hack/validate-benchmark-matrix.py "$APPLESAUCE_BENCH_MANIFEST" smoke',
+            probe,
+        )
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
