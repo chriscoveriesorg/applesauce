@@ -2,7 +2,7 @@ name: ApplesauceASCF
 options:
   bundleIdPrefix: org.chriscoveries.applesauce
   deploymentTarget:
-    macOS: "26.0"
+    macOS: "27.0"
 targets:
   ASCFHost:
     type: application
@@ -29,5 +29,5 @@ targets:
         CODE_SIGN_ENTITLEMENTS: ASCFExtension/Extension.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h"
         LIBRARY_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../target/release"
-        OTHER_LDFLAGS: "$(inherited) -lapplesauce_fskit_bridge"
+        OTHER_LDFLAGS: "$(inherited) -lapplesauce_fskit_bridge -framework Compression"
         SWIFT_VERSION: "5.0"
