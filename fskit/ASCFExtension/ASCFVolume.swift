@@ -136,7 +136,8 @@ extension ASCFVolume: FSVolume.Operations {
         default:
             // FSKit requires its specific invalid-cookie error here; EINVAL
             // prevents callers from distinguishing a stale directory cursor.
-            throw FSError.invalidDirectoryCookie
+            throw NSError(domain: FSKitErrorDomain,
+                          code: FSError.Code.invalidDirectoryCookie.rawValue)
         }
         for index in start..<3 {
             let name: FSFileName
