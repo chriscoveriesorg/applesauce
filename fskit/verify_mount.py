@@ -175,6 +175,8 @@ def verify_mount(mount, original, require_real_mount=True):
         original, nofollow=True, include_identity=True)
     mounted_size, mounted_sha, mounted_identity = digest(
         mounted, nofollow=True, include_identity=True)
+    require(original_identity != mounted_identity,
+            "mounted file aliases original cleartext after digest")
     require(original_size == mounted_size, "mounted logical byte length differs")
     require(original_sha == mounted_sha, "full mounted SHA-256 differs from cleartext")
 
@@ -260,6 +262,29 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         # FIFO or device (which may block indefinitely) as archive cleartext.
         with self.assertRaisesRegex(MountCheckError, "not a regular file"):
             digest(self.mount, nofollow=True)
+
+    def test_mounted_file_hardlink_swap_rejected_after_precheck(self):
+        # The path-level samefile precheck can race with the digest opens.
+        # Never accept a mount that actually exposes the reference inode.
+        real_open = os.open
+        swapped = False
+        restored_parent = self.restored.parent.resolve(strict=True)
+
+        def swap_before_mounted_digest(path, flags, *args, **kwargs):
+            nonlocal swapped
+            candidate = Path(path)
+            if (not swapped and candidate.name == self.restored.name
+                    and candidate.parent.resolve(strict=True) == restored_parent
+                    and flags & os.O_ACCMODE == os.O_RDONLY):
+                swapped = True
+                self.restored.unlink()
+                os.link(self.original, self.restored)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=swap_before_mounted_digest):
+            with self.assertRaisesRegex(MountCheckError, "aliases original"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(swapped, "hardlink replacement must be exercised")
 
     def test_modified_mounted_payload_fails(self):
         with open(self.restored, "r+b") as altered:
