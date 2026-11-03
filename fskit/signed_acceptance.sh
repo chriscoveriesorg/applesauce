@@ -11,6 +11,7 @@ usage() {
 Usage:
   bash fskit/signed_acceptance.sh signed-build
   bash fskit/signed_acceptance.sh fixture [lzraven|lzmesh]
+  bash fskit/signed_acceptance.sh package
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
 
@@ -19,6 +20,8 @@ FSKit mount and module capabilities enabled for their respective App IDs.
 The local Xcode account must already have matching provisioning profiles.
 The script requires XcodeGen, Rust and the macOS 27 SDK.
 fixture: creates an independent, synthetic >8 MiB original and verified ASCF.
+package: builds signed host + BOTH codecs and prepares a portable acceptance
+bundle with SHA-256 manifest and corrupted-archive negative fixtures.
 readback: checks signed host + extension provisioned capabilities and runs
 actual statfs, SHA-256, unaligned reads, EOF and denied write-open acceptance.
 unmounted: after normal host/Finder unmount, prove a previously verified
@@ -66,6 +69,77 @@ verify_host() {
 }
 if test "$#" -eq 0; then usage; exit 2; fi
 case "$1" in
+  package)
+    test "$#" -eq 1 || die "package takes no arguments"
+    mac_only
+    for t in cargo shasum ditto python3; do need "$t"; done
+    # Explicit single-command handoff. Every input is generated from synthetic
+    # data. A signed app is copied intact, preserving its embedded extension.
+    out="$(mktemp -d /tmp/ascf-acceptance.XXXXXXXX)"
+    host_log="$out/signed-build.log"
+    if ! bash "$ROOT/fskit/signed_acceptance.sh" signed-build > "$host_log" 2>&1; then
+      die "signed build failed; full diagnostics: $host_log"
+    fi
+    built="$(/usr/bin/awk '/^Signed host: / {sub(/^Signed host: /, ""); print; exit}' "$host_log")"
+    test -d "$built" || die "signed-build did not produce an app; see $host_log"
+    /usr/bin/ditto "$built" "$out/ASCFHost.app"
+    verify_host "$out/ASCFHost.app" "$out"
+    reference_sha=""
+    for codec in lzmesh lzraven; do
+      log="$out/$codec.fixture.log"
+      if ! bash "$ROOT/fskit/signed_acceptance.sh" fixture "$codec" > "$log" 2>&1; then
+        die "$codec fixture failed; details: $log"
+      fi
+      original="$(/usr/bin/awk '/^Original: / {sub(/^Original: /, ""); print; exit}' "$log")"
+      archive="$(/usr/bin/awk '/^ASCF: / {sub(/^ASCF: /, ""); print; exit}' "$log")"
+      test -f "$original" && test -f "$archive" || die "$codec fixture paths missing; see $log"
+      checksum="$(/usr/bin/shasum -a 256 "$original" | /usr/bin/awk '{print $1}')"
+      if test -n "$reference_sha" && test "$checksum" != "$reference_sha"; then
+        die "independent generated fixture sources disagree"
+      fi
+      reference_sha="$checksum"
+      /bin/cp "$original" "$out/source.$codec.jsonl"
+      /bin/cp "$archive" "$out/source.$codec.ascf"
+      # Damage precisely one payload byte in a NEW COPY. The header and
+      # index remain parseable, making this a genuine decode/digest refusal
+      # test instead of only a magic-header failure.
+      /usr/bin/python3 - "$out/source.$codec.ascf" "$out/source.$codec.corrupt.ascf" <<'PY'
+import struct
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_bytes()
+assert source[:8] == b"ASCF0001"
+offset, stored = struct.unpack_from("<QI", source, 64)
+assert stored > 0 and 112 <= offset < len(source)
+assert offset + stored <= len(source)
+damaged = bytearray(source)
+damaged[offset] ^= 0x80
+Path(sys.argv[2]).write_bytes(damaged)
+PY
+      if "$ROOT/target/release/applesauce" archive verify "$out/source.$codec.corrupt.ascf" \
+        > "$out/$codec.corrupt-refusal.log" 2>&1; then
+        die "$codec corrupted payload unexpectedly passed archive verification"
+      fi
+    done
+    /usr/bin/shasum -a 256 \
+      "$out"/source.*.jsonl "$out"/source.*.ascf > "$out/SHA256SUMS"
+    /usr/bin/sw_vers > "$out/macos.txt"
+    cat > "$out/NEXT-STEPS.txt" <<'STEPS'
+These files are synthetic. Preserve the originals and the signed app.
+1. Install ASCFHost.app on an authorized disposable macOS 27+ Mac.
+2. Enable its extension under Settings > General > Login Items & Extensions.
+3. Mount source.lzmesh.ascf from the host. Run:
+   bash fskit/signed_acceptance.sh readback /path/to/ASCFHost.app /Volumes/Applesauce\\ ASCF /path/to/source.lzmesh.jsonl
+4. Unmount using host/Finder; run signed_acceptance.sh unmounted using
+   the successful readback.json, then remount and repeat readback.
+5. Repeat steps 3-4 with source.lzraven.ascf and its source cleartext.
+6. Attempt to mount each source.<codec>.corrupt.ascf. Each MUST be refused;
+   do not record a passed acceptance if any corrupted archive mounts.
+Keep the signed readback, unmount, mount, and rejection evidence.
+No data on the target Mac is automatically mounted or overwritten.
+STEPS
+    printf 'Signed acceptance bundle: %s\nSHA-256: %s/SHA256SUMS\n' "$out" "$out"
+    ;;
   signed-build)
     test "$#" -eq 1 || die "signed-build takes no arguments"
     mac_only
