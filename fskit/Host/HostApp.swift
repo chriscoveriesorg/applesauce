@@ -29,6 +29,12 @@ private struct ASCFMountView: View {
                 selectingArchive = true
             }
             .disabled(isWorking || mountedURL != nil)
+            Button("Open File System Extensions settings") {
+                if !FSClient.shared.openFileSystemExtensionsSettings() {
+                    status = "macOS could not open File System Extensions settings."
+                }
+            }
+            .disabled(isWorking)
             if let mountedURL {
                 Button("Reveal mounted archive in Finder") {
                     NSWorkspace.shared.open(mountedURL)
@@ -70,9 +76,36 @@ private struct ASCFMountView: View {
     }
 
     private func mount(_ url: URL) {
-        // Prevent two concurrent mounts or losing a live mount point.
         guard !isWorking, mountedURL == nil else { return }
         isWorking = true
+        status = "Checking installed FSKit extension..."
+        // A valid signed app may still have an extension that macOS has not
+        // registered or that the user has disabled. Show the actionable cause
+        // before opening the security-scoped archive or requesting a mount.
+        FSClient.shared.fetchInstalledExtensions { modules, error in
+            DispatchQueue.main.async {
+                if let error {
+                    isWorking = false
+                    status = "FSKit extension discovery failed: \\(error.localizedDescription)"
+                    return
+                }
+                let moduleID = "org.chriscoveries.applesauce.ascfhost.ascfextension"
+                guard let module = modules?.first(where: { $0.bundleIdentifier == moduleID }) else {
+                    isWorking = false
+                    status = "ASCF extension is not installed. Install the signed host, then enable its extension in System Settings."
+                    return
+                }
+                guard module.isEnabled else {
+                    isWorking = false
+                    status = "ASCF extension is disabled. Enable it in File System Extensions settings."
+                    return
+                }
+                beginMount(url)
+            }
+        }
+    }
+
+    private func beginMount(_ url: URL) {
         // The picker supplies a security-scoped URL. FSKit conveys the scope
         // to the extension; neither process needs write access to the archive.
         guard url.startAccessingSecurityScopedResource() else {
@@ -91,10 +124,10 @@ private struct ASCFMountView: View {
             DispatchQueue.main.async {
                 isWorking = false
                 if let error {
-                    status = "Mount failed: \(error.localizedDescription)"
+                    status = "Mount failed: \\(error.localizedDescription)"
                 } else if let mounted {
                     mountedURL = mounted
-                    status = "Mounted at \(mounted.path)"
+                    status = "Mounted at \\(mounted.path)"
                 } else {
                     status = "FSKit returned no mounted volume."
                 }
