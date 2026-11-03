@@ -532,6 +532,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_reads_do_not_allocate_or_initialize_decoder() {
+        let mut reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
+        assert_eq!(
+            reader.read_range(u64::MAX, MAX_READ_BYTES).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        let mut output = [0xa5; 32];
+        assert_eq!(
+            reader.read_exact_at(1, &mut output).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(output, [0xa5; 32]);
+        assert!(reader.read_staging.is_empty());
+        assert!(reader.encoded_storage.is_empty());
+        assert!(reader.decoded_storage.is_empty());
+        assert!(reader.decode_scratch.is_none());
+    }
+
+    #[test]
     fn malformed_index_and_unknown_codec_fail_closed() {
         let original = fake_archive();
         let mut cases = Vec::new();
