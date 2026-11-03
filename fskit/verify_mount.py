@@ -96,7 +96,7 @@ def digest(path, nofollow=False, include_identity=False):
     checksum = hashlib.sha256()
     if nofollow:
         require(hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW unavailable for mounted read")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
     if nofollow:
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags)
@@ -205,7 +205,7 @@ def verify_mount(mount, original, require_real_mount=True):
 
     # Open read-only and compare deterministic independent-block boundary
     # windows. The final zero-byte read must return EOF.
-    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
     source_fd = os.open(original, read_flags | os.O_NOFOLLOW)
     try:
         source_stat = os.fstat(source_fd)
@@ -353,6 +353,27 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                                         "mounted changed during random-read verification"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(mutated)
+
+    def test_fifo_swap_does_not_block_digest_open(self):
+        # A regular path can become a FIFO after the initial type check.
+        # O_NONBLOCK must be present before fstat can reject the descriptor.
+        if not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"):
+            self.skipTest("FIFO/nonblocking opens unavailable")
+        real_open = os.open
+        swapped = False
+        def replace_with_fifo(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if Path(path) == self.original and not swapped:
+                swapped = True
+                self.original.unlink()
+                os.mkfifo(self.original)
+                self.assertTrue(flags & os.O_NONBLOCK,
+                                "digest open must not block on a swapped FIFO")
+            return real_open(path, flags, *args, **kwargs)
+        with mock.patch("os.open", side_effect=replace_with_fifo):
+            with self.assertRaisesRegex(MountCheckError, "not a regular file"):
+                digest(self.original, nofollow=True)
+        self.assertTrue(swapped)
 
     def test_digest_rejects_nonregular_descriptor(self):
         # A pathname can change after directory enumeration. Do not read a
