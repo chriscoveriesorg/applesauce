@@ -156,7 +156,9 @@ def sampled_offsets(size):
 
 def verify_mount(mount, original, require_real_mount=True):
     mount = Path(mount).resolve(strict=True)
-    original = Path(original).resolve(strict=True)
+    # Preserve the reference leaf: resolve() would silently follow a symlink
+    # before digest() can enforce O_NOFOLLOW on its opened descriptor.
+    original = Path(os.path.abspath(original))
     require(mount.is_dir(), "mount argument is not a directory")
     mount_identity = {}
     if require_real_mount:
@@ -353,6 +355,16 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "changed between digest"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped, "regular-file replacement must be exercised")
+
+    def test_original_symlink_is_not_silently_resolved(self):
+        # A symlink supplied as the reference path must not bypass the
+        # O_NOFOLLOW gate through an earlier Path.resolve() call.
+        target = self.original.with_suffix(".saved")
+        self.original.replace(target)
+        self.original.symlink_to(target)
+        with self.assertRaises(OSError) as raised:
+            verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertEqual(raised.exception.errno, errno.ELOOP)
 
     def test_original_symlink_swap_rejected_before_digest(self):
         # A reference pathname replaced after resolve() must never be followed
