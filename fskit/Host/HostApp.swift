@@ -93,12 +93,18 @@ private struct ASCFMountView: View {
         ) ?? []
         return mounted.filter { volume in
             guard volume.path.hasPrefix("/Volumes/") else { return false }
-            var info = statfs()
-            let result = volume.withUnsafeFileSystemRepresentation { path -> Int32 in
+            // Swift imports Darwin's statfs structure with the same name as
+            // its C function. Open the mount directory read-only and use
+            // fstatfs(2), which binds the result to the opened volume and
+            // avoids that name collision on the macOS 27 SDK.
+            let fd = volume.withUnsafeFileSystemRepresentation { path -> Int32 in
                 guard let path else { return -1 }
-                return Darwin.statfs(path, &info)
+                return Darwin.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
             }
-            guard result == 0 else { return false }
+            guard fd >= 0 else { return false }
+            defer { _ = Darwin.close(fd) }
+            var info = statfs()
+            guard Darwin.fstatfs(fd, &info) == 0 else { return false }
             let type = withUnsafeBytes(of: info.f_fstypename) { bytes in
                 String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
             }
