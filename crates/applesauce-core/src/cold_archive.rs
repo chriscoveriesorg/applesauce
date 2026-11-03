@@ -402,9 +402,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         if destination.len() > MAX_READ_BYTES {
             return Err(bad_input("archive read exceeds 8 MiB per call"));
         }
-        if offset > self.logical_size
-            || destination.len() as u64 > self.logical_size - offset
-        {
+        if offset > self.logical_size || destination.len() as u64 > self.logical_size - offset {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "read beyond archive EOF",
