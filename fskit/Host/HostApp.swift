@@ -18,6 +18,7 @@ private struct ASCFMountView: View {
     @State private var selectingArchive = false
     @State private var status = "Select a verified ASCF archive to mount separately."
     @State private var mountedURL: URL?
+    @State private var isWorking = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -27,14 +28,28 @@ private struct ASCFMountView: View {
             Button("Choose .ascf archive and mount") {
                 selectingArchive = true
             }
+            .disabled(isWorking || mountedURL != nil)
             if let mountedURL {
                 Button("Reveal mounted archive in Finder") {
                     NSWorkspace.shared.open(mountedURL)
                 }
+                Button("Unmount read-only volume") {
+                    unmount(mountedURL)
+                }
+                .disabled(isWorking)
             }
         }
         .padding(24)
         .frame(minWidth: 460, minHeight: 220)
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { note in
+            // Finder may eject the separate volume without using this window.
+            guard let mountedURL,
+                  let path = note.userInfo?["NSDevicePath"] as? String,
+                  URL(fileURLWithPath: path).standardizedFileURL == mountedURL.standardizedFileURL
+            else { return }
+            self.mountedURL = nil
+            status = "Volume unmounted."
+        }
         .fileImporter(
             isPresented: $selectingArchive,
             allowedContentTypes: [UTType(filenameExtension: "ascf") ?? .data],
@@ -55,9 +70,13 @@ private struct ASCFMountView: View {
     }
 
     private func mount(_ url: URL) {
+        // Prevent two concurrent mounts or losing a live mount point.
+        guard !isWorking, mountedURL == nil else { return }
+        isWorking = true
         // The picker supplies a security-scoped URL. FSKit conveys the scope
         // to the extension; neither process needs write access to the archive.
         guard url.startAccessingSecurityScopedResource() else {
+            isWorking = false
             status = "macOS did not grant read access to the selected archive."
             return
         }
@@ -70,6 +89,7 @@ private struct ASCFMountView: View {
         ) { mounted, error in
             url.stopAccessingSecurityScopedResource()
             DispatchQueue.main.async {
+                isWorking = false
                 if let error {
                     status = "Mount failed: \(error.localizedDescription)"
                 } else if let mounted {
@@ -77,6 +97,33 @@ private struct ASCFMountView: View {
                     status = "Mounted at \(mounted.path)"
                 } else {
                     status = "FSKit returned no mounted volume."
+                }
+            }
+        }
+    }
+
+    private func unmount(_ url: URL) {
+        guard !isWorking, mountedURL?.standardizedFileURL == url.standardizedFileURL else { return }
+        isWorking = true
+        status = "Unmounting the read-only volume..."
+        // NSWorkspace can block while open files drain. Keep the UI responsive,
+        // let macOS refuse a busy mount, and leave the source archive unchanged.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<Void, Error>
+            do {
+                try NSWorkspace.shared.unmountAndEjectDevice(at: url)
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                isWorking = false
+                switch result {
+                case .success:
+                    mountedURL = nil
+                    status = "Unmounted read-only archive."
+                case .failure(let error):
+                    status = "Unmount failed: \(error.localizedDescription)"
                 }
             }
         }

@@ -80,3 +80,11 @@ Portable acceptance harness tests (also run in FSKit CI):
 ```sh
 python3 fskit/verify_mount.py --self-test
 ```
+
+The host now keeps track of the single active mount. Use **Unmount read-only
+volume** to request a normal macOS unmount; the UI reports busy-volume or
+permission errors rather than forcing an eject. Finder-initiated unmounts also
+clear the host's mounted state. Mounting another archive is disabled while a
+mount or unmount is underway or an archive remains mounted. A successful
+compile does not establish that signed installation and unmount work on a
+real macOS host; both remain part of end-to-end acceptance.
