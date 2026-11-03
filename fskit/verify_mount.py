@@ -174,20 +174,30 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         # the first mounted open. O_NOFOLLOW must reject the replacement.
         real_open = os.open
         swapped = False
+        # macOS may report the mount as /private/var/... even when the
+        # temporary directory was created under /var/.... Resolve only the
+        # *parent*: resolving the leaf would follow the symlink being tested.
+        restored_parent = self.restored.parent.resolve(strict=True)
+
+        def targets_restored(path):
+            candidate = Path(path)
+            return (candidate.name == self.restored.name
+                    and candidate.parent.resolve(strict=True) == restored_parent)
 
         def swap_before_open(path, flags, *args, **kwargs):
             nonlocal swapped
-            if Path(path) == self.restored and not swapped:
+            if targets_restored(path) and not swapped:
                 swapped = True
                 self.restored.unlink()
                 self.restored.symlink_to(self.original)
-            if Path(path) == self.restored and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
+            if targets_restored(path) and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
                 raise OSError(errno.EROFS, "read-only filesystem")
             return real_open(path, flags, *args, **kwargs)
 
         with mock.patch("os.open", side_effect=swap_before_open):
             with self.assertRaises(OSError) as raised:
                 verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(swapped, "symlink replacement must be exercised")
         self.assertEqual(raised.exception.errno, errno.ELOOP)
 
     def test_extra_file_refused(self):
