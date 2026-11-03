@@ -58,7 +58,14 @@ def darwin_filesystem_type(mount):
     if ctypes.sizeof(DarwinStatFS) != 2168 or DarwinStatFS.f_fstypename.offset != 72:
         raise MountCheckError("unsupported Darwin statfs ABI layout")
     info = DarwinStatFS()
-    call = ctypes.CDLL(None, use_errno=True).statfs
+    libc = ctypes.CDLL(None, use_errno=True)
+    # Intel Darwin retains a legacy unsuffixed statfs entry point. The
+    # $INODE64 variant matches our 64-bit ABI; arm64 uses unsuffixed statfs.
+    symbol = "statfs$INODE64" if os.uname().machine == "x86_64" else "statfs"
+    try:
+        call = getattr(libc, symbol)
+    except AttributeError as error:
+        raise MountCheckError(f"Darwin libc lacks {symbol}") from error
     call.argtypes = (ctypes.c_char_p, ctypes.POINTER(DarwinStatFS))
     call.restype = ctypes.c_int
     if call(os.fsencode(mount), ctypes.byref(info)) != 0:
@@ -451,15 +458,33 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             return 0
 
         call = mock.Mock(side_effect=fake_statfs)
-        with mock.patch("ctypes.CDLL", return_value=mock.Mock(statfs=call)):
+        with mock.patch("ctypes.CDLL", return_value=mock.Mock(statfs=call)), mock.patch(
+            "os.uname", return_value=mock.Mock(machine="arm64")
+        ):
             self.assertEqual(darwin_filesystem_type(self.mount), "ascf")
         call.assert_called_once()
+
+    def test_darwin_intel_uses_inode64_entry_point(self):
+        def fake_statfs(path, pointer):
+            ctypes.cast(pointer, ctypes.POINTER(DarwinStatFS)).contents.f_fstypename = b"ascf"
+            return 0
+
+        libc = mock.Mock()
+        legacy = libc.statfs
+        inode64 = mock.Mock(side_effect=fake_statfs)
+        setattr(libc, "statfs$INODE64", inode64)
+        with mock.patch("ctypes.CDLL", return_value=libc), mock.patch(
+            "os.uname", return_value=mock.Mock(machine="x86_64")
+        ):
+            self.assertEqual(darwin_filesystem_type(self.mount), "ascf")
+        inode64.assert_called_once()
+        legacy.assert_not_called()
 
     def test_darwin_statfs_failure_is_closed(self):
         call = mock.Mock(return_value=-1)
         with mock.patch("ctypes.CDLL", return_value=mock.Mock(statfs=call)), mock.patch(
             "ctypes.get_errno", return_value=errno.EIO
-        ):
+        ), mock.patch("os.uname", return_value=mock.Mock(machine="arm64")):
             with self.assertRaisesRegex(MountCheckError, "statfs failed"):
                 darwin_filesystem_type(self.mount)
 
