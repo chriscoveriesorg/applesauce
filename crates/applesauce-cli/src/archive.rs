@@ -362,4 +362,83 @@ mod tests {
             assert!(!refused.exists());
         }
     }
+
+    #[test]
+    fn verify_rejects_non_archive_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("notes.txt");
+        fs::write(&text, b"plain text, not an archive").unwrap();
+        assert_eq!(
+            verify(&text).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // A magic-correct but truncated prefix is also refused.
+        let short = dir.path().join("short.ascf");
+        fs::write(&short, b"ASCF0001").unwrap();
+        assert!(verify(&short).is_err());
+        assert!(extract(&short, &dir.path().join("out")).is_err());
+    }
+
+    #[test]
+    fn create_rejects_empty_and_directory_sources_without_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        fs::write(&empty, b"").unwrap();
+        for codec in [Codec::Lzraven, Codec::Lzmesh] {
+            let output = dir.path().join(format!("empty-{}.ascf", codec.name()));
+            assert!(create(&empty, &output, codec, 64 * 1024, false).is_err());
+            assert!(!output.exists());
+            let output = dir.path().join(format!("dir-{}.ascf", codec.name()));
+            assert!(create(dir.path(), &output, codec, 64 * 1024, false).is_err());
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
+    fn create_rejects_out_of_range_chunk_sizes() {
+        for codec in [Codec::Lzraven, Codec::Lzmesh] {
+            if !codec.is_supported() {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("input");
+            fs::write(&source, b"chunk-size guard input").unwrap();
+            for bad in [32 * 1024usize, 100_000, 96 * 1024, 16 * 1024 * 1024] {
+                let output = dir.path().join(format!("bad-{bad}.ascf"));
+                assert!(
+                    create(&source, &output, codec, bad, false).is_err(),
+                    "chunk size {bad} must be refused"
+                );
+                assert!(!output.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn incompressible_source_needs_allow_expansion_flag() {
+        for codec in [Codec::Lzraven, Codec::Lzmesh] {
+            if !codec.is_supported() {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("noise");
+            let mut state = 0x243f_6a88_85a3_08d3u64;
+            let noise: Vec<u8> = (0..80_000)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state as u8
+                })
+                .collect();
+            fs::write(&source, &noise).unwrap();
+            let output = dir.path().join("noise.ascf");
+            // An archive that cannot shrink the data is refused by default.
+            assert!(create(&source, &output, codec, 64 * 1024, false).is_err());
+            assert!(!output.exists());
+            // The explicit opt-in flag keeps it.
+            create(&source, &output, codec, 64 * 1024, true).unwrap();
+            assert!(output.exists());
+        }
+    }
 }

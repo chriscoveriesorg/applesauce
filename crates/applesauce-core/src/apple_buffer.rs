@@ -718,4 +718,37 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn codec_selectors_and_names_are_unique() {
+        // A duplicated discriminant would silently alias one codec's
+        // selector to another's bytes.
+        let mut selectors = std::collections::BTreeSet::new();
+        let mut names = std::collections::BTreeSet::new();
+        for codec in Codec::ALL {
+            assert!(selectors.insert(codec as u32), "duplicate selector");
+            assert!(names.insert(codec.name()), "duplicate name");
+        }
+    }
+
+    #[test]
+    fn version_parser_rejects_malformed_edges() {
+        for invalid in [
+            "27.",
+            "27..2",
+            " 27.2",
+            "27.2 ",
+            "v27.2",
+            "27.2beta",
+            "99999999999.2",
+        ] {
+            assert!(
+                MacOsVersion::parse(invalid).is_none(),
+                "accepted {invalid:?}"
+            );
+        }
+        let version = MacOsVersion::parse("27.2").unwrap();
+        assert_eq!((version.major, version.minor, version.patch), (27, 2, 0));
+        assert_eq!(version.to_string(), "27.2.0");
+    }
 }
