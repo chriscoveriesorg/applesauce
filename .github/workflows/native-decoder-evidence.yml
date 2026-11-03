@@ -7,6 +7,8 @@ on:
       - 'hack/test_decmpfs_binary_probe.py'
       - 'hack/decmpfs_table_probe.py'
       - 'hack/test_decmpfs_table_probe.py'
+      - 'hack/decmpfs_config_probe.py'
+      - 'hack/test_decmpfs_config_probe.py'
       - 'hack/kernelcache_container.py'
       - 'hack/test_kernelcache_container.py'
       - '.github/workflows/native-decoder-evidence.yml'
@@ -17,6 +19,8 @@ on:
       - 'hack/test_decmpfs_binary_probe.py'
       - 'hack/decmpfs_table_probe.py'
       - 'hack/test_decmpfs_table_probe.py'
+      - 'hack/decmpfs_config_probe.py'
+      - 'hack/test_decmpfs_config_probe.py'
       - 'hack/kernelcache_container.py'
       - 'hack/test_kernelcache_container.py'
       - '.github/workflows/native-decoder-evidence.yml'
@@ -38,6 +42,7 @@ jobs:
       - run: python3 -m unittest discover -s hack -p 'test_decmpfs_binary_probe.py' -v
       - run: python3 -m unittest discover -s hack -p 'test_kernelcache_container.py' -v
       - run: python3 -m unittest discover -s hack -p 'test_decmpfs_table_probe.py' -v
+      - run: python3 -m unittest discover -s hack -p 'test_decmpfs_config_probe.py' -v
 
   macos-binaries:
     runs-on: xcode-27
@@ -64,6 +69,8 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/native-decoder-evidence/container-tests.log"
           python3 -m unittest discover -s hack -p 'test_decmpfs_table_probe.py' -v \
             2>&1 | tee "$RUNNER_TEMP/native-decoder-evidence/table-tests.log"
+          python3 -m unittest discover -s hack -p 'test_decmpfs_config_probe.py' -v \
+            2>&1 | tee "$RUNNER_TEMP/native-decoder-evidence/config-tests.log"
       - name: Inspect existing kernel collections without executing or modifying them
         run: |
           set -euo pipefail

@@ -12,6 +12,7 @@ from pathlib import Path
 import struct
 
 import decmpfs_binary_probe as probe
+from decmpfs_config_probe import inspect_configuration
 from kernelcache_container import ContainerError, prepare, system_paths
 
 
@@ -238,8 +239,10 @@ def inspect(source):
             for call in probe.callsites(image, targets):
                 candidate = loop_candidate(call)
                 if candidate:
+                    table = read_table(image, candidate, fixups)
                     reports.append({"image": image.name, "uuid": image.uuid,
-                                    "callsite": call, "table": read_table(image, candidate, fixups)})
+                                    "callsite": call, "table": table,
+                                    "type_configuration": inspect_configuration(image, table, callback_window)})
     return reports
 
 
