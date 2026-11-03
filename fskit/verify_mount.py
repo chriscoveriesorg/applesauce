@@ -43,13 +43,21 @@ def digest(path):
 
 
 def sampled_offsets(size):
-    # Covers headers, both independent-block limits, interior and exact EOF.
-    values = {0, size, max(0, size - 1)}
-    for boundary in (4096, 65536, 8 * 1024 * 1024):
+    # Exercise offset mapping throughout large files, including the first,
+    # middle and final independent blocks. The number of reads is bounded:
+    # whole-file SHA-256 is the exhaustive data-integrity check.
+    require(size >= 0, "invalid negative logical file size")
+    values = {0, size, max(0, size - 1), size // 2}
+    for block in (4096, 65536, 8 * 1024 * 1024):
+        # Initial, central and last block boundaries.
+        for boundary in (block, (size // (2 * block)) * block,
+                         (size // block) * block):
+            for delta in (-1, 0, 1):
+                values.add(min(size, max(0, boundary + delta)))
+    for index in range(1, 33):
+        point = size * index // 33
         for delta in (-1, 0, 1):
-            values.add(min(size, max(0, boundary + delta)))
-    if size:
-        values.add(size // 2)
+            values.add(min(size, max(0, point + delta)))
     return sorted(values)
 
 
@@ -88,6 +96,10 @@ def verify_mount(mount, original, require_real_mount=True):
                 require(observed == expected, f"random read disagrees at byte {offset}")
             require(os.pread(mounted_fd, 32, original_size) == b"",
                     "mounted read did not return EOF")
+            # An offset past EOF must also return an empty result. This catches
+            # erroneous offset-to-chunk arithmetic on the FSKit read path.
+            require(os.pread(mounted_fd, 32, original_size + 1) == b"",
+                    "mounted read beyond EOF returned data")
         finally:
             os.close(mounted_fd)
     finally:
@@ -173,6 +185,33 @@ class SyntheticAcceptanceTests(unittest.TestCase):
 
         with mock.patch("os.open", side_effect=selective_open):
             with self.assertRaisesRegex(MountCheckError, "permitted write"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+
+    def test_offsets_cover_distant_blocks_with_bounded_reads(self):
+        size = 64 * 1024 * 1024
+        offsets = sampled_offsets(size)
+        self.assertIn(65535, offsets)
+        self.assertIn(8 * 1024 * 1024 - 1, offsets)
+        self.assertIn(size // 2, offsets)
+        self.assertIn(size - 1, offsets)
+        self.assertTrue(any(size * 3 // 4 < point < size - 8 * 1024 * 1024
+                            for point in offsets))
+        self.assertLess(len(offsets), 160)
+
+    def test_beyond_eof_data_is_rejected(self):
+        real_pread = os.pread
+        restored_inode = self.restored.stat().st_ino
+        eof = self.original.stat().st_size
+
+        def bad_pread(fd, count, offset):
+            if os.fstat(fd).st_ino == restored_inode and offset == eof + 1:
+                return b"bad"
+            return real_pread(fd, count, offset)
+
+        self.real_open = os.open
+        with mock.patch("os.open", side_effect=self.readonly_open), mock.patch(
+                "os.pread", side_effect=bad_pread):
+            with self.assertRaisesRegex(MountCheckError, "beyond EOF"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
 
     def test_nonmount_path_refused_by_default(self):
