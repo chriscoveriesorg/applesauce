@@ -118,15 +118,49 @@ extension ASCFVolume: FSVolume.Operations {
                             attributes: FSItem.GetAttributesRequest?,
                             packer: FSDirectoryEntryPacker) async throws -> FSDirectoryVerifier {
         guard isRoot(directory) else { throw failure(ENOTDIR) }
-        if cookie == .initial {
-            _ = packer.packEntry(name: file.name, itemType: .file,
-                                 itemID: file.attributes.fileID,
-                                 nextCookie: FSDirectoryCookie(1),
-                                 attributes: attributes == nil ? nil : file.attributes)
-        } else if cookie != FSDirectoryCookie(1) {
+        // FSKit requires "." and ".." when attributes are not requested,
+        // while requests with attributes should enumerate ordinary items only.
+        // Cookies identify a position in the canonical [., .., file] sequence.
+        // A failed pack does not advance it, so FSKit can retry with more room.
+        let includeDotEntries = attributes == nil
+        let start: Int
+        switch cookie {
+        case .initial:
+            start = includeDotEntries ? 0 : 2
+        case FSDirectoryCookie(1) where includeDotEntries:
+            start = 1
+        case FSDirectoryCookie(2) where includeDotEntries:
+            start = 2
+        case FSDirectoryCookie(3):
+            return FSDirectoryVerifier(1)
+        default:
             throw failure(EINVAL)
         }
-        return FSDirectoryVerifier(0)
+        for index in start..<3 {
+            let name: FSFileName
+            let kind: FSItem.ItemType
+            let identifier: FSItem.Identifier
+            if index == 0 {
+                name = FSFileName(string: ".")
+                kind = .directory
+                identifier = root.attributes.fileID
+            } else if index == 1 {
+                name = FSFileName(string: "..")
+                kind = .directory
+                identifier = root.attributes.fileID
+            } else {
+                name = file.name
+                kind = .file
+                identifier = file.attributes.fileID
+            }
+            let packed = packer.packEntry(name: name, itemType: kind,
+                                          itemID: identifier,
+                                          nextCookie: FSDirectoryCookie(UInt64(index + 1)),
+                                          attributes: index == 2 ? (attributes == nil ? nil : file.attributes) : nil)
+            if !packed { break }
+        }
+        // A fixed, nonzero verifier represents this immutable directory.
+        return FSDirectoryVerifier(1)
     }
 
     func createItem(named name: FSFileName, type: FSItem.ItemType, inDirectory directory: FSItem,
