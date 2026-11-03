@@ -67,9 +67,21 @@ fn bounded_encoded_len(clear_len: usize) -> usize {
 // allocation error instead of invoking vec![0; size]'s infallible growth.
 fn allocate_buffer(size: usize) -> io::Result<Vec<u8>> {
     let mut buffer = Vec::new();
-    buffer.try_reserve_exact(size).map_err(io::Error::other)?;
-    buffer.resize(size, 0);
+    grow_buffer(&mut buffer, size)?;
     Ok(buffer)
+}
+
+// Fallible, monotonic per-reader storage growth. Keeping the previous buffer
+// allocation avoids O(chunks) large heap allocations during full verification
+// and repeated mounted-file reads. Lengths remain bounded by the archive index.
+fn grow_buffer(buffer: &mut Vec<u8>, size: usize) -> io::Result<()> {
+    if size > buffer.len() {
+        buffer
+            .try_reserve_exact(size - buffer.len())
+            .map_err(io::Error::other)?;
+        buffer.resize(size, 0);
+    }
+    Ok(())
 }
 
 fn file_codec(raw: u32) -> io::Result<Codec> {
@@ -256,8 +268,12 @@ pub struct ArchiveReader<R> {
     logical_sha256: [u8; 32],
     entries: Vec<Entry>,
     // Lazy so portable metadata inspection works without Apple codecs.
-    // Reuse aligned decoder scratch across random reads and verify_all.
+    // Reuse aligned decoder scratch and bounded I/O buffers across verification
+    // and random reads. The pread staging buffer preserves atomic caller writes.
     decode_scratch: Option<crate::apple_buffer::Scratch>,
+    encoded_storage: Vec<u8>,
+    decoded_storage: Vec<u8>,
+    read_staging: Vec<u8>,
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
@@ -325,6 +341,9 @@ impl<R: Read + Seek> ArchiveReader<R> {
             logical_sha256,
             entries,
             decode_scratch: None,
+            encoded_storage: Vec::new(),
+            decoded_storage: Vec::new(),
+            read_staging: Vec::new(),
         })
     }
 
@@ -343,63 +362,96 @@ impl<R: Read + Seek> ArchiveReader<R> {
         self.logical_sha256
     }
 
-    fn decode_chunk(&mut self, index: usize) -> io::Result<Vec<u8>> {
+    // A decoded chunk is borrowed from reusable, bounded storage. It is never
+    // returned until both Apple's guarded exact-length check and the stored
+    // SHA-256 have passed. The next decode invalidates the borrowed slice.
+    fn decode_chunk(&mut self, index: usize) -> io::Result<&[u8]> {
         let entry = &self.entries[index];
-        let mut encoded = allocate_buffer(entry.stored_len as usize)?;
+        let stored_len = entry.stored_len as usize;
+        let clear_len = entry.clear_len as usize;
+        grow_buffer(&mut self.encoded_storage, stored_len)?;
         self.source.seek(SeekFrom::Start(entry.offset))?;
-        self.source.read_exact(&mut encoded)?;
+        self.source
+            .read_exact(&mut self.encoded_storage[..stored_len])?;
         if self.decode_scratch.is_none() {
             self.decode_scratch = Some(self.codec.reusable_scratch()?);
         }
-        let decoded = self
+        // Apple may return the destination capacity on truncated output.
+        // A one-byte overflow guard catches overlong decoded output.
+        grow_buffer(&mut self.decoded_storage, clear_len + 1)?;
+        let decoded_len = self
             .decode_scratch
             .as_mut()
             .expect("scratch initialized above")
-            .decode_exact(&encoded, entry.clear_len as usize)?;
-        let digest: [u8; 32] = Sha256::digest(&decoded).into();
+            .decode_into(
+                &mut self.decoded_storage[..clear_len + 1],
+                &self.encoded_storage[..stored_len],
+            )?;
+        if decoded_len != clear_len {
+            return Err(invalid("archive decoder returned wrong logical length"));
+        }
+        let decoded = &self.decoded_storage[..clear_len];
+        let digest: [u8; 32] = Sha256::digest(decoded).into();
         if digest != entry.clear_sha256 {
             return Err(invalid("archive chunk SHA-256 mismatch"));
         }
         Ok(decoded)
     }
 
-    /// Return a verified logical range, never exposing partial bytes on error.
-    /// Reading an already-opened archive never rewrites the original file.
-    pub fn read_range(&mut self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
-        if length > MAX_READ_BYTES {
+    fn read_range_into(&mut self, offset: u64, destination: &mut [u8]) -> io::Result<()> {
+        if destination.len() > MAX_READ_BYTES {
             return Err(bad_input("archive read exceeds 8 MiB per call"));
         }
-        if offset > self.logical_size || length as u64 > self.logical_size - offset {
+        if offset > self.logical_size
+            || destination.len() as u64 > self.logical_size - offset
+        {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "read beyond archive EOF",
             ));
         }
-        let mut result = allocate_buffer(length)?;
-        if length == 0 {
-            return Ok(result);
-        }
-        let end = offset + length as u64;
+        let end = offset + destination.len() as u64;
         let mut current = offset;
         while current < end {
             let index = (current / self.chunk_size as u64) as usize;
-            let chunk = self.decode_chunk(index)?;
             let chunk_start = (index as u64) * self.chunk_size as u64;
+            let chunk = self.decode_chunk(index)?;
             let within = (current - chunk_start) as usize;
             let n = ((end - current) as usize).min(chunk.len() - within);
             let dst = (current - offset) as usize;
-            result[dst..dst + n].copy_from_slice(&chunk[within..within + n]);
+            destination[dst..dst + n].copy_from_slice(&chunk[within..within + n]);
             current += n as u64;
         }
+        Ok(())
+    }
+
+    /// Return a verified logical range. Failed reads cannot expose a partially
+    /// filled output vector, and each decoded chunk is SHA-256 authenticated.
+    pub fn read_range(&mut self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+        if length > MAX_READ_BYTES {
+            return Err(bad_input("archive read exceeds 8 MiB per call"));
+        }
+        let mut result = allocate_buffer(length)?;
+        self.read_range_into(offset, &mut result)?;
         Ok(result)
     }
 
-    /// Copy only after every affected chunk was decoded and SHA-256 checked.
-    /// On corruption or decode failure the caller's output remains unchanged.
+    /// Stage into reusable memory; copy to caller only after all affected
+    /// chunks have passed decoding and SHA-256 checks. Failure leaves the
+    /// destination unchanged, including for reads spanning many chunks.
     pub fn read_exact_at(&mut self, offset: u64, destination: &mut [u8]) -> io::Result<()> {
-        let verified = self.read_range(offset, destination.len())?;
-        destination.copy_from_slice(&verified);
-        Ok(())
+        if destination.len() > MAX_READ_BYTES {
+            return Err(bad_input("archive read exceeds 8 MiB per call"));
+        }
+        let mut staging = std::mem::take(&mut self.read_staging);
+        let result = (|| {
+            grow_buffer(&mut staging, destination.len())?;
+            self.read_range_into(offset, &mut staging[..destination.len()])?;
+            destination.copy_from_slice(&staging[..destination.len()]);
+            Ok(())
+        })();
+        self.read_staging = staging;
+        result
     }
 
     /// Validate every logical chunk plus the whole-file digest. This is the
