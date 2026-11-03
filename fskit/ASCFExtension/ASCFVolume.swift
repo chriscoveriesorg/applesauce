@@ -64,6 +64,11 @@ extension ASCFVolume: FSVolume.PathConfOperations {
 }
 
 extension ASCFVolume: FSVolume.Operations {
+    // Ask FSKit to mount the volume read-only at the VFS layer as well as
+    // rejecting every modifying operation. FSKit samples this property after
+    // mount(options:) returns; a client-supplied mount option is insufficient.
+    var requestedMountOptions: FSVolume.MountOptions { .readOnly }
+
     var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
         let capabilities = FSVolume.SupportedCapabilities()
         capabilities.supportsPersistentObjectIDs = true
