@@ -88,3 +88,44 @@ clear the host's mounted state. Mounting another archive is disabled while a
 mount or unmount is underway or an archive remains mounted. A successful
 compile does not establish that signed installation and unmount work on a
 real macOS host; both remain part of end-to-end acceptance.
+
+
+## Signed, provisioned owner-run acceptance (disposable Mac)
+
+The compile workflow checks Swift and the bridge but cannot approve Apple's
+restricted entitlements or mount a real FSKit volume. This script makes those
+missing steps executable without changing APFS metadata:
+
+```sh
+# On a macOS 27+ Mac signed into a provisioned Apple Developer team:
+export ASCFSKIT_TEAM_ID=YOUR_10_CHARACTER_TEAM_ID
+bash fskit/signed_acceptance.sh signed-build
+bash fskit/signed_acceptance.sh fixture lzmesh
+# Optional second fixture with: fixture lzraven
+
+# Install the resulting ASCFHost.app on the authorized disposable Mac.
+# Enable the extension in System Settings > General > Login Items & Extensions.
+# Open ASCFHost.app and select the generated source.lzmesh.ascf archive.
+bash fskit/signed_acceptance.sh readback \
+  "/path/to/ASCFHost.app" "/Volumes/Applesauce ASCF" \
+  "/path/to/generated/source.jsonl"
+```
+
+The script verifies the host and extension code signatures **and** checks
+that both signed entitlements are allowed in their embedded provisioning
+profiles. A development/ad-hoc signature without those capabilities fails.
+It generates deterministic synthetic input above 8 MiB; archive construction
+and `archive verify` must succeed before mounting. The mounted acceptance
+uses the existing Python verifier for actual FSKit identity, complete logical
+SHA-256, randomized/boundary/EOF reads and denied write-opens. Each command
+writes evidence to a unique temporary directory and prints its path.
+Never use private source files for this test.
+
+Repeat `readback` after normal Finder/host unmount and remount. Collect both
+JSON reports, Xcode build logs, signed entitlement/profile snapshots,
+macOS build and normal unmount evidence. Signing requires the Apple Developer
+team to provision `com.apple.developer.fskit.mount` and
+`com.apple.developer.fskit.fsmodule`. The script intentionally does not install
+an extension, request privileges, mount or force-unmount it. Owner-run
+acceptance is **still pending** until a signed disposable Mac demonstrates
+the full lifecycle; synthetic CI remains only a prerequisite.
