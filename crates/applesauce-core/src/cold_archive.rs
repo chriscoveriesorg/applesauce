@@ -612,6 +612,19 @@ mod tests {
             let mut damaged_reader = ArchiveReader::open(Cursor::new(damaged)).unwrap();
             assert!(damaged_reader.read_exact_at(0, &mut sentinel).is_err());
             assert_eq!(sentinel, vec![0xa5u8; 100]);
+            // A later corrupt chunk must not leak a previously verified prefix
+            // through the caller-owned destination. This spans the boundary
+            // between two independently authenticated archive chunks.
+            let mut late_corruption = stored.clone();
+            let second_payload = archive.entries[1].offset as usize;
+            late_corruption[second_payload] ^= 0xff;
+            let mut late_reader = ArchiveReader::open(Cursor::new(late_corruption)).unwrap();
+            let mut destination = vec![0xa5u8; 32];
+            assert!(late_reader
+                .read_exact_at((MIN_CHUNK_BYTES - 16) as u64, &mut destination)
+                .is_err());
+            assert_eq!(destination, vec![0xa5u8; 32]);
+
             let mut bad_hash = stored;
             bad_hash[32] ^= 1;
             assert!(ArchiveReader::open(Cursor::new(bad_hash))
