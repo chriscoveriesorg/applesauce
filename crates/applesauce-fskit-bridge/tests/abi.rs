@@ -67,6 +67,7 @@ fn metadata_and_eof_work_without_decoder() {
     assert_eq!(info.logical_sha256, [0x5a; 32]);
     // A parseable header with invalid compressed data must never pass the
     // full verification gate used by FSKit probe and mount.
+    // SAFETY: handle was opened above, remains live, and is closed once below.
     assert_ne!(unsafe { ascf_verify_all(handle) }, 0);
     assert_eq!(size_of::<AscfInfo>(), 48);
     let mut bytes = [0xa5u8; 8];
