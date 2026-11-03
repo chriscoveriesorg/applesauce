@@ -57,7 +57,7 @@ jobs:
       - name: Verify built extension bundle metadata and host relationship
         run: |
           host="$RUNNER_TEMP/ascf-derived/Build/Products/Debug/ASCFHost.app/Contents/Info.plist"
-          ext="$RUNNER_TEMP/ascf-derived/Build/Products/Debug/ASCFHost.app/Contents/PlugIns/ASCFExtension.appex/Contents/Info.plist"
+          ext="$RUNNER_TEMP/ascf-derived/Build/Products/Debug/ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/Info.plist"
           test -f "$host" && test -f "$ext"
           value() { plutil -extract "$1" raw -o - "$2"; }
           test "$(value CFBundleIdentifier "$host")" = "org.chriscoveries.applesauce.ascfhost"

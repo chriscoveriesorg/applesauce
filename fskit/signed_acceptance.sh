@@ -63,9 +63,9 @@ PY
 verify_host() {
   local host="$1" out="$2"
   verify_bundle "$host" com.apple.developer.fskit.mount host "$out"
-  verify_bundle "$host/Contents/PlugIns/ASCFExtension.appex" \
+  verify_bundle "$host/Contents/Extensions/ASCFExtension.appex" \
     com.apple.developer.fskit.fsmodule extension "$out"
-  local extension="$host/Contents/PlugIns/ASCFExtension.appex"
+  local extension="$host/Contents/Extensions/ASCFExtension.appex"
   /usr/bin/codesign -dv --verbose=4 "$host" > "$out/host.identity.txt" 2>&1
   /usr/bin/codesign -dv --verbose=4 "$extension" > "$out/extension.identity.txt" 2>&1
   # Entitlements alone are not product identity. Refuse a different signed

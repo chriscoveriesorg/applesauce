@@ -23,7 +23,8 @@ targets:
       - target: ASCFExtension
         embed: true
   ASCFExtension:
-    type: app-extension
+    # FSKit uses ExtensionKit discovery, not legacy PlugIns app extensions.
+    type: extensionkit-extension
     platform: macOS
     sources:
       - ASCFExtension
