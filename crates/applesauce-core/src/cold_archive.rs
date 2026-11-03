@@ -290,7 +290,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             return Err(invalid("truncated cold-file chunk index"));
         }
         let mut entries = Vec::new();
-    entries.try_reserve_exact(count).map_err(io::Error::other)?;
+        entries.try_reserve_exact(count).map_err(io::Error::other)?;
         let mut offset = index_end;
         let mut remaining = logical_size;
         for _ in 0..count {
