@@ -29,5 +29,5 @@ targets:
         CODE_SIGN_ENTITLEMENTS: ASCFExtension/Extension.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h"
         LIBRARY_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../target/release"
-        OTHER_LDFLAGS: "$(inherited) -lapplesauce_fskit_bridge -framework Compression"
+        OTHER_LDFLAGS: "$(inherited) -lapplesauce_fskit_bridge -lcompression"
         SWIFT_VERSION: "5.0"
