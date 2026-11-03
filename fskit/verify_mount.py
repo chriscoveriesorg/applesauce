@@ -93,15 +93,16 @@ def verify_mount(mount, original, require_real_mount=True):
     finally:
         os.close(source_fd)
 
-    # An O_WRONLY open should fail before any write attempt. Never send
-    # write(), O_CREAT, unlink(), xattr changes, or renames to a mount.
-    try:
-        writable_fd = os.open(mounted, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
-    except OSError as error:
-        require(error.errno in DENIED, f"unexpected write-open error: {error}")
-    else:
-        os.close(writable_fd)
-        raise MountCheckError("mounted file permitted write access")
+    # Both write-only and read-write opens must fail. Never send write(),
+    # O_CREAT, unlink(), xattr changes, or renames to a mount.
+    for access in (os.O_WRONLY, os.O_RDWR):
+        try:
+            writable_fd = os.open(mounted, access | getattr(os, "O_CLOEXEC", 0))
+        except OSError as error:
+            require(error.errno in DENIED, f"unexpected write-open error: {error}")
+        else:
+            os.close(writable_fd)
+            raise MountCheckError("mounted file permitted write access")
 
     return {"result": "pass", "mount": str(mount), "restored_file": entry.name,
             "logical_bytes": original_size, "sha256": original_sha,
@@ -122,7 +123,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.restored.write_bytes(payload)
 
     def readonly_open(self, *args, **kwargs):
-        if Path(args[0]).resolve() == self.restored.resolve() and args[1] & os.O_ACCMODE == os.O_WRONLY:
+        if Path(args[0]).resolve() == self.restored.resolve() and args[1] & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
             raise OSError(errno.EROFS, "read-only filesystem")
         return self.real_open(*args, **kwargs)
 
@@ -161,6 +162,18 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(MountCheckError, "permitted write"):
             verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertEqual(original_sha, digest(self.restored))
+
+    def test_readwrite_open_refused_even_if_writeonly_denied(self):
+        real_open = os.open
+
+        def selective_open(path, flags, *args, **kwargs):
+            if Path(path).resolve() == self.restored.resolve() and flags & os.O_ACCMODE == os.O_WRONLY:
+                raise OSError(errno.EROFS, "write-only denied")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=selective_open):
+            with self.assertRaisesRegex(MountCheckError, "permitted write"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
 
     def test_nonmount_path_refused_by_default(self):
         with self.assertRaisesRegex(MountCheckError, "mount point"):
