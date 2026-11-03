@@ -24,7 +24,7 @@ targets:
       - ASCFExtension
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.chriscoveries.applesauce.ascf
+        PRODUCT_BUNDLE_IDENTIFIER: org.chriscoveries.applesauce.ascfhost.ascfextension
         INFOPLIST_FILE: ASCFExtension/Info.plist
         CODE_SIGN_ENTITLEMENTS: ASCFExtension/Extension.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h"

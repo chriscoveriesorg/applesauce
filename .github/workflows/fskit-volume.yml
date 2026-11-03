@@ -46,4 +46,16 @@ jobs:
         run: |
           xcodebuild -project fskit/ApplesauceASCF.xcodeproj \
             -scheme ASCFHost -configuration Debug \
+            -derivedDataPath "$RUNNER_TEMP/ascf-derived" \
             CODE_SIGNING_ALLOWED=NO build
+      - name: Verify built extension bundle metadata and host relationship
+        run: |
+          host="$RUNNER_TEMP/ascf-derived/Build/Products/Debug/ASCFHost.app/Contents/Info.plist"
+          ext="$RUNNER_TEMP/ascf-derived/Build/Products/Debug/ASCFHost.app/Contents/PlugIns/ASCFExtension.appex/Contents/Info.plist"
+          test -f "$host" && test -f "$ext"
+          value() { plutil -extract "$1" raw -o - "$2"; }
+          test "$(value CFBundleIdentifier "$host")" = "org.chriscoveries.applesauce.ascfhost"
+          test "$(value CFBundleIdentifier "$ext")" = "org.chriscoveries.applesauce.ascfhost.ascfextension"
+          test "$(value CFBundlePackageType "$ext")" = "XPC!"
+          test "$(value EXAppExtensionAttributes.EXExtensionPointIdentifier "$ext")" = "com.apple.fskit.fsmodule"
+          test "$(value EXAppExtensionAttributes.FSShortName "$ext")" = "ascf"
