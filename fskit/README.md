@@ -124,11 +124,30 @@ generates matching synthetic cleartext plus LZRaven/LZMesh archives, creates
 one payload-corrupted ASCF fixture per codec, and confirms both corrupted
 fixtures fail CLI verification. It writes an isolated directory with
 `ASCFHost.app`, `SHA256SUMS`, fixture generation/build logs,
-`NEXT-STEPS.txt` and originals. Test the two valid files for mounted
-readback, normal unmount and remount; then attempt to mount both damaged
-archives and retain macOS rejection evidence. CLI verification proves that
+`NEXT-STEPS.txt`, the original test data and **copies of both acceptance scripts**.
+The manifest includes the scripts and every fixture; a copied folder can be
+verified without Rust or the original repository checkout. Test the two valid
+files for mounted readback, normal unmount and remount; then attempt to mount
+both damaged archives and retain macOS rejection evidence. CLI verification proves that
 damaged data fails the archive decoder; only a real FSKit mount refusal
 qualifies the signed integration. The command itself never mounts anything.
+
+To run acceptance on a separate authorized Mac, copy the generated directory
+as a unit, install/enable the included signed host, and mount the archive from
+the host UI. Then use the **bundled** script from inside that copied directory:
+
+```sh
+cd /path/to/ascf-acceptance.XXXXXXXX
+bash fskit/signed_acceptance.sh bundle-readback . \
+  "/Volumes/Applesauce ASCF" lzmesh
+```
+
+The command validates the relative SHA256SUMS manifest, signed host and
+extension entitlements, the actual `ascf` mount type, SHA-256, random reads,
+EOF, denied write-open and the expected restored filename `source.lzmesh`.
+Repeat using `lzraven` after remounting its archive. The result includes the
+path to `readback.json` for subsequent `unmounted` verification. Neither
+`bundle-readback` nor `unmounted` installs, mounts or edits a volume.
 
 The script verifies the host and extension code signatures **and** checks
 that both signed entitlements are allowed in their embedded provisioning
