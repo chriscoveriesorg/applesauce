@@ -22,7 +22,7 @@ Xcode/macOS SDK:
     xcodebuild -project fskit/ApplesauceASCF.xcodeproj \
       -scheme ASCFHost -configuration Debug CODE_SIGNING_ALLOWED=NO build
 
-Installing and mounting requires a valid developer signing identity,
+The volume identifier is derived deterministically from the verified logical digest,\ncodec selector, and selected archive URL. FSKit sees the same container/volume\nidentity at probe and load, and remounting the same archive preserves its\nidentity. Distinct Raven and Mesh archives remain distinguishable even when\nthey restore identical logical bytes. Unload resets the container readiness.\n\nInstalling and mounting requires a valid developer signing identity,
 FSKit entitlement and explicit local extension enablement. The CI build
 type-checks the extension but does not install, approve, or mount it. End-to-end
 mounted readback needs an authorized disposable macOS host. The ASCF format

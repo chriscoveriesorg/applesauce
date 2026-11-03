@@ -33,7 +33,7 @@ final class ASCFVolume: FSVolume {
     private let root: ASCFItem
     private let file: ASCFItem
 
-    init(handle: OpaquePointer, info: AscfInfo, archiveName: String) {
+    init(handle: OpaquePointer, info: AscfInfo, archiveName: String, identifier: UUID) {
         self.handle = handle
         let safeName = archiveName.isEmpty || archiveName == "." || archiveName == ".."
             ? "restored" : archiveName
@@ -43,7 +43,7 @@ final class ASCFVolume: FSVolume {
         file = ASCFItem(name: FSFileName(string: safeName),
                         fileID: FSItem.Identifier(rawValue: FSItem.Identifier.rootDirectory.rawValue + 1) ?? .invalid,
                         parentID: .rootDirectory, type: .file, size: info.logical_size)
-        super.init(volumeID: FSVolume.Identifier(uuid: UUID()),
+        super.init(volumeID: FSVolume.Identifier(uuid: identifier),
                    volumeName: FSFileName(string: "Applesauce ASCF"))
     }
 

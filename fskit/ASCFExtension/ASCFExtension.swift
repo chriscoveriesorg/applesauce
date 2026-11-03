@@ -3,6 +3,7 @@
 import Foundation
 import FSKit
 import Darwin
+import CryptoKit
 
 @main
 struct ASCFExtension: UnaryFileSystemExtension {
@@ -43,15 +44,22 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
     }
 
-    // Derive a stable container ID from the verified logical-content digest.
-    // A volume exposes exactly one file and does not invent filesystem paths.
-    private static func identifier(for info: AscfInfo) -> FSContainerIdentifier {
-        let bytes = withUnsafeBytes(of: info.logical_sha256) { Array($0.prefix(16)) }
-        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+    // A unary FSKit container and its volume must advertise the SAME UUID.
+    // Make it stable across probe/load and unmount/remount, and distinguish
+    // two archives with identical logical bytes but different codecs or paths.
+    // Random volume IDs break the identity FSKit established during probe.
+    private static func identifier(for info: AscfInfo, archiveURL: URL) -> UUID {
+        var material = Data("applesauce-ascf-volume-v1".utf8)
+        var codec = info.codec_selector.littleEndian
+        withUnsafeBytes(of: &codec) { material.append(contentsOf: $0) }
+        withUnsafeBytes(of: info.logical_sha256) { material.append(contentsOf: $0) }
+        material.append(contentsOf: archiveURL.standardizedFileURL.path.utf8)
+        let hex = SHA256.hash(data: material).prefix(16)
+            .map { String(format: "%02x", $0) }.joined()
         let uuid = String(hex.prefix(8)) + "-" + String(hex.dropFirst(8).prefix(4))
             + "-" + String(hex.dropFirst(12).prefix(4)) + "-"
             + String(hex.dropFirst(16).prefix(4)) + "-" + String(hex.dropFirst(20))
-        return FSContainerIdentifier(uuid: UUID(uuidString: uuid)!)
+        return UUID(uuidString: uuid)!
     }
 
     func probeResource(
@@ -73,7 +81,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             // The mount path independently verifies again before publication.
             let (handle, info) = try Self.openArchive(url, verify: true)
             defer { ascf_close(handle) }
-            replyHandler(.usable(name: "Applesauce ASCF", containerID: Self.identifier(for: info)), nil)
+            replyHandler(.usable(name: "Applesauce ASCF", containerID: FSContainerIdentifier(uuid: Self.identifier(for: info, archiveURL: url))), nil)
         } catch {
             replyHandler(.notRecognized, nil)
         }
@@ -105,7 +113,8 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             // Full verification is a mandatory pre-publication gate.
             let (handle, info) = try Self.openArchive(url, verify: true)
             let mounted = ASCFVolume(
-                handle: handle, info: info, archiveName: url.deletingPathExtension().lastPathComponent
+                handle: handle, info: info, archiveName: url.deletingPathExtension().lastPathComponent,
+                identifier: Self.identifier(for: info, archiveURL: url)
             )
             volume = mounted
             scopedURL = url
@@ -127,6 +136,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         volume = nil
         scopedURL?.stopAccessingSecurityScopedResource()
         scopedURL = nil
+        containerStatus = .notReady
         reply(nil)
     }
 
