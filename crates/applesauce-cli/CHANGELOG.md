@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.31](https://github.com/chriscoveriesorg/applesauce/releases/tag/applesauce-cli/v0.5.31) - 2026-11-03
+
+### Added
+- Add explicit `archive create`, `archive verify`, and `archive extract` commands for versioned LZRAVEN/LZMESH cold-file archives on supported macOS 27 hosts. Archives are chunked, seekable, checksum-verified, and use safe no-overwrite publication.
+- Add corruption refusal and byte-identical archive round-trip tests on the macOS 27 CI runner.
+
+### Safety
+- These commands create independent `.ascf` archives and restored files. Native transparent APFS Raven/Mesh writing remains gated on verified kernel decoder support and framing.
+
 ## [0.5.30](https://github.com/Dr-Emann/applesauce/compare/applesauce-cli-v0.5.29...applesauce-cli-v0.5.30) - 2026-09-27
 
 ### Fixed
