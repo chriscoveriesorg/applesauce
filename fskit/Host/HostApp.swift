@@ -84,32 +84,35 @@ private struct ASCFMountView: View {
         }
     }
 
+    // Treat an FSClient mount callback as provisional until the VFS reports
+    // the actual ASCF filesystem with the kernel's read-only flag. A successful
+    // callback alone does not establish that the expected extension mounted.
+    // Reuse this gate when recovering mounts after a host relaunch.
+    private func isVerifiedReadOnlyASCFMount(_ volume: URL) -> Bool {
+        guard volume.path.hasPrefix("/Volumes/") else { return false }
+        // Swift imports Darwin's statfs structure with the same name as its
+        // C function. fstatfs binds the check to the directory we opened.
+        let fd = volume.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard fd >= 0 else { return false }
+        defer { _ = Darwin.close(fd) }
+        var info = statfs()
+        guard Darwin.fstatfs(fd, &info) == 0 else { return false }
+        let type = withUnsafeBytes(of: info.f_fstypename) { bytes in
+            String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+        return type == "ascf" && (info.f_flags & UInt32(MNT_RDONLY)) != 0
+    }
+
     // A host restart must not strand an already mounted archive. Recover
-    // active volumes by the kernel filesystem type and read-only mount flag;
-    // the volume label alone is user-controlled and is not an identity test.
+    // only kernel-confirmed read-only ASCF volumes, never a matching label.
     private func mountedASCFVolumes() -> [URL] {
         let mounted = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: nil, options: []
         ) ?? []
-        return mounted.filter { volume in
-            guard volume.path.hasPrefix("/Volumes/") else { return false }
-            // Swift imports Darwin's statfs structure with the same name as
-            // its C function. Open the mount directory read-only and use
-            // fstatfs(2), which binds the result to the opened volume and
-            // avoids that name collision on the macOS 27 SDK.
-            let fd = volume.withUnsafeFileSystemRepresentation { path -> Int32 in
-                guard let path else { return -1 }
-                return Darwin.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
-            }
-            guard fd >= 0 else { return false }
-            defer { _ = Darwin.close(fd) }
-            var info = statfs()
-            guard Darwin.fstatfs(fd, &info) == 0 else { return false }
-            let type = withUnsafeBytes(of: info.f_fstypename) { bytes in
-                String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
-            }
-            return type == "ascf" && (info.f_flags & UInt32(MNT_RDONLY)) != 0
-        }
+        return mounted.filter { isVerifiedReadOnlyASCFMount($0) }
     }
 
     private func reconcileMountedVolumes() {
@@ -182,8 +185,13 @@ private struct ASCFMountView: View {
                 if let error {
                     status = "Mount failed: \(error.localizedDescription)"
                 } else if let mounted {
+                    guard isVerifiedReadOnlyASCFMount(mounted) else {
+                        mountedURL = nil
+                        status = "FSKit returned a mount without verified ASCF read-only VFS identity at \(mounted.path). Inspect the mount manually; acceptance is blocked."
+                        return
+                    }
                     mountedURL = mounted
-                    status = "Mounted at \(mounted.path)"
+                    status = "Verified read-only ASCF mount at \(mounted.path)"
                 } else {
                     status = "FSKit returned no mounted volume."
                 }
