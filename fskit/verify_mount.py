@@ -30,7 +30,7 @@ def require(ok, message):
         raise MountCheckError(message)
 
 
-def digest(path, nofollow=False):
+def digest(path, nofollow=False, include_identity=False):
     total = 0
     checksum = hashlib.sha256()
     if nofollow:
@@ -40,6 +40,7 @@ def digest(path, nofollow=False):
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags)
     try:
+        identity = os.fstat(fd)
         with os.fdopen(fd, "rb", buffering=0) as source:
             fd = -1
             while True:
@@ -51,7 +52,8 @@ def digest(path, nofollow=False):
     finally:
         if fd >= 0:
             os.close(fd)
-    return total, checksum.hexdigest()
+    result = (total, checksum.hexdigest())
+    return (*result, (identity.st_dev, identity.st_ino)) if include_identity else result
 
 
 def signed_mount_identity(mount):
@@ -117,7 +119,8 @@ def verify_mount(mount, original, require_real_mount=True):
     require(not os.path.samefile(original, mounted), "source and mounted file are identical")
 
     original_size, original_sha = digest(original)
-    mounted_size, mounted_sha = digest(mounted, nofollow=True)
+    mounted_size, mounted_sha, mounted_identity = digest(
+        mounted, nofollow=True, include_identity=True)
     require(original_size == mounted_size, "mounted logical byte length differs")
     require(original_sha == mounted_sha, "full mounted SHA-256 differs from cleartext")
 
@@ -128,6 +131,9 @@ def verify_mount(mount, original, require_real_mount=True):
     try:
         mounted_fd = os.open(mounted, read_flags | os.O_NOFOLLOW)
         try:
+            mounted_stat = os.fstat(mounted_fd)
+            require((mounted_stat.st_dev, mounted_stat.st_ino) == mounted_identity,
+                    "mounted file changed between digest and random reads")
             offsets = sampled_offsets(original_size)
             for offset in offsets:
                 length = min(READ_BYTES, original_size - offset + 1)
@@ -229,6 +235,36 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped, "symlink replacement must be exercised")
         self.assertEqual(raised.exception.errno, errno.ELOOP)
+
+    def test_mounted_regular_file_swap_rejected_after_digest(self):
+        # A different regular file with matching sampled bytes must not
+        # replace the file whose complete SHA-256 was authenticated.
+        real_open = os.open
+        restored_parent = self.restored.parent.resolve(strict=True)
+        opens = 0
+        swapped = False
+
+        def swap_after_digest(path, flags, *args, **kwargs):
+            nonlocal opens, swapped
+            candidate = Path(path)
+            if (candidate.name == self.restored.name
+                    and candidate.parent.resolve(strict=True) == restored_parent
+                    and flags & os.O_ACCMODE == os.O_RDONLY):
+                opens += 1
+                if opens == 2:
+                    replacement = self.mount / "replacement"
+                    replacement.write_bytes(self.restored.read_bytes())
+                    replacement.replace(self.restored)
+                    swapped = True
+            if (candidate.name == self.restored.name
+                    and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)):
+                raise OSError(errno.EROFS, "read-only filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=swap_after_digest):
+            with self.assertRaisesRegex(MountCheckError, "changed between digest"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(swapped, "regular-file replacement must be exercised")
 
     def test_extra_file_refused(self):
         (self.mount / "unexpected").write_bytes(b"")
