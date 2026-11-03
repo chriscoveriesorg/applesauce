@@ -249,7 +249,9 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_close(handle) };
 
-        let mut damaged = std::fs::read(temp.path()).unwrap();
+        // Start from the valid pre-mutation snapshot so both corruption
+        // checks exercise the decoder against independently damaged sources.
+        let mut damaged = before;
         let second = u64::from_le_bytes(damaged[112..120].try_into().unwrap()) as usize;
         damaged[second] ^= 0xff;
         let damaged_file = file_for(&damaged);
