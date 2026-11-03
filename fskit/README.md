@@ -111,6 +111,25 @@ bash fskit/signed_acceptance.sh readback \
   "/path/to/generated/source.jsonl"
 ```
 
+For a single signed handoff containing both independently verified codecs,
+use:
+
+```sh
+export ASCFSKIT_TEAM_ID=YOUR_10_CHARACTER_TEAM_ID
+bash fskit/signed_acceptance.sh package
+```
+
+The `package` command builds and verifies a signed host and extension,
+generates matching synthetic cleartext plus LZRaven/LZMesh archives, creates
+one payload-corrupted ASCF fixture per codec, and confirms both corrupted
+fixtures fail CLI verification. It writes an isolated directory with
+`ASCFHost.app`, `SHA256SUMS`, fixture generation/build logs,
+`NEXT-STEPS.txt` and originals. Test the two valid files for mounted
+readback, normal unmount and remount; then attempt to mount both damaged
+archives and retain macOS rejection evidence. CLI verification proves that
+damaged data fails the archive decoder; only a real FSKit mount refusal
+qualifies the signed integration. The command itself never mounts anything.
+
 The script verifies the host and extension code signatures **and** checks
 that both signed entitlements are allowed in their embedded provisioning
 profiles. A development/ad-hoc signature without those capabilities fails.
