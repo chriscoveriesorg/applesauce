@@ -12,6 +12,7 @@ Usage:
   bash fskit/signed_acceptance.sh signed-build
   bash fskit/signed_acceptance.sh fixture [lzraven|lzmesh]
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
+  bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
 
 signed-build: set ASCFSKIT_TEAM_ID to your Apple Developer Team ID, with
 FSKit mount and module capabilities enabled for their respective App IDs.
@@ -20,6 +21,8 @@ The script requires XcodeGen, Rust and the macOS 27 SDK.
 fixture: creates an independent, synthetic >8 MiB original and verified ASCF.
 readback: checks signed host + extension provisioned capabilities and runs
 actual statfs, SHA-256, unaligned reads, EOF and denied write-open acceptance.
+unmounted: after normal host/Finder unmount, prove a previously verified
+ASCF mount is gone using its successful readback JSON as evidence.
 Each command uses a new temporary directory and preserves existing data.
 No installation, elevation, mounting, unmounting or APFS writes are automated.
 HELP
@@ -126,6 +129,37 @@ PY
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
     printf 'Readback evidence: %s\n' "$out"
+    ;;
+  unmounted)
+    test "$#" -eq 3 || die "unmounted requires MOUNT_DIR READBACK_JSON"
+    mac_only
+    need python3
+    test -f "$3" || die "previous readback report missing: $3"
+    out="$(mktemp -d /tmp/ascf-unmounted.XXXXXXXX)"
+    /usr/bin/sw_vers > "$out/macos.txt"
+    /sbin/mount > "$out/mounts-after-unmount.txt"
+    /usr/bin/python3 - "$2" "$3" > "$out/unmounted.json" <<'PY'
+import json
+import os
+import sys
+
+mount = os.path.abspath(os.path.normpath(sys.argv[1]))
+if not mount.startswith("/Volumes/"):
+    sys.exit("unmounted: expected an FSKit mount path under /Volumes")
+with open(sys.argv[2], encoding="utf-8") as source:
+    previous = json.load(source)
+if previous.get("result") != "pass" or previous.get("filesystem_type") != "ascf":
+    sys.exit("unmounted: previous report did not pass the real ASCF mount gate")
+if os.path.abspath(os.path.normpath(previous.get("mount", ""))) != mount:
+    sys.exit("unmounted: path differs from the verified ASCF mount")
+if os.path.ismount(mount):
+    sys.exit("unmounted: FSKit volume is still mounted")
+print(json.dumps({"result": "pass", "mount": mount,
+                  "previous_sha256": previous.get("sha256"),
+                  "unmounted": True}, sort_keys=True, indent=2))
+PY
+    cat "$out/unmounted.json"
+    printf 'Unmount evidence: %s\n' "$out"
     ;;
   --help|-h|help) usage ;;
   *) usage; exit 2 ;;

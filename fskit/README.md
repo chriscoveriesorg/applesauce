@@ -121,9 +121,22 @@ SHA-256, randomized/boundary/EOF reads and denied write-opens. Each command
 writes evidence to a unique temporary directory and prints its path.
 Never use private source files for this test.
 
-Repeat `readback` after normal Finder/host unmount and remount. Collect both
-JSON reports, Xcode build logs, signed entitlement/profile snapshots,
-macOS build and normal unmount evidence. Signing requires the Apple Developer
+After successful `readback`, use **Unmount read-only volume** in the host or
+Finder's normal eject action, then prove that the previously verified mount
+has disappeared. This command requires the successful `readback.json` from
+that same volume; it will refuse an unrelated path or a still-mounted volume:
+
+```sh
+bash fskit/signed_acceptance.sh unmounted \
+  "/Volumes/Applesauce ASCF" "/tmp/ascf-readback.EXAMPLE/readback.json"
+```
+
+Remount the original synthetic archive through the host UI and run `readback`
+again, retaining both JSON reports and the unmount evidence. The host uses
+FileManager's asynchronous volume unmount API rather than device ejection,
+so busy volumes are reported without a forced unmount or device action.
+Collect the Xcode build logs, signed entitlement/profile snapshots, and
+macOS build with the complete lifecycle evidence. Signing requires the Apple Developer
 team to provision `com.apple.developer.fskit.mount` and
 `com.apple.developer.fskit.fsmodule`. The script intentionally does not install
 an extension, request privileges, mount or force-unmount it. Owner-run

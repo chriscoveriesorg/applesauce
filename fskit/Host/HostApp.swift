@@ -106,24 +106,17 @@ private struct ASCFMountView: View {
         guard !isWorking, mountedURL?.standardizedFileURL == url.standardizedFileURL else { return }
         isWorking = true
         status = "Unmounting the read-only volume..."
-        // NSWorkspace can block while open files drain. Keep the UI responsive,
-        // let macOS refuse a busy mount, and leave the source archive unchanged.
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result: Result<Void, Error>
-            do {
-                try NSWorkspace.shared.unmountAndEjectDevice(at: url)
-                result = .success(())
-            } catch {
-                result = .failure(error)
-            }
+        // FSKit publishes a logical volume, not an ejectable disk device.
+        // FileManager's asynchronous volume unmount handles virtual mounts,
+        // reports busy-volume failures and never requests forced ejection.
+        FileManager.default.unmountVolume(at: url, options: []) { error in
             DispatchQueue.main.async {
                 isWorking = false
-                switch result {
-                case .success:
+                if let error {
+                    status = "Unmount failed: \(error.localizedDescription)"
+                } else {
                     mountedURL = nil
                     status = "Unmounted read-only archive."
-                case .failure(let error):
-                    status = "Unmount failed: \(error.localizedDescription)"
                 }
             }
         }
