@@ -248,7 +248,7 @@ def verify_mount(mount, original, require_real_mount=True):
     # O_CREAT, unlink(), xattr changes, or renames to a mount.
     for access in (os.O_WRONLY, os.O_RDWR):
         try:
-            writable_fd = os.open(mounted, access | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW)
+            writable_fd = os.open(mounted, access | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0) | os.O_NOFOLLOW)
         except OSError as error:
             require(error.errno in DENIED, f"unexpected write-open error: {error}")
         else:
@@ -353,6 +353,28 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                                         "mounted changed during random-read verification"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(mutated)
+
+    def test_write_open_is_nonblocking_if_mount_entry_becomes_fifo(self):
+        # A mounted entry may change between digest and the negative write
+        # probes. Never let a swapped FIFO block the acceptance process.
+        if not hasattr(os, "O_NONBLOCK"):
+            self.skipTest("nonblocking opens unavailable")
+        real_open = os.open
+        probed = []
+
+        def deny_writes(path, flags, *args, **kwargs):
+            if (Path(path) == self.restored
+                    and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)):
+                probed.append(flags & os.O_ACCMODE)
+                self.assertTrue(flags & os.O_NONBLOCK,
+                                "write probe must not block on a swapped FIFO")
+                raise OSError(errno.EROFS, "read-only filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=deny_writes):
+            result = verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertEqual(result["result"], "pass")
+        self.assertEqual(probed, [os.O_WRONLY, os.O_RDWR])
 
     def test_fifo_swap_does_not_block_digest_open(self):
         # A regular path can become a FIFO after the initial type check.
