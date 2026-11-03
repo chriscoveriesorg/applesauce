@@ -65,10 +65,28 @@ verify_host() {
   verify_bundle "$host" com.apple.developer.fskit.mount host "$out"
   verify_bundle "$host/Contents/PlugIns/ASCFExtension.appex" \
     com.apple.developer.fskit.fsmodule extension "$out"
+  local extension="$host/Contents/PlugIns/ASCFExtension.appex"
   /usr/bin/codesign -dv --verbose=4 "$host" > "$out/host.identity.txt" 2>&1
-  /usr/bin/codesign -dv --verbose=4 \
-    "$host/Contents/PlugIns/ASCFExtension.appex" \
-    > "$out/extension.identity.txt" 2>&1
+  /usr/bin/codesign -dv --verbose=4 "$extension" > "$out/extension.identity.txt" 2>&1
+  # Entitlements alone are not product identity. Refuse a different signed
+  # extension or a host/extension signed by different developer teams.
+  local host_id extension_id host_team extension_team
+  host_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$host/Contents/Info.plist")" \
+    || die "signed host bundle identifier unavailable"
+  extension_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$extension/Contents/Info.plist")" \
+    || die "signed extension bundle identifier unavailable"
+  test "$host_id" = "org.chriscoveries.applesauce.ascfhost" \
+    || die "unexpected signed host bundle ID: $host_id"
+  test "$extension_id" = "$host_id.ascfextension" \
+    || die "extension is not the ASCF module belonging to the signed host: $extension_id"
+  host_team="$(/usr/bin/sed -n 's/^TeamIdentifier=//p' "$out/host.identity.txt" | /usr/bin/head -n 1)"
+  extension_team="$(/usr/bin/sed -n 's/^TeamIdentifier=//p' "$out/extension.identity.txt" | /usr/bin/head -n 1)"
+  test -n "$host_team" && test "$host_team" != "not set" \
+    || die "signed host lacks an Apple Developer team identity"
+  test "$extension_team" = "$host_team" \
+    || die "signed extension and host have different developer team identities"
+  printf 'Verified bundle IDs: %s / %s; signing team: %s\n' \
+    "$host_id" "$extension_id" "$host_team" > "$out/host-extension-identity.txt"
 }
 if test "$#" -eq 0; then usage; exit 2; fi
 case "$1" in
