@@ -10,6 +10,7 @@ import errno
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -53,6 +54,32 @@ def digest(path, nofollow=False):
     return total, checksum.hexdigest()
 
 
+def signed_mount_identity(mount):
+    """Require the actual ASCF FSKit filesystem and record macOS provenance.
+
+    A generic disk image or APFS volume containing one matching file cannot
+    satisfy signed FSKit acceptance. FSKit publishes this type through its
+    FSStatFSResult(fileSystemTypeName: "ascf") implementation.
+    """
+    require(sys.platform == "darwin", "signed FSKit acceptance requires macOS")
+
+    def output(*command):
+        try:
+            result = subprocess.run(command, check=True, text=True,
+                                    capture_output=True, timeout=10)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise MountCheckError(f"cannot inspect mounted FSKit provenance: {error}") from error
+        value = result.stdout.strip()
+        require(bool(value), f"empty mount provenance from {command[0]}")
+        return value
+
+    kind = output("/usr/bin/stat", "-f", "%T", str(mount))
+    require(kind == "ascf", f"expected ASCF FSKit mount, found filesystem type {kind!r}")
+    return {"filesystem_type": kind,
+            "macos_version": output("/usr/bin/sw_vers", "-productVersion"),
+            "macos_build": output("/usr/bin/sw_vers", "-buildVersion")}
+
+
 def sampled_offsets(size):
     # Exercise offset mapping throughout large files, including the first,
     # middle and final independent blocks. The number of reads is bounded:
@@ -76,8 +103,10 @@ def verify_mount(mount, original, require_real_mount=True):
     mount = Path(mount).resolve(strict=True)
     original = Path(original).resolve(strict=True)
     require(mount.is_dir(), "mount argument is not a directory")
+    mount_identity = {}
     if require_real_mount:
         require(os.path.ismount(mount), "path is not a filesystem mount point")
+        mount_identity = signed_mount_identity(mount)
     require(original.is_file(), "original cleartext is not a regular file")
     with os.scandir(mount) as scanner:
         entries = list(scanner)
@@ -129,7 +158,8 @@ def verify_mount(mount, original, require_real_mount=True):
 
     return {"result": "pass", "mount": str(mount), "restored_file": entry.name,
             "logical_bytes": original_size, "sha256": original_sha,
-            "random_read_offsets": offsets, "readonly_open_denied": True}
+            "random_read_offsets": offsets, "readonly_open_denied": True,
+            **mount_identity}
 
 
 class SyntheticAcceptanceTests(unittest.TestCase):
@@ -304,6 +334,43 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 "os.pread", side_effect=bad_pread):
             with self.assertRaisesRegex(MountCheckError, "beyond EOF"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
+
+    def check_signed_gate(self, filesystem_type):
+        # The signed acceptance path must use macOS statfs, rather than
+        # accepting an unrelated mounted disk with one matching file.
+        self.real_open = os.open
+        seen = []
+
+        def command(argv, **kwargs):
+            seen.append(tuple(argv))
+            if argv[:3] == ("/usr/bin/stat", "-f", "%T"):
+                value = filesystem_type
+            elif argv == ("/usr/bin/sw_vers", "-productVersion"):
+                value = "27.2"
+            elif argv == ("/usr/bin/sw_vers", "-buildVersion"):
+                value = "26B123"
+            else:
+                raise AssertionError(f"unexpected provenance command: {argv}")
+            return subprocess.CompletedProcess(argv, 0, stdout=value + "\n", stderr="")
+
+        with mock.patch("sys.platform", "darwin"), mock.patch(
+            "os.path.ismount", return_value=True
+        ), mock.patch("subprocess.run", side_effect=command), mock.patch(
+            "os.open", side_effect=self.readonly_open
+        ):
+            outcome = verify_mount(self.mount, self.original)
+        return outcome, seen
+
+    def test_real_mount_gate_records_fskit_identity_and_macos_build(self):
+        report, seen = self.check_signed_gate("ascf")
+        self.assertEqual(report["filesystem_type"], "ascf")
+        self.assertEqual(report["macos_version"], "27.2")
+        self.assertEqual(report["macos_build"], "26B123")
+        self.assertEqual(len(seen), 3)
+
+    def test_real_mount_gate_rejects_unrelated_apfs_volume(self):
+        with self.assertRaisesRegex(MountCheckError, "expected ASCF FSKit mount"):
+            self.check_signed_gate("apfs")
 
     def test_nonmount_path_refused_by_default(self):
         with self.assertRaisesRegex(MountCheckError, "mount point"):
