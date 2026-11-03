@@ -1,0 +1,104 @@
+name: Read-only native decoder binary evidence
+
+on:
+  pull_request:
+    paths:
+      - 'hack/decmpfs_binary_probe.py'
+      - 'hack/test_decmpfs_binary_probe.py'
+      - '.github/workflows/native-decoder-evidence.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'hack/decmpfs_binary_probe.py'
+      - 'hack/test_decmpfs_binary_probe.py'
+      - '.github/workflows/native-decoder-evidence.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-decoder-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 -m unittest discover -s hack -p 'test_decmpfs_binary_probe.py' -v
+
+  macos-binaries:
+    runs-on: xcode-27
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - name: Record source and host provenance
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/native-decoder-evidence"
+          {
+            printf 'source_commit=%s\n' "$GITHUB_SHA"
+            date -u '+utc=%Y-%m-%dT%H:%M:%SZ'
+            sw_vers
+            uname -srm
+            python3 --version
+          } | tee "$RUNNER_TEMP/native-decoder-evidence/environment.txt"
+      - name: Test synthetic binaries on the target host
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s hack -p 'test_decmpfs_binary_probe.py' -v \
+            2>&1 | tee "$RUNNER_TEMP/native-decoder-evidence/tests.log"
+      - name: Inspect existing kernel collections without executing or modifying them
+        run: |
+          set -euo pipefail
+          # Pure reads of selected Apple system binaries. No kext loading,
+          # filesystem conversion, mounts, xattrs or unknown decoder requests.
+          python3 hack/decmpfs_binary_probe.py --system \
+            > "$RUNNER_TEMP/native-decoder-evidence/binary-evidence.json"
+      - name: Summarize registration evidence and unresolved coverage
+        if: always()
+        run: |
+          python3 - "$RUNNER_TEMP/native-decoder-evidence/binary-evidence.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          if not path.exists() or not path.stat().st_size:
+              print("No binary report produced; inspect the failed collection step.")
+              sys.exit(0)
+          report = json.loads(path.read_text())
+          assert report["kind"] == "read-only-decmpfs-binary-evidence"
+          for key in ("kernel_decoder_proven", "codec_identity_proven",
+                      "on_disk_framing_proven", "native_raven_mesh_writes_permitted"):
+              assert report[key] is False
+          lines = ["## Read-only native decoder binary evidence", ""]
+          for item in report["inputs"]:
+              lines.append(f"{item['path']}: {item['status']}")
+              if "error" in item:
+                  lines.append(item["error"])
+              for error in item.get("member_errors", []):
+                  lines.append(f"Member unavailable: {error['image']}: {error['error']}")
+              for image in item.get("images", []):
+                  lines.append(f"{image['image']}: {image['symbol_count']} symbols, "
+                               f"{len(image['registration_calls'])} direct registration callsites")
+                  for call in image["registration_calls"]:
+                      lines.append(f"  {call['call_address']}: "
+                                   f"type candidate={call['type_constant_candidate']}; "
+                                   f"table candidate={call['registration_pointer_candidate']}")
+          lines.extend(["", "Raw callsite/table bytes, SHA-256 hashes and exact symbol matches are in the artifact.",
+                        "Native Raven/Mesh writer authorization remains false. Missing symbols/calls are inconclusive."])
+          text = "\n".join(lines) + "\n"
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+              handle.write(text)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-decoder-binary-${{ github.sha }}
+          path: ${{ runner.temp }}/native-decoder-evidence/
+          retention-days: 30
+          if-no-files-found: error
