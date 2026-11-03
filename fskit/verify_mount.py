@@ -230,6 +230,15 @@ def verify_mount(mount, original, require_real_mount=True):
             # erroneous offset-to-chunk arithmetic on the FSKit read path.
             require(os.pread(mounted_fd, 32, original_size + 1) == b"",
                     "mounted read beyond EOF returned data")
+            # A descriptor can retain its inode while bytes change during
+            # random-read acceptance. Reject observable concurrent mutations.
+            for fd, before, label in ((source_fd, source_stat, "original"),
+                                      (mounted_fd, mounted_stat, "mounted")):
+                after = os.fstat(fd)
+                fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+                require(all(getattr(before, field) == getattr(after, field)
+                            for field in fields),
+                        f"{label} changed during random-read verification")
         finally:
             os.close(mounted_fd)
     finally:
@@ -316,6 +325,33 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "random-read mounted input is not a regular file"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertFalse(pread_called, "must reject nonregular descriptor before pread")
+
+    def test_random_reads_reject_concurrent_mounted_mutation(self):
+        # Mutate an unsampled byte during pread; metadata must expose the
+        # change even when the sampled readback windows still match.
+        real_pread = os.pread
+        mutated = False
+        mounted_inode = self.restored.stat().st_ino
+
+        def mutating_pread(fd, count, offset):
+            nonlocal mutated
+            result = real_pread(fd, count, offset)
+            if not mutated and os.fstat(fd).st_ino == mounted_inode:
+                mutated = True
+                with open(self.restored, "r+b") as stream:
+                    stream.seek(0)
+                    value = stream.read(1)
+                    stream.seek(0)
+                    stream.write(bytes([value[0] ^ 1]))
+            return result
+
+        self.real_open = os.open
+        with mock.patch("os.open", side_effect=self.readonly_open), mock.patch(
+                "os.pread", side_effect=mutating_pread):
+            with self.assertRaisesRegex(MountCheckError,
+                                        "mounted changed during random-read verification"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(mutated)
 
     def test_digest_rejects_nonregular_descriptor(self):
         # A pathname can change after directory enumeration. Do not read a
