@@ -229,9 +229,9 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "permitted write"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
 
-    def test_write_probes_do_not_follow_swapped_symlinks(self):
-        # A replacement after the readback phase must not cause write-open
-        # probes to follow a link to the original cleartext fixture.
+    def test_write_probes_require_nofollow(self):
+        # Require O_NOFOLLOW on both write-open probes, closing a potential
+        # symlink swap between verified readback and access checks.
         real_open = os.open
         original_inode = self.original.stat().st_ino
         restored_parent = self.restored.parent.resolve(strict=True)
