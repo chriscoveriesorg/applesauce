@@ -54,8 +54,8 @@ class DarwinStatFS(ctypes.Structure):
     ]
 
 
-def darwin_filesystem_type(mount):
-    """Read f_fstypename from statfs(2), not BSD stat(1)'s file-type %T."""
+def darwin_statfs(mount):
+    """Read the actual Darwin statfs(2) record, including VFS mount flags."""
     if ctypes.sizeof(DarwinStatFS) != 2168 or DarwinStatFS.f_fstypename.offset != 72:
         raise MountCheckError("unsupported Darwin statfs ABI layout")
     info = DarwinStatFS()
@@ -72,9 +72,18 @@ def darwin_filesystem_type(mount):
     if call(os.fsencode(mount), ctypes.byref(info)) != 0:
         code = ctypes.get_errno()
         raise MountCheckError(f"statfs failed for ASCF mount: {os.strerror(code)}")
-    name = info.f_fstypename.decode("ascii")
+    return info
+
+
+def darwin_filesystem_type(mount):
+    """Read f_fstypename from statfs(2), not BSD stat(1)'s file-type %T."""
+    name = darwin_statfs(mount).f_fstypename.decode("ascii")
     require(bool(name), "statfs returned an empty filesystem type")
     return name
+
+
+def darwin_mount_flags(mount):
+    return int(darwin_statfs(mount).f_flags)
 
 
 def require(ok, message):
@@ -130,7 +139,11 @@ def signed_mount_identity(mount):
 
     kind = darwin_filesystem_type(mount)
     require(kind == "ascf", f"expected ASCF FSKit mount, found filesystem type {kind!r}")
-    return {"filesystem_type": kind,
+    # VFS must acknowledge a kernel-level read-only mount. Handler-level
+    # EROFS responses remain mandatory defense in depth.
+    flags = darwin_mount_flags(mount)
+    require(flags & 0x1, "FSKit mount lacks Darwin MNT_RDONLY (kernel read-only flag)")
+    return {"filesystem_type": kind, "mount_flags": flags, "kernel_readonly": True,
             "macos_version": output("/usr/bin/sw_vers", "-productVersion"),
             "macos_build": output("/usr/bin/sw_vers", "-buildVersion")}
 
@@ -524,7 +537,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "beyond EOF"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
 
-    def check_signed_gate(self, filesystem_type):
+    def check_signed_gate(self, filesystem_type, mount_flags=1):
         # The signed acceptance path must use macOS statfs, rather than
         # accepting an unrelated mounted disk with one matching file.
         self.real_open = os.open
@@ -544,6 +557,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             "os.path.ismount", return_value=True
         ), mock.patch.object(
             sys.modules[__name__], "darwin_filesystem_type", return_value=filesystem_type
+        ), mock.patch.object(
+            sys.modules[__name__], "darwin_mount_flags", return_value=mount_flags
         ), mock.patch("subprocess.run", side_effect=command), mock.patch(
             "os.open", side_effect=self.readonly_open
         ):
@@ -593,6 +608,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
     def test_real_mount_gate_records_fskit_identity_and_macos_build(self):
         report, seen = self.check_signed_gate("ascf")
         self.assertEqual(report["filesystem_type"], "ascf")
+        self.assertEqual(report["mount_flags"], 1)
+        self.assertTrue(report["kernel_readonly"])
         self.assertEqual(report["macos_version"], "27.2")
         self.assertEqual(report["macos_build"], "26B123")
         self.assertEqual(len(seen), 2)
@@ -600,6 +617,12 @@ class SyntheticAcceptanceTests(unittest.TestCase):
     def test_real_mount_gate_rejects_unrelated_apfs_volume(self):
         with self.assertRaisesRegex(MountCheckError, "expected ASCF FSKit mount"):
             self.check_signed_gate("apfs")
+
+    def test_kernel_writable_mount_rejected_even_with_erofs_handlers(self):
+        # A writable VFS mount violates the read-only product contract even
+        # if individual open/write operations already return EROFS.
+        with self.assertRaisesRegex(MountCheckError, "MNT_RDONLY"):
+            self.check_signed_gate("ascf", mount_flags=0)
 
     def test_nonmount_path_refused_by_default(self):
         with self.assertRaisesRegex(MountCheckError, "mount point"):
