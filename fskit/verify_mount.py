@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Read-only acceptance check for a separately mounted ASCF FSKit volume.
+
+This never modifies the source, archive or mounted volume. Run against a signed,
+enabled FSKit extension on a disposable macOS host, with the original cleartext
+used to create the ASCF archive. --self-test runs portable synthetic tests.
+"""
+import argparse
+import errno
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+READ_BYTES = 1024 * 1024
+DENIED = {errno.EROFS, errno.EACCES, errno.EPERM}
+
+
+class MountCheckError(RuntimeError):
+    pass
+
+
+def require(ok, message):
+    if not ok:
+        raise MountCheckError(message)
+
+
+def digest(path):
+    total = 0
+    checksum = hashlib.sha256()
+    with open(path, "rb", buffering=0) as source:
+        while True:
+            data = source.read(READ_BYTES)
+            if not data:
+                break
+            total += len(data)
+            checksum.update(data)
+    return total, checksum.hexdigest()
+
+
+def sampled_offsets(size):
+    # Covers headers, both independent-block limits, interior and exact EOF.
+    values = {0, size, max(0, size - 1)}
+    for boundary in (4096, 65536, 8 * 1024 * 1024):
+        for delta in (-1, 0, 1):
+            values.add(min(size, max(0, boundary + delta)))
+    if size:
+        values.add(size // 2)
+    return sorted(values)
+
+
+def verify_mount(mount, original, require_real_mount=True):
+    mount = Path(mount).resolve(strict=True)
+    original = Path(original).resolve(strict=True)
+    require(mount.is_dir(), "mount argument is not a directory")
+    if require_real_mount:
+        require(os.path.ismount(mount), "path is not a filesystem mount point")
+    require(original.is_file(), "original cleartext is not a regular file")
+    with os.scandir(mount) as scanner:
+        entries = list(scanner)
+    require(len(entries) == 1, "ASCF mount must expose exactly one restored file")
+    entry = entries[0]
+    require(entry.is_file(follow_symlinks=False), "mounted entry is not a regular file")
+    mounted = mount / entry.name
+    require(not os.path.samefile(original, mounted), "source and mounted file are identical")
+
+    original_size, original_sha = digest(original)
+    mounted_size, mounted_sha = digest(mounted)
+    require(original_size == mounted_size, "mounted logical byte length differs")
+    require(original_sha == mounted_sha, "full mounted SHA-256 differs from cleartext")
+
+    # Open read-only and compare deterministic independent-block boundary
+    # windows. The final zero-byte read must return EOF.
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    source_fd = os.open(original, read_flags)
+    try:
+        mounted_fd = os.open(mounted, read_flags)
+        try:
+            offsets = sampled_offsets(original_size)
+            for offset in offsets:
+                length = min(READ_BYTES, original_size - offset + 1)
+                expected = os.pread(source_fd, length, offset)
+                observed = os.pread(mounted_fd, length, offset)
+                require(observed == expected, f"random read disagrees at byte {offset}")
+            require(os.pread(mounted_fd, 32, original_size) == b"",
+                    "mounted read did not return EOF")
+        finally:
+            os.close(mounted_fd)
+    finally:
+        os.close(source_fd)
+
+    # An O_WRONLY open should fail before any write attempt. Never send
+    # write(), O_CREAT, unlink(), xattr changes, or renames to a mount.
+    try:
+        writable_fd = os.open(mounted, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as error:
+        require(error.errno in DENIED, f"unexpected write-open error: {error}")
+    else:
+        os.close(writable_fd)
+        raise MountCheckError("mounted file permitted write access")
+
+    return {"result": "pass", "mount": str(mount), "restored_file": entry.name,
+            "logical_bytes": original_size, "sha256": original_sha,
+            "random_read_offsets": offsets, "readonly_open_denied": True}
+
+
+class SyntheticAcceptanceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.mount = base / "mount"
+        self.mount.mkdir()
+        self.original = base / "original.bin"
+        payload = bytes(range(251)) * 530
+        self.original.write_bytes(payload)
+        self.restored = self.mount / "restored"
+        self.restored.write_bytes(payload)
+
+    def readonly_open(self, *args, **kwargs):
+        if Path(args[0]) == self.restored and args[1] & os.O_ACCMODE == os.O_WRONLY:
+            raise OSError(errno.EROFS, "read-only filesystem")
+        return self.real_open(*args, **kwargs)
+
+    def check(self):
+        self.real_open = os.open
+        with mock.patch("os.open", side_effect=self.readonly_open):
+            return verify_mount(self.mount, self.original, require_real_mount=False)
+
+    def test_clean_random_readback_and_eof(self):
+        report = self.check()
+        self.assertEqual(report["result"], "pass")
+        self.assertEqual(report["logical_bytes"], self.original.stat().st_size)
+        self.assertIn(65535, report["random_read_offsets"])
+        self.assertIn(self.original.stat().st_size, report["random_read_offsets"])
+
+    def test_modified_mounted_payload_fails(self):
+        with open(self.restored, "r+b") as altered:
+            altered.seek(65536)
+            altered.write(b"X")
+        with self.assertRaisesRegex(MountCheckError, "SHA-256"):
+            self.check()
+
+    def test_extra_file_refused(self):
+        (self.mount / "unexpected").write_bytes(b"")
+        with self.assertRaisesRegex(MountCheckError, "exactly one"):
+            self.check()
+
+    def test_symlink_refused(self):
+        self.restored.unlink()
+        self.restored.symlink_to(self.original)
+        with self.assertRaisesRegex(MountCheckError, "regular file"):
+            self.check()
+
+    def test_writable_mount_refused_without_writing(self):
+        original_sha = digest(self.restored)
+        with self.assertRaisesRegex(MountCheckError, "permitted write"):
+            verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertEqual(original_sha, digest(self.restored))
+
+    def test_nonmount_path_refused_by_default(self):
+        with self.assertRaisesRegex(MountCheckError, "mount point"):
+            verify_mount(self.mount, self.original)
+
+
+def main():
+    if "--self-test" in sys.argv[1:]:
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(SyntheticAcceptanceTests)
+        return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mount", required=True, help="FSKit mount point, usually under /Volumes")
+    parser.add_argument("--original", required=True, help="uncompressed source test fixture")
+    args = parser.parse_args()
+    try:
+        print(json.dumps(verify_mount(args.mount, args.original), indent=2, sort_keys=True))
+    except (MountCheckError, OSError) as error:
+        print(f"FSKit readback acceptance FAILED: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
