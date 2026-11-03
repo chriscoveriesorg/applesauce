@@ -69,7 +69,9 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         defer { url.stopAccessingSecurityScopedResource() }
         do {
-            let (handle, info) = try Self.openArchive(url, verify: false)
+            // Do not advertise a malformed or corrupted archive as mountable.
+            // The mount path independently verifies again before publication.
+            let (handle, info) = try Self.openArchive(url, verify: true)
             defer { ascf_close(handle) }
             replyHandler(.usable(name: "Applesauce ASCF", containerID: Self.identifier(for: info)), nil)
         } catch {
