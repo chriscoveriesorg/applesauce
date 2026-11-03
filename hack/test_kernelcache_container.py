@@ -97,7 +97,8 @@ class ContainerTests(unittest.TestCase):
 
     def test_preboot_discovery_is_bounded_and_ignores_symlink_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            # macOS /var is a symlink; anchor fixtures at their canonical root.
+            root = Path(tmp).resolve()
             relative = "System/Volumes/Preboot/UUID/boot/HASH/System/Library/Caches/com.apple.kernelcaches/kernelcache"
             candidate = root / relative
             candidate.parent.mkdir(parents=True)
@@ -113,7 +114,8 @@ class ContainerTests(unittest.TestCase):
 
     def test_discovery_candidate_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            # macOS /var is a symlink; anchor fixtures at their canonical root.
+            root = Path(tmp).resolve()
             for index in range(15):
                 candidate = root / f"System/Volumes/Preboot/UUID/boot/H{index}/System/Library/Caches/com.apple.kernelcaches/kernelcache"
                 candidate.parent.mkdir(parents=True)
