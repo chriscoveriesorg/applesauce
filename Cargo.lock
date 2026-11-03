@@ -127,6 +127,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "applesauce-fskit-bridge"
+version = "0.1.0"
+dependencies = [
+ "applesauce-core",
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
