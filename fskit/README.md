@@ -30,3 +30,22 @@ is experimental and must not be the only copy of important files.
 
 References: Apple's "Building a passthrough file system" sample and
 https://developer.apple.com/documentation/fskit/fsunaryfilesystemoperations .
+
+## User-initiated mounting on macOS 27+
+
+After signing and installing `ASCFHost.app` with the authorized FSKit
+module and mount entitlements, enable its filesystem extension in System
+Settings > General > Login Items & Extensions > File System Extensions.
+Launch the host, choose an `.ascf` file and select **Mount**. The host
+passes a read-only, security-scoped path resource to
+`FSClient.mountSingleVolume`. FSKit verifies the logical archive before
+publishing a volume under `/Volumes`, where Finder and ordinary apps can
+read the restored file. The host shows the resulting path and can reveal it
+in Finder. The original source path and attributes stay untouched.
+
+Provisioning must authorize both `com.apple.developer.fskit.fsmodule`
+(for the extension) and `com.apple.developer.fskit.mount` (for the host);
+unsigned development builds validate compilation only. A complete signed
+install, extension enablement, mounted listing and SHA-256 comparison on
+an authorized disposable Mac remain required before claiming runtime
+compatibility. If the host lacks either entitlement, expect mount failure.

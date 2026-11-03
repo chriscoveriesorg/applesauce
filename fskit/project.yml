@@ -17,6 +17,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.chriscoveries.applesauce.ascfhost
         GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: Host/Host.entitlements
         SWIFT_VERSION: "5.0"
     dependencies:
       - target: ASCFExtension

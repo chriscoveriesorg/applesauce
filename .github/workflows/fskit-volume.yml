@@ -36,7 +36,7 @@ jobs:
             -import-objc-header crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h \
             fskit/ASCFExtension/ASCFExtension.swift fskit/ASCFExtension/ASCFVolume.swift
       - name: Validate extension property list
-        run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements
+        run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements fskit/Host/Host.entitlements
 
       - name: Generate host and extension Xcode project
         run: |
