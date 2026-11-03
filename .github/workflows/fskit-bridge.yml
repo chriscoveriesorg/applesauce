@@ -1,0 +1,49 @@
+name: Read-only FSKit archive bridge
+
+on:
+  pull_request:
+    paths:
+      - 'crates/applesauce-fskit-bridge/**'
+      - 'Cargo.lock'
+      - '.github/workflows/fskit-bridge.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/applesauce-fskit-bridge/**'
+      - 'Cargo.lock'
+      - '.github/workflows/fskit-bridge.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked -p applesauce-fskit-bridge
+      - run: cargo clippy --locked -p applesauce-fskit-bridge --all-targets -- -D warnings
+      - name: Syntax-check public C ABI
+        run: cc -x c -std=c11 -Wall -Wextra -Werror -fsyntax-only crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h
+
+  macos:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Real Raven/Mesh archive round-trips, EOF and corruption
+        run: cargo test --locked -p applesauce-fskit-bridge -- --nocapture
+      - name: Build linkable static bridge
+        run: cargo build --locked --release -p applesauce-fskit-bridge
+      - name: Syntax-check Swift-facing C header
+        run: xcrun clang -x c -std=c11 -Wall -Wextra -Werror -fsyntax-only crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h

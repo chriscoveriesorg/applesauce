@@ -1,0 +1,21 @@
+[package]
+name = "applesauce-fskit-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Read-only verified archive I/O for an FSKit-mounted cold archive"
+repository = "https://github.com/chriscoveriesorg/applesauce"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+applesauce-core = { path = "../applesauce-core", default-features = false }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[lints]
+workspace = true
