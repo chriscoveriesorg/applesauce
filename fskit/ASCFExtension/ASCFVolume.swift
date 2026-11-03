@@ -134,7 +134,9 @@ extension ASCFVolume: FSVolume.Operations {
         case FSDirectoryCookie(3):
             return FSDirectoryVerifier(1)
         default:
-            throw failure(EINVAL)
+            // FSKit requires its specific invalid-cookie error here; EINVAL
+            // prevents callers from distinguishing a stale directory cursor.
+            throw FSError.invalidDirectoryCookie
         }
         for index in start..<3 {
             let name: FSFileName
