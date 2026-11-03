@@ -429,6 +429,14 @@ impl<R: Read + Seek> ArchiveReader<R> {
         if length > MAX_READ_BYTES {
             return Err(bad_input("archive read exceeds 8 MiB per call"));
         }
+        // Reject invalid ranges before reserving up to 8 MiB of output.
+        // This also keeps malformed requests from creating allocation pressure.
+        if offset > self.logical_size || length as u64 > self.logical_size - offset {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "read beyond archive EOF",
+            ));
+        }
         let mut result = allocate_buffer(length)?;
         self.read_range_into(offset, &mut result)?;
         Ok(result)
@@ -440,6 +448,14 @@ impl<R: Read + Seek> ArchiveReader<R> {
     pub fn read_exact_at(&mut self, offset: u64, destination: &mut [u8]) -> io::Result<()> {
         if destination.len() > MAX_READ_BYTES {
             return Err(bad_input("archive read exceeds 8 MiB per call"));
+        }
+        // Check bounds before growing retained staging storage. In particular,
+        // invalid FSKit pread offsets must not trigger large allocations.
+        if offset > self.logical_size || destination.len() as u64 > self.logical_size - offset {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "read beyond archive EOF",
+            ));
         }
         let mut staging = std::mem::take(&mut self.read_staging);
         let result = (|| {
