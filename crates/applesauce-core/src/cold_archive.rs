@@ -535,7 +535,10 @@ mod tests {
     fn invalid_reads_do_not_allocate_or_initialize_decoder() {
         let mut reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
         assert_eq!(
-            reader.read_range(u64::MAX, MAX_READ_BYTES).unwrap_err().kind(),
+            reader
+                .read_range(u64::MAX, MAX_READ_BYTES)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::UnexpectedEof
         );
         let mut output = [0xa5; 32];
@@ -718,7 +721,9 @@ mod tests {
             let decoded_ptr = archive.decoded_storage.as_ptr();
             let staging_ptr = archive.read_staging.as_ptr();
             for offset in [0, MIN_CHUNK_BYTES - 16, MIN_CHUNK_BYTES + 7, 100] {
-                archive.read_exact_at(offset as u64, &mut mounted_read).unwrap();
+                archive
+                    .read_exact_at(offset as u64, &mut mounted_read)
+                    .unwrap();
                 assert_eq!(mounted_read, &clear[offset..offset + 128]);
                 assert_eq!(archive.encoded_storage.as_ptr(), encoded_ptr);
                 assert_eq!(archive.decoded_storage.as_ptr(), decoded_ptr);
