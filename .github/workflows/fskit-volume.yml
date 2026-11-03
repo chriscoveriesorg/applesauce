@@ -37,3 +37,13 @@ jobs:
             fskit/ASCFExtension/ASCFExtension.swift fskit/ASCFExtension/ASCFVolume.swift
       - name: Validate extension property list
         run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements
+
+      - name: Generate host and extension Xcode project
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
+          xcodegen generate --spec fskit/project.yml
+      - name: Build unsigned FSKit host and extension
+        run: |
+          xcodebuild -project fskit/ApplesauceASCF.xcodeproj \
+            -scheme ASCFHost -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO build
