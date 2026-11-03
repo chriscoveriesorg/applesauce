@@ -775,4 +775,111 @@ mod tests {
                 .is_err());
         }
     }
+
+    #[test]
+    fn writer_rejects_non_archive_codecs_before_writing() {
+        // The cold-file container is deliberately Raven/Mesh-only, even
+        // though the buffer enum carries legacy codecs too.
+        for codec in [Codec::Zlib, Codec::Lzfse, Codec::Lzbitmap] {
+            let mut destination = Cursor::new(Vec::new());
+            let source = &b"only raven and mesh are archive codecs"[..];
+            assert_eq!(
+                write_archive(
+                    source,
+                    &mut destination,
+                    source.len() as u64,
+                    codec,
+                    MIN_CHUNK_BYTES
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert!(destination.get_ref().is_empty());
+        }
+    }
+
+    #[test]
+    fn mutated_index_fields_fail_closed() {
+        // Beyond magic/count/type corruption: entries that look plausible
+        // but disagree with the declared layout must also be refused.
+        let original = fake_archive();
+        let payload_len = "not a codec payload".len() as u32;
+        let mut cases = Vec::new();
+        // clear_len disagrees with the logical size and chunk geometry.
+        let mut broken = original.clone();
+        broken[76..80].copy_from_slice(&2u32.to_le_bytes());
+        cases.push(broken);
+        // An entry must start exactly where the index ends.
+        let mut broken = original.clone();
+        broken[64..72].copy_from_slice(&((HEADER_BYTES + ENTRY_BYTES + 1) as u64).to_le_bytes());
+        cases.push(broken);
+        // Zero stored_len is refused outright.
+        let mut broken = original.clone();
+        broken[72..76].copy_from_slice(&0u32.to_le_bytes());
+        cases.push(broken);
+        // A short stored_len leaves unexplained trailing payload bytes.
+        let mut broken = original.clone();
+        broken[72..76].copy_from_slice(&(payload_len - 1).to_le_bytes());
+        cases.push(broken);
+        // A long stored_len runs the payload past the end of the file.
+        let mut broken = original.clone();
+        broken[72..76].copy_from_slice(&(payload_len + 1).to_le_bytes());
+        cases.push(broken);
+        for bytes in cases {
+            assert!(ArchiveReader::open(Cursor::new(bytes)).is_err());
+        }
+    }
+
+    #[test]
+    fn read_exact_at_empty_destination_at_eof_is_ok() {
+        let mut reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
+        // An empty pread at exact EOF is a legal no-op for mounted readers.
+        reader.read_exact_at(1, &mut []).unwrap();
+        let mut empty = Vec::new();
+        reader.read_exact_at(0, &mut empty).unwrap();
+        assert!(empty.is_empty());
+        assert!(reader.read_staging.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn forged_chunk_digests_and_tiny_archives_are_handled() {
+        for codec in [Codec::Lzraven, Codec::Lzmesh] {
+            if !codec.is_supported() {
+                continue;
+            }
+            // A one-byte archive exercises the minimal-chunk path.
+            let mut tiny = Cursor::new(Vec::new());
+            let stats = write_archive(&[0xabu8][..], &mut tiny, 1, codec, MIN_CHUNK_BYTES).unwrap();
+            assert_eq!(stats.chunk_count, 1);
+            let mut reader = ArchiveReader::open(Cursor::new(tiny.into_inner())).unwrap();
+            reader.verify_all().unwrap();
+            assert_eq!(reader.read_range(0, 1).unwrap(), vec![0xab]);
+
+            // Corrupting a stored chunk digest, not the payload, must still
+            // fail: decoding alone is never enough for publication.
+            let payload = b"forged chunk digest coverage".repeat(100);
+            let mut stored = Cursor::new(Vec::new());
+            write_archive(
+                &payload[..],
+                &mut stored,
+                payload.len() as u64,
+                codec,
+                MIN_CHUNK_BYTES,
+            )
+            .unwrap();
+            let mut forged = stored.into_inner();
+            // First entry's clear_sha256 begins at index base + 16.
+            forged[HEADER_BYTES + 16] ^= 0xff;
+            let mut reader = ArchiveReader::open(Cursor::new(forged)).unwrap();
+            assert_eq!(
+                reader.verify_all().unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            let mut destination = vec![0xa5u8; 16];
+            assert!(reader.read_exact_at(0, &mut destination).is_err());
+            assert_eq!(destination, vec![0xa5u8; 16]);
+        }
+    }
 }
