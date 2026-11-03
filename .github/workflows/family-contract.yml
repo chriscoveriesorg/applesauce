@@ -17,9 +17,22 @@ permissions:
 
 jobs:
   portable-contract:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'claw-applesauce' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
+      - name: Ensure Python 3 is available
+        run: |
+          set -euo pipefail
+          if ! command -v python3 >/dev/null 2>&1; then
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update
+              apt-get install -y python3
+            else
+              sudo apt-get update
+              sudo apt-get install -y python3
+            fi
+          fi
+          python3 --version
       - uses: actions/checkout@v4
       - name: Check synthetic Foldy and ZGX receipts (no private code or data)
         run: python3 -m unittest discover -s hack -p 'test_family_contract.py' -v
