@@ -169,7 +169,8 @@ def verify_mount(mount, original, require_real_mount=True):
     mounted = mount / entry.name
     require(not os.path.samefile(original, mounted), "source and mounted file are identical")
 
-    original_size, original_sha = digest(original)
+    original_size, original_sha, original_identity = digest(
+        original, include_identity=True)
     mounted_size, mounted_sha, mounted_identity = digest(
         mounted, nofollow=True, include_identity=True)
     require(original_size == mounted_size, "mounted logical byte length differs")
@@ -180,6 +181,9 @@ def verify_mount(mount, original, require_real_mount=True):
     read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     source_fd = os.open(original, read_flags)
     try:
+        source_stat = os.fstat(source_fd)
+        require((source_stat.st_dev, source_stat.st_ino) == original_identity,
+                "original file changed between digest and random reads")
         mounted_fd = os.open(mounted, read_flags | os.O_NOFOLLOW)
         try:
             mounted_stat = os.fstat(mounted_fd)
@@ -316,6 +320,35 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "changed between digest"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped, "regular-file replacement must be exercised")
+
+    def test_original_regular_file_swap_rejected_after_digest(self):
+        # The reference pread must use the same file whose digest was checked.
+        real_open = os.open
+        original_parent = self.original.parent.resolve(strict=True)
+        opens = 0
+        swapped = False
+
+        def swap_original(path, flags, *args, **kwargs):
+            nonlocal opens, swapped
+            candidate = Path(path)
+            if (candidate.name == self.original.name
+                    and candidate.parent.resolve(strict=True) == original_parent
+                    and flags & os.O_ACCMODE == os.O_RDONLY):
+                opens += 1
+                if opens == 2:
+                    replacement = self.original.with_suffix(".replacement")
+                    replacement.write_bytes(self.original.read_bytes())
+                    replacement.replace(self.original)
+                    swapped = True
+            if (candidate.name == self.restored.name
+                    and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)):
+                raise OSError(errno.EROFS, "read-only filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=swap_original):
+            with self.assertRaisesRegex(MountCheckError, "original file changed"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(swapped, "original-file replacement must be exercised")
 
     def test_extra_file_refused(self):
         (self.mount / "unexpected").write_bytes(b"")
