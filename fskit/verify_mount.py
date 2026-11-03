@@ -336,7 +336,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         def mutating_pread(fd, count, offset):
             nonlocal mutated
             result = real_pread(fd, count, offset)
-            if not mutated and os.fstat(fd).st_ino == mounted_inode:
+            if (not mutated and os.fstat(fd).st_ino == mounted_inode
+                    and offset > self.original.stat().st_size):
                 mutated = True
                 with open(self.restored, "r+b") as stream:
                     stream.seek(0)
