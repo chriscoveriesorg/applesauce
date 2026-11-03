@@ -29,16 +29,27 @@ def require(ok, message):
         raise MountCheckError(message)
 
 
-def digest(path):
+def digest(path, nofollow=False):
     total = 0
     checksum = hashlib.sha256()
-    with open(path, "rb", buffering=0) as source:
-        while True:
-            data = source.read(READ_BYTES)
-            if not data:
-                break
-            total += len(data)
-            checksum.update(data)
+    if nofollow:
+        require(hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW unavailable for mounted read")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if nofollow:
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        with os.fdopen(fd, "rb", buffering=0) as source:
+            fd = -1
+            while True:
+                data = source.read(READ_BYTES)
+                if not data:
+                    break
+                total += len(data)
+                checksum.update(data)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     return total, checksum.hexdigest()
 
 
@@ -77,7 +88,7 @@ def verify_mount(mount, original, require_real_mount=True):
     require(not os.path.samefile(original, mounted), "source and mounted file are identical")
 
     original_size, original_sha = digest(original)
-    mounted_size, mounted_sha = digest(mounted)
+    mounted_size, mounted_sha = digest(mounted, nofollow=True)
     require(original_size == mounted_size, "mounted logical byte length differs")
     require(original_sha == mounted_sha, "full mounted SHA-256 differs from cleartext")
 
@@ -86,7 +97,7 @@ def verify_mount(mount, original, require_real_mount=True):
     read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     source_fd = os.open(original, read_flags)
     try:
-        mounted_fd = os.open(mounted, read_flags)
+        mounted_fd = os.open(mounted, read_flags | os.O_NOFOLLOW)
         try:
             offsets = sampled_offsets(original_size)
             for offset in offsets:
@@ -157,6 +168,27 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             altered.write(b"X")
         with self.assertRaisesRegex(MountCheckError, "SHA-256"):
             self.check()
+
+    def test_mounted_symlink_swap_rejected_before_digest(self):
+        # Simulate a mount entry being swapped after scandir() but before
+        # the first mounted open. O_NOFOLLOW must reject the replacement.
+        real_open = os.open
+        swapped = False
+
+        def swap_before_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if Path(path) == self.restored and not swapped:
+                swapped = True
+                self.restored.unlink()
+                self.restored.symlink_to(self.original)
+            if Path(path) == self.restored and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
+                raise OSError(errno.EROFS, "read-only filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=swap_before_open):
+            with self.assertRaises(OSError) as raised:
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertEqual(raised.exception.errno, errno.ELOOP)
 
     def test_extra_file_refused(self):
         (self.mount / "unexpected").write_bytes(b"")
