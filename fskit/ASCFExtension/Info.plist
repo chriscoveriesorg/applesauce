@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>EXAppExtensionAttributes</key>
+  <dict>
+    <key>EXExtensionPointIdentifier</key>
+    <string>com.apple.fskit.fsmodule</string>
+    <key>FSShortName</key>
+    <string>ascf</string>
+    <key>FSSupportsPathURLs</key>
+    <true/>
+    <key>FSSupportsBlockResources</key>
+    <false/>
+    <key>FSSupportsGenericURLResources</key>
+    <false/>
+    <key>FSRequiresSecurityScopedPathURLResources</key>
+    <true/>
+    <key>FSPersonalities</key>
+    <dict>
+      <key>ASCFReadOnly</key>
+      <dict>
+        <key>FSName</key>
+        <string>Applesauce ASCF read-only</string>
+        <key>FSfileObjectsAreCaseSensitive</key>
+        <true/>
+      </dict>
+    </dict>
+  </dict>
+</dict>
+</plist>

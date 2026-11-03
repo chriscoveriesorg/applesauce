@@ -1,0 +1,39 @@
+name: ASCF FSKit volume compile
+
+on:
+  pull_request:
+    paths:
+      - 'fskit/**'
+      - 'crates/applesauce-fskit-bridge/**'
+      - 'Cargo.lock'
+      - '.github/workflows/fskit-volume.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'fskit/**'
+      - 'crates/applesauce-fskit-bridge/**'
+      - 'Cargo.lock'
+      - '.github/workflows/fskit-volume.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  macos-sdk:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify Rust bridge
+        run: cargo test --locked -p applesauce-fskit-bridge
+      - name: Build C ABI static library
+        run: cargo build --locked --release -p applesauce-fskit-bridge
+      - name: Check Swift FSKit framework conformances against current SDK
+        run: |
+          xcrun swiftc -swift-version 5 -parse-as-library -typecheck \
+            -import-objc-header crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h \
+            fskit/ASCFExtension/ASCFExtension.swift fskit/ASCFExtension/ASCFVolume.swift
+      - name: Validate extension property list
+        run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements
