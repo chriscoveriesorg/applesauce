@@ -209,11 +209,13 @@ def verify_mount(mount, original, require_real_mount=True):
     source_fd = os.open(original, read_flags | os.O_NOFOLLOW)
     try:
         source_stat = os.fstat(source_fd)
+        require(stat.S_ISREG(source_stat.st_mode), "random-read original is not a regular file")
         require((source_stat.st_dev, source_stat.st_ino) == original_identity,
                 "original file changed between digest and random reads")
         mounted_fd = os.open(mounted, read_flags | os.O_NOFOLLOW)
         try:
             mounted_stat = os.fstat(mounted_fd)
+            require(stat.S_ISREG(mounted_stat.st_mode), "random-read mounted input is not a regular file")
             require((mounted_stat.st_dev, mounted_stat.st_ino) == mounted_identity,
                     "mounted file changed between digest and random reads")
             offsets = sampled_offsets(original_size)
@@ -279,6 +281,41 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.assertEqual(report["logical_bytes"], self.original.stat().st_size)
         self.assertIn(65535, report["random_read_offsets"])
         self.assertIn(self.original.stat().st_size, report["random_read_offsets"])
+
+    def test_random_read_rejects_nonregular_reopened_descriptor(self):
+        # A path can be replaced after digest authentication. Even if a
+        # synthetic descriptor reports the authenticated inode, its type
+        # must be checked before any pread is attempted.
+        real_fstat = os.fstat
+        real_pread = os.pread
+        mounted_inode = self.restored.stat().st_ino
+        observations = 0
+        pread_called = False
+
+        def changed_type(fd):
+            nonlocal observations
+            value = real_fstat(fd)
+            if value.st_ino == mounted_inode and observations >= 2:
+                from unittest.mock import Mock
+                fake = Mock(wraps=value)
+                fake.st_mode = stat.S_IFDIR | 0o555
+                return fake
+            if value.st_ino == mounted_inode:
+                observations += 1
+            return value
+
+        def guarded_pread(fd, count, offset):
+            nonlocal pread_called
+            pread_called = True
+            return real_pread(fd, count, offset)
+
+        self.real_open = os.open
+        with mock.patch("os.open", side_effect=self.readonly_open), mock.patch(
+                "os.fstat", side_effect=changed_type), mock.patch(
+                "os.pread", side_effect=guarded_pread):
+            with self.assertRaisesRegex(MountCheckError, "random-read mounted input is not a regular file"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertFalse(pread_called, "must reject nonregular descriptor before pread")
 
     def test_digest_rejects_nonregular_descriptor(self):
         # A pathname can change after directory enumeration. Do not read a
