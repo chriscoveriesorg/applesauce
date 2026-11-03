@@ -166,9 +166,10 @@ pub fn write_archive<R: Read, W: Write + Seek>(
     let table_bytes = count * ENTRY_BYTES;
     destination.seek(SeekFrom::Start(0))?;
     destination.write_all(&[0u8; HEADER_BYTES])?;
-    destination.write_all(&vec![0u8; table_bytes])?;
+    destination.write_all(&allocate_buffer(table_bytes)?)?;
 
-    let mut entries = Vec::with_capacity(count);
+    let mut entries = Vec::new();
+    entries.try_reserve_exact(count).map_err(io::Error::other)?;
     let mut total_hash = Sha256::new();
     let mut remaining = logical_size;
     let mut next_offset = (HEADER_BYTES + table_bytes) as u64;
@@ -288,7 +289,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
         if index_end > file_bytes {
             return Err(invalid("truncated cold-file chunk index"));
         }
-        let mut entries = Vec::with_capacity(count);
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(count).map_err(io::Error::other)?;
         let mut offset = index_end;
         let mut remaining = logical_size;
         for _ in 0..count {
@@ -343,7 +345,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
     fn decode_chunk(&mut self, index: usize) -> io::Result<Vec<u8>> {
         let entry = &self.entries[index];
-        let mut encoded = vec![0u8; entry.stored_len as usize];
+        let mut encoded = allocate_buffer(entry.stored_len as usize)?;
         self.source.seek(SeekFrom::Start(entry.offset))?;
         self.source.read_exact(&mut encoded)?;
         if self.decode_scratch.is_none() {
@@ -373,7 +375,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 "read beyond archive EOF",
             ));
         }
-        let mut result = vec![0u8; length];
+        let mut result = allocate_buffer(length)?;
         if length == 0 {
             return Ok(result);
         }
@@ -489,6 +491,8 @@ mod tests {
     #[test]
     fn size_bounds_reject_excessive_table_or_read() {
         assert!(allocate_buffer(usize::MAX).is_err());
+        // The same fallible allocation path backs archive index staging,
+        // compressed chunk reads, and caller-visible range results.
         assert!(chunk_count(0, MIN_CHUNK_BYTES).is_err());
         assert!(chunk_count(1, MIN_CHUNK_BYTES - 1).is_err());
         assert!(chunk_count(1, MAX_CHUNK_BYTES * 2).is_err());
