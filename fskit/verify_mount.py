@@ -6,6 +6,7 @@ enabled FSKit extension on a disposable macOS host, with the original cleartext
 used to create the ASCF archive. --self-test runs portable synthetic tests.
 """
 import argparse
+import ctypes
 import errno
 import hashlib
 import json
@@ -23,6 +24,49 @@ DENIED = {errno.EROFS, errno.EACCES, errno.EPERM}
 
 class MountCheckError(RuntimeError):
     pass
+
+
+class DarwinStatFS(ctypes.Structure):
+    """64-bit Darwin struct statfs from XNU bsd/sys/mount.h.
+
+    The type name is at offset 72. Keep the complete structure so statfs(2)
+    can safely write its entire result, including both mountpoint buffers.
+    """
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+def darwin_filesystem_type(mount):
+    """Read f_fstypename from statfs(2), not BSD stat(1)'s file-type %T."""
+    if ctypes.sizeof(DarwinStatFS) != 2168 or DarwinStatFS.f_fstypename.offset != 72:
+        raise MountCheckError("unsupported Darwin statfs ABI layout")
+    info = DarwinStatFS()
+    call = ctypes.CDLL(None, use_errno=True).statfs
+    call.argtypes = (ctypes.c_char_p, ctypes.POINTER(DarwinStatFS))
+    call.restype = ctypes.c_int
+    if call(os.fsencode(mount), ctypes.byref(info)) != 0:
+        code = ctypes.get_errno()
+        raise MountCheckError(f"statfs failed for ASCF mount: {os.strerror(code)}")
+    name = info.f_fstypename.decode("ascii")
+    require(bool(name), "statfs returned an empty filesystem type")
+    return name
 
 
 def require(ok, message):
@@ -75,7 +119,7 @@ def signed_mount_identity(mount):
         require(bool(value), f"empty mount provenance from {command[0]}")
         return value
 
-    kind = output("/usr/bin/stat", "-f", "%T", str(mount))
+    kind = darwin_filesystem_type(mount)
     require(kind == "ascf", f"expected ASCF FSKit mount, found filesystem type {kind!r}")
     return {"filesystem_type": kind,
             "macos_version": output("/usr/bin/sw_vers", "-productVersion"),
@@ -379,9 +423,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
 
         def command(argv, **kwargs):
             seen.append(tuple(argv))
-            if argv[:3] == ("/usr/bin/stat", "-f", "%T"):
-                value = filesystem_type
-            elif argv == ("/usr/bin/sw_vers", "-productVersion"):
+            if argv == ("/usr/bin/sw_vers", "-productVersion"):
                 value = "27.2"
             elif argv == ("/usr/bin/sw_vers", "-buildVersion"):
                 value = "26B123"
@@ -391,18 +433,42 @@ class SyntheticAcceptanceTests(unittest.TestCase):
 
         with mock.patch("sys.platform", "darwin"), mock.patch(
             "os.path.ismount", return_value=True
+        ), mock.patch.object(
+            sys.modules[__name__], "darwin_filesystem_type", return_value=filesystem_type
         ), mock.patch("subprocess.run", side_effect=command), mock.patch(
             "os.open", side_effect=self.readonly_open
         ):
             outcome = verify_mount(self.mount, self.original)
         return outcome, seen
 
+    def test_darwin_statfs_decodes_actual_filesystem_type(self):
+        self.assertEqual(DarwinStatFS.f_fstypename.offset, 72)
+        self.assertEqual(ctypes.sizeof(DarwinStatFS), 2168)
+
+        def fake_statfs(path, pointer):
+            self.assertEqual(path, os.fsencode(self.mount))
+            ctypes.cast(pointer, ctypes.POINTER(DarwinStatFS)).contents.f_fstypename = b"ascf"
+            return 0
+
+        call = mock.Mock(side_effect=fake_statfs)
+        with mock.patch("ctypes.CDLL", return_value=mock.Mock(statfs=call)):
+            self.assertEqual(darwin_filesystem_type(self.mount), "ascf")
+        call.assert_called_once()
+
+    def test_darwin_statfs_failure_is_closed(self):
+        call = mock.Mock(return_value=-1)
+        with mock.patch("ctypes.CDLL", return_value=mock.Mock(statfs=call)), mock.patch(
+            "ctypes.get_errno", return_value=errno.EIO
+        ):
+            with self.assertRaisesRegex(MountCheckError, "statfs failed"):
+                darwin_filesystem_type(self.mount)
+
     def test_real_mount_gate_records_fskit_identity_and_macos_build(self):
         report, seen = self.check_signed_gate("ascf")
         self.assertEqual(report["filesystem_type"], "ascf")
         self.assertEqual(report["macos_version"], "27.2")
         self.assertEqual(report["macos_build"], "26B123")
-        self.assertEqual(len(seen), 3)
+        self.assertEqual(len(seen), 2)
 
     def test_real_mount_gate_rejects_unrelated_apfs_volume(self):
         with self.assertRaisesRegex(MountCheckError, "expected ASCF FSKit mount"):

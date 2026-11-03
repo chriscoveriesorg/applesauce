@@ -64,7 +64,7 @@ point and that fixture:
 python3 fskit/verify_mount.py --mount "/Volumes/Applesauce ASCF" --original "/path/to/fixture"
 ```
 
-On macOS, the signed acceptance gate confirms the actual filesystem type is\n`ascf` using `stat -f %T` and records the macOS product version and build\nin its JSON evidence. An ordinary APFS/disk-image mount with matching bytes\nwill fail this gate. Synthetic tests deliberately bypass the real mount check.\n\nThe verifier refuses an unmounted directory, symlinks, multi-file mounts,
+On macOS, the signed acceptance gate confirms the actual filesystem type is\n`ascf` using Darwin `statfs(2)` and its `f_fstypename` field and records the macOS product version and build\nin its JSON evidence. An ordinary APFS/disk-image mount with matching bytes\nwill fail this gate. Synthetic tests deliberately bypass the real mount check.\n\nThe verifier refuses an unmounted directory, symlinks, multi-file mounts,
 unexpected writable opens and any mismatched logical bytes. It reads the whole
 restored file for SHA-256, samples bounded, evenly distributed offsets throughout the logical file,
 including 4 KiB, 64 KiB and 8 MiB boundaries, and rejects reads that return
