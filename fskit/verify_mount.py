@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import subprocess
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -92,6 +93,7 @@ def digest(path, nofollow=False, include_identity=False):
     fd = os.open(path, flags)
     try:
         identity = os.fstat(fd)
+        require(stat.S_ISREG(identity.st_mode), "digest input is not a regular file")
         with os.fdopen(fd, "rb", buffering=0) as source:
             fd = -1
             while True:
@@ -252,6 +254,12 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.assertEqual(report["logical_bytes"], self.original.stat().st_size)
         self.assertIn(65535, report["random_read_offsets"])
         self.assertIn(self.original.stat().st_size, report["random_read_offsets"])
+
+    def test_digest_rejects_nonregular_descriptor(self):
+        # A pathname can change after directory enumeration. Do not read a
+        # FIFO or device (which may block indefinitely) as archive cleartext.
+        with self.assertRaisesRegex(MountCheckError, "not a regular file"):
+            digest(self.mount, nofollow=True)
 
     def test_modified_mounted_payload_fails(self):
         with open(self.restored, "r+b") as altered:
