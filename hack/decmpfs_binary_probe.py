@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only Mach-O evidence for Apple's decmpfs registration callsites.
 
-Parses existing binaries; never loads a kext, mounts a volume, calls a codec,
+Parses existing binaries; never loads a kext, mounts a volume, invokes a kernel decoder,
 sets an xattr or executes extracted instructions. Local instruction constants
 are research candidates, never a codec/type mapping or writer authorization.
 """
@@ -15,6 +15,8 @@ from pathlib import Path
 import stat
 import struct
 import sys
+
+from kernelcache_container import ContainerError, prepare, system_paths
 
 MAX_FILE = 1 << 30
 MAX_READ = 32 << 20
@@ -109,7 +111,6 @@ def slices(source) -> list[tuple[int, int]]:
         if any(offset < other + length and other < offset + size for other, length in ranges):
             raise EvidenceError("overlapping universal slices")
         ranges.append((offset, size))
-        # ARM64 / x86_64. Other architectures remain unsupported, not absent.
         if cpu in (0x0100000C, 0x01000007):
             if unpack("<I", source.read(offset + 4, 4))[0] != cpu:
                 raise EvidenceError("universal/header architecture mismatch")
@@ -137,19 +138,19 @@ class Image:
             if length < 8 or length % 8 or offset + length > len(commands):
                 raise EvidenceError("invalid load command length")
             data = commands[offset:offset + length]
-            if command == 0x1B:  # LC_UUID
+            if command == 0x1B:
                 if length != 24:
                     raise EvidenceError("invalid UUID command")
                 self.uuid = data[8:24].hex()
-            elif command == 2:  # LC_SYMTAB
+            elif command == 2:
                 if length != 24 or self.symtab is not None:
                     raise EvidenceError("invalid or duplicate symbol table")
                 self.symtab = unpack("<4I", data, 8)
-            elif command == 0xB:  # LC_DYSYMTAB
+            elif command == 0xB:
                 if length != 80 or self.indirect is not None:
                     raise EvidenceError("invalid or duplicate dynamic symbol table")
                 self.indirect = unpack("<II", data, 56)
-            elif command == 0x19:  # LC_SEGMENT_64
+            elif command == 0x19:
                 if length < 72:
                     raise EvidenceError("truncated segment")
                 count_sections, = unpack("<I", data, 64)
@@ -164,7 +165,7 @@ class Image:
                         "address": addr, "size": secsize, "offset": fileoff,
                         "flags": flags, "reserved1": reserved1, "reserved2": reserved2,
                     })
-            elif command == 0x80000035:  # LC_FILESET_ENTRY
+            elif command == 0x80000035:
                 if length < 40 or self.filetype != 12:
                     raise EvidenceError("invalid fileset entry")
                 _, fileoff, stringoff = unpack("<QQI", data, 8)
@@ -203,7 +204,7 @@ class Image:
                 raise EvidenceError("too many indirect symbols")
             entries = self.read(offset, count * 4)
             for section in self.sections:
-                if section["flags"] & 0xFF != 8:  # S_SYMBOL_STUBS
+                if section["flags"] & 0xFF != 8:
                     continue
                 stride = section["reserved2"]
                 if not stride or section["size"] % stride:
@@ -234,8 +235,8 @@ def local_constants(code: bytes, address: int) -> dict[int, int]:
         if word & 0x7C000000 == 0x14000000 or word & 0xFF000000 == 0x54000000 \
                 or word & 0x7E000000 in (0x34000000, 0x36000000) \
                 or word & 0xFE000000 == 0xD6000000:
-            registers.clear()  # all calls, branches and indirect returns
-        elif word & 0x1F800000 == 0x12800000:  # MOVN, MOVZ, MOVK
+            registers.clear()
+        elif word & 0x1F800000 == 0x12800000:
             op, shift = word >> 29 & 3, (word >> 21 & 3) * 16
             immediate = (word >> 5 & 0xFFFF) << shift
             if (not sf and shift >= 32) or op == 1:
@@ -246,20 +247,19 @@ def local_constants(code: bytes, address: int) -> dict[int, int]:
                 registers[rd] = (~immediate) & width_mask
             elif rd in registers:
                 registers[rd] = ((registers[rd] & ~(0xFFFF << shift)) | immediate) & width_mask
-        elif word & 0x9F000000 in (0x90000000, 0x10000000):  # ADRP / ADR
+        elif word & 0x9F000000 in (0x90000000, 0x10000000):
             imm = signed(((word >> 5 & 0x7FFFF) << 2) | (word >> 29 & 3), 21)
             registers[rd] = ((pc & ~4095) + (imm << 12)) if word & 0x80000000 else pc + imm
-        elif word & 0x7F000000 == 0x11000000:  # ADD immediate, without flags
+        elif word & 0x7F000000 == 0x11000000:
             if rn in registers and rn != 31:
                 registers[rd] = (registers[rn] + ((word >> 10 & 0xFFF) <<
                                                 (12 if word & 0x400000 else 0))) & width_mask
             else:
                 registers.pop(rd, None)
-        elif word == 0xD503201F:  # NOP
+        elif word == 0xD503201F:
             pass
         else:
             # Unknown instructions may write multiple registers or affect flow.
-            # Losing candidates is safer than attaching a stale type to a call.
             registers.clear()
         registers.pop(31, None)
     return registers
@@ -321,7 +321,7 @@ def callsites(image: Image, targets: dict[int, str]) -> list[dict]:
         code = image.read(section["offset"], section["size"])
         for offset in range(0, len(code), 4):
             word, = unpack("<I", code, offset)
-            if word & 0xFC000000 != 0x94000000:  # direct AArch64 BL only
+            if word & 0xFC000000 != 0x94000000:
                 continue
             pc = section["address"] + offset
             target = pc + (signed(word & 0x3FFFFFF, 26) << 2)
@@ -385,18 +385,6 @@ def inspect(source) -> dict:
     return {"images": reports, "member_errors": errors}
 
 
-def system_paths() -> list[Path]:
-    result = {
-        Path("/System/Library/KernelCollections/BootKernelExtensions.kc"),
-        Path("/System/Library/KernelCollections/SystemKernelExtensions.kc"),
-    }
-    for root in ("/System/Library/Extensions", "/Library/Apple/System/Library/Extensions"):
-        result.update(Path(root).glob("*FSCompression*.kext/Contents/MacOS/*"))
-    if len(result) > 16:
-        raise EvidenceError("too many system binary candidates")
-    return sorted(result)
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--system", action="store_true")
@@ -415,7 +403,7 @@ def main(argv=None) -> int:
         },
         "on_disk_framing_proven": False, "native_raven_mesh_writes_permitted": False,
         "limitations": [
-            "Only uncompressed little-endian 64-bit Mach-O and supported universal slices are parsed.",
+            "Mach-O/universal and unencrypted IMG4/IM4P krnl containers are parsed; LZFSE extraction uses the public userspace decoder.",
             "Direct ARM64 BL calls and symbol stubs only; stripped symbols, indirect calls and veneers may hide registrations.",
             "Constants are local straight-line candidates, not a control-flow or successful-registration proof.",
             "Symbol names and callsites do not identify an on-disk format or establish kernel readback.",
@@ -428,11 +416,13 @@ def main(argv=None) -> int:
             source = Source(path)
             entry["size"] = source.size
             entry["sha256"] = source.digest()
-            evidence = inspect(source)
+            image, extraction = prepare(source)
+            entry["extraction"] = extraction
+            evidence = inspect(image)
             source.unchanged()
             entry.update(evidence)
             entry["status"] = "inspected"
-        except (OSError, EvidenceError) as error:
+        except (OSError, EvidenceError, ContainerError) as error:
             entry["status"] = "unavailable"
             entry["error"] = str(error)
         finally:
