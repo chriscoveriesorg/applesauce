@@ -136,7 +136,8 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         volume = nil
         scopedURL?.stopAccessingSecurityScopedResource()
         scopedURL = nil
-        containerStatus = .notReady
+        // FSKit's notReady state requires a reason on the macOS 27 SDK.
+        containerStatus = .notReady(status: Self.error(ENODEV))
         reply(nil)
     }
 
