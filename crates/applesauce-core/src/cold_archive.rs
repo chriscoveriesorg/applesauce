@@ -754,6 +754,18 @@ mod tests {
                 .read_exact_at((MIN_CHUNK_BYTES - 16) as u64, &mut destination)
                 .is_err());
             assert_eq!(destination, vec![0xa5u8; 32]);
+            // A failed cross-chunk read must not poison retained staging or
+            // prevent later reads of independently authenticated chunks.
+            // The source remains corrupted, so only the first chunk is safe.
+            let retained_staging = late_reader.read_staging.as_ptr();
+            let mut recovered = [0xa5u8; 32];
+            late_reader.read_exact_at(7, &mut recovered).unwrap();
+            assert_eq!(&recovered[..], &clear[7..39]);
+            assert_eq!(late_reader.read_staging.as_ptr(), retained_staging);
+            assert!(late_reader
+                .read_exact_at((MIN_CHUNK_BYTES - 16) as u64, &mut destination)
+                .is_err());
+            assert_eq!(destination, vec![0xa5u8; 32]);
 
             let mut bad_hash = stored;
             bad_hash[32] ^= 1;
