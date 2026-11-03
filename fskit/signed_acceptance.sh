@@ -12,6 +12,7 @@ Usage:
   bash fskit/signed_acceptance.sh signed-build
   bash fskit/signed_acceptance.sh fixture [lzraven|lzmesh]
   bash fskit/signed_acceptance.sh package
+  bash fskit/signed_acceptance.sh bundle-readback BUNDLE_DIR MOUNT_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
 
@@ -21,7 +22,9 @@ The local Xcode account must already have matching provisioning profiles.
 The script requires XcodeGen, Rust and the macOS 27 SDK.
 fixture: creates an independent, synthetic >8 MiB original and verified ASCF.
 package: builds signed host + BOTH codecs and prepares a portable acceptance
-bundle with SHA-256 manifest and corrupted-archive negative fixtures.
+bundle with SHA-256 manifest, its own verifier, and negative fixtures.
+bundle-readback: verify the portable bundle manifest, signed host, restored
+filename, full logical SHA-256, random reads and FSKit mount identity.
 readback: checks signed host + extension provisioned capabilities and runs
 actual statfs, SHA-256, unaligned reads, EOF and denied write-open acceptance.
 unmounted: after normal host/Finder unmount, prove a previously verified
@@ -121,22 +124,34 @@ PY
         die "$codec corrupted payload unexpectedly passed archive verification"
       fi
     done
-    # Portable relative paths: SHA256SUMS must still verify when the entire
-    # acceptance bundle is copied onto another disposable Mac.
-    (cd "$out" && /usr/bin/shasum -a 256 source.*.jsonl source.*.ascf > SHA256SUMS)
+    # The owner can run acceptance from the copied bundle without cloning
+    # this repository or installing a Rust toolchain on the destination Mac.
+    /bin/mkdir "$out/fskit"
+    /bin/cp "$ROOT/fskit/signed_acceptance.sh" "$out/fskit/signed_acceptance.sh"
+    /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
+    /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
+      > "$out/portable-verifier-tests.log" 2>&1 \
+      || die "packaged verifier self-tests failed; see $out/portable-verifier-tests.log"
+    # Relative paths survive moving the bundle. Hash the executable acceptance
+    # harness as well as the valid and deliberately corrupted synthetic inputs.
+    (cd "$out" && /usr/bin/shasum -a 256 source.*.jsonl source.*.ascf fskit/*.sh fskit/*.py > SHA256SUMS)
     (cd "$out" && /usr/bin/shasum -a 256 -c SHA256SUMS) > "$out/manifest-verified.log"
     /usr/bin/sw_vers > "$out/macos.txt"
     cat > "$out/NEXT-STEPS.txt" <<'STEPS'
 These files are synthetic. Preserve the originals and the signed app.
-1. Install ASCFHost.app on an authorized disposable macOS 27+ Mac.
-2. Enable its extension under Settings > General > Login Items & Extensions.
-3. Mount source.lzmesh.ascf from the host. Run:
-   bash fskit/signed_acceptance.sh readback /path/to/ASCFHost.app "/Volumes/Applesauce ASCF" /path/to/source.lzmesh.jsonl
-4. Unmount using host/Finder; run signed_acceptance.sh unmounted using
-   the successful readback.json, then remount and repeat readback.
-5. Repeat steps 3-4 with source.lzraven.ascf and its source cleartext.
+1. Copy this entire folder onto an authorized disposable macOS 27+ Mac.
+2. Install ASCFHost.app and enable its extension in System Settings >
+   General > Login Items & Extensions > File System Extensions.
+3. Launch the host and mount source.lzmesh.ascf, then from THIS folder run:
+   bash fskit/signed_acceptance.sh bundle-readback . "/Volumes/Applesauce ASCF" lzmesh
+4. Unmount using host/Finder. Confirm it with the resulting readback.json:
+   bash fskit/signed_acceptance.sh unmounted "/Volumes/Applesauce ASCF" /path/to/readback.json
+   Then remount and repeat bundle-readback.
+5. Repeat steps 3-4 with source.lzraven.ascf and codec lzraven.
 6. Attempt to mount each source.<codec>.corrupt.ascf. Each MUST be refused;
    do not record a passed acceptance if any corrupted archive mounts.
+The bundle includes its own verification scripts. It does not need the
+original checkout or Rust to check mounted readback.
 Keep the signed readback, unmount, mount, and rejection evidence.
 No data on the target Mac is automatically mounted or overwritten.
 STEPS
@@ -191,6 +206,40 @@ PY
     printf 'Original: %s\nASCF: %s\nHashes: %s\n' \
       "$out/source.jsonl" "$out/source.$codec.ascf" "$out/fixture.sha256"
     ;;
+  bundle-readback)
+    test "$#" -eq 4 || die "bundle-readback requires BUNDLE_DIR MOUNT_DIR CODEC"
+    mac_only
+    codec="$4"
+    case "$codec" in lzraven|lzmesh) ;; *) die "invalid codec";; esac
+    test -d "$2" || die "missing bundle directory: $2"
+    bundle="$(cd "$2" && pwd -P)"
+    test -f "$bundle/SHA256SUMS" || die "bundle SHA256SUMS missing"
+    test -f "$bundle/source.$codec.jsonl" || die "bundle source for $codec missing"
+    test -f "$bundle/source.$codec.ascf" || die "bundle archive for $codec missing"
+    out="$(mktemp -d /tmp/ascf-bundle-readback.XXXXXXXX)"
+    (cd "$bundle" && /usr/bin/shasum -a 256 -c SHA256SUMS) \
+      > "$out/manifest-verified.log" 2>&1 \
+      || die "bundle contents changed; see $out/manifest-verified.log"
+    verify_host "$bundle/ASCFHost.app" "$out"
+    /usr/bin/sw_vers > "$out/macos.txt"
+    /sbin/mount > "$out/mounts-before.txt"
+    /usr/bin/python3 "$ROOT/fskit/verify_mount.py" \
+      --mount "$3" --original "$bundle/source.$codec.jsonl" \
+      > "$out/readback.json" \
+      || die "FSKit bundle readback failed; see $out"
+    /usr/bin/python3 - "$out/readback.json" "$codec" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    evidence = json.load(source)
+expected = "source." + sys.argv[2]
+if evidence.get("result") != "pass" or evidence.get("restored_file") != expected:
+    sys.exit("FSKit mounted file is not the expected archive member " + expected)
+PY
+    /sbin/mount > "$out/mounts-after.txt"
+    cat "$out/readback.json"
+    printf 'Bundle readback evidence: %s\n' "$out"
+    ;;
   readback)
     test "$#" -eq 4 || die "readback requires signed app, mount path, original"
     mac_only
@@ -200,7 +249,7 @@ PY
     verify_host "$2" "$out"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-before.txt"
-    /usr/bin/python3 fskit/verify_mount.py --mount "$3" --original "$4" \
+    /usr/bin/python3 "$ROOT/fskit/verify_mount.py" --mount "$3" --original "$4" \
       > "$out/readback.json" || die "mounted readback failed; see $out"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
