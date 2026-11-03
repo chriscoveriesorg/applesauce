@@ -66,6 +66,27 @@ compression ratios and a per-case CSV; PR CI validates the smoke suite.
 These measurements concern the public in-memory buffer API—not transparent
 APFS compression or filesystem read/write throughput.
 
+### Create and restore LZRAVEN/LZMESH archives on macOS 27+
+
+The experimental cold-file format writes a **separate**, seekable, checksummed
+archive that a future FSKit mount can expose through an ordinary read-only path.
+It leaves the original file unchanged and refuses to overwrite existing outputs.
+
+```sh
+applesauce archive create chatlog.jsonl chatlog.ascf --codec lzraven
+applesauce archive verify chatlog.ascf
+applesauce archive extract chatlog.ascf chatlog-restored.jsonl
+# Or choose --codec lzmesh for the create command.
+```
+
+The writer rereads and hashes the original, verifies every staged chunk and
+publishes a new file only after verification. Archives that cannot save space
+are refused unless you set `--allow-expansion`. Use `--chunk-bytes 1048576`
+to select a power-of-two chunk size between 64 KiB and 8 MiB. Keep the original
+log until you have validated its restoration. The archive is not an APFS
+`decmpfs` compressed file and existing applications must open a restored copy
+until a separate filesystem mount is implemented.
+
 For the optional native LZBitmap writer, build with
 `cargo build --locked --release -p applesauce-cli --features lzbitmap`.
 Then check `./target/release/applesauce capabilities --json --require-native lzbitmap`
@@ -112,6 +133,7 @@ To use Applesauce, run the following command:
 applesauce [compress|decompress|info] file/directory
 applesauce capabilities [--json] [--require-native CODEC]
 applesauce benchmark-codecs [--codec lzfse,lzmesh,lzraven] [--file COPY.jsonl] [--json]
+applesauce archive [create|verify|extract] ...
 ```
 
 The options are as follows:

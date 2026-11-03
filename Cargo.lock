@@ -99,6 +99,7 @@ name = "applesauce-cli"
 version = "0.5.30"
 dependencies = [
  "applesauce",
+ "applesauce-core",
  "cfg-if",
  "clap",
  "humansize",
@@ -106,6 +107,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tikv-jemallocator",
  "tracing",
