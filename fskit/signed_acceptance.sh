@@ -129,7 +129,7 @@ These files are synthetic. Preserve the originals and the signed app.
 1. Install ASCFHost.app on an authorized disposable macOS 27+ Mac.
 2. Enable its extension under Settings > General > Login Items & Extensions.
 3. Mount source.lzmesh.ascf from the host. Run:
-   bash fskit/signed_acceptance.sh readback /path/to/ASCFHost.app /Volumes/Applesauce\\ ASCF /path/to/source.lzmesh.jsonl
+   bash fskit/signed_acceptance.sh readback /path/to/ASCFHost.app "/Volumes/Applesauce ASCF" /path/to/source.lzmesh.jsonl
 4. Unmount using host/Finder; run signed_acceptance.sh unmounted using
    the successful readback.json, then remount and repeat readback.
 5. Repeat steps 3-4 with source.lzraven.ascf and its source cleartext.
