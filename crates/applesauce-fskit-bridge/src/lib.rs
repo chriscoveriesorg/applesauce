@@ -52,6 +52,7 @@ fn open_readonly_fd(fd: RawFd) -> io::Result<File> {
     if fd < 0 {
         return Err(posix(libc::EINVAL));
     }
+    // SAFETY: fcntl F_GETFL only inspects the supplied OS descriptor.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
@@ -59,6 +60,7 @@ fn open_readonly_fd(fd: RawFd) -> io::Result<File> {
     if flags & libc::O_ACCMODE != libc::O_RDONLY {
         return Err(posix(libc::EACCES));
     }
+    // SAFETY: F_DUPFD_CLOEXEC duplicates the descriptor without raw pointers.
     let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if duplicated < 0 {
         return Err(io::Error::last_os_error());

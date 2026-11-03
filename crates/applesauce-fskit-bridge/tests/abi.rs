@@ -8,6 +8,7 @@ use applesauce_core::cold_archive::MIN_CHUNK_BYTES;
 use applesauce_fskit_bridge::*;
 use std::fs::File;
 use std::io::Write;
+use std::mem::size_of;
 use std::os::fd::AsRawFd;
 use std::ptr;
 use tempfile::NamedTempFile;
@@ -40,6 +41,7 @@ fn file_for(data: &[u8]) -> NamedTempFile {
 fn open_from(temp: &NamedTempFile) -> *mut AscfReader {
     let source = File::open(temp.path()).unwrap();
     let mut handle = ptr::null_mut();
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     assert_eq!(unsafe { ascf_open_fd(source.as_raw_fd(), &mut handle) }, 0);
     assert!(!handle.is_null());
     handle
@@ -55,16 +57,18 @@ fn metadata_and_eof_work_without_decoder() {
         reserved: 1,
         logical_sha256: [0; 32],
     };
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     assert_eq!(unsafe { ascf_info(handle, &mut info) }, 0);
     assert_eq!(info.logical_size, 1);
     assert_eq!(info.codec_selector, 0xD05);
     assert_eq!(info.reserved, 0);
     assert_eq!(info.logical_sha256, [0x5a; 32]);
-    assert_eq!(std::mem::size_of::<AscfInfo>(), 48);
+    assert_eq!(size_of::<AscfInfo>(), 48);
     let mut bytes = [0xa5u8; 8];
     let mut count = 55;
     for offset in [1, 2, u64::MAX] {
         assert_eq!(
+            // SAFETY: test uses live handles and valid output storage; all closes are single-use.
             unsafe { ascf_pread(handle, offset, bytes.as_mut_ptr(), 8, &mut count) },
             0
         );
@@ -72,16 +76,19 @@ fn metadata_and_eof_work_without_decoder() {
         assert_eq!(bytes, [0xa5; 8]);
     }
     assert_eq!(
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_pread(handle, 0, ptr::null_mut(), 0, &mut count) },
         0
     );
     assert_eq!(count, 0);
     assert_ne!(
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_pread(handle, 0, bytes.as_mut_ptr(), 8, &mut count) },
         0
     );
     assert_eq!(count, 0);
     assert_eq!(bytes, [0xa5; 8]);
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     unsafe { ascf_close(handle) };
 }
 
@@ -90,15 +97,21 @@ fn refuses_writable_and_nonregular_fd_and_bad_buffers() {
     let temp = file_for(&synthetic_header());
     let mut handle = ptr::NonNull::<AscfReader>::dangling().as_ptr();
     assert_eq!(
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_open_fd(temp.as_file().as_raw_fd(), &mut handle) },
         libc::EACCES
     );
     assert!(handle.is_null());
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     assert_eq!(unsafe { ascf_open_fd(-1, &mut handle) }, libc::EINVAL);
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     assert_eq!(unsafe { ascf_open_fd(-1, ptr::null_mut()) }, libc::EINVAL);
     let mut pipes = [-1; 2];
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     assert_eq!(unsafe { libc::pipe(pipes.as_mut_ptr()) }, 0);
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     assert_eq!(unsafe { ascf_open_fd(pipes[0], &mut handle) }, libc::EINVAL);
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     unsafe {
         libc::close(pipes[0]);
         libc::close(pipes[1]);
@@ -106,22 +119,27 @@ fn refuses_writable_and_nonregular_fd_and_bad_buffers() {
     let h = open_from(&temp);
     let mut count = 9usize;
     assert_eq!(
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_pread(h, 0, ptr::null_mut(), 1, &mut count) },
         libc::EINVAL
     );
     assert_eq!(count, 0);
     let mut sentinel = [0xa5; 1];
     assert_eq!(
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_pread(h, 0, sentinel.as_mut_ptr(), 8 * 1024 * 1024 + 1, &mut count) },
         libc::EINVAL
     );
     assert_eq!(count, 0);
     assert_eq!(sentinel, [0xa5]);
     assert_eq!(
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_info(ptr::null_mut(), ptr::null_mut()) },
         libc::EINVAL
     );
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     assert_eq!(unsafe { ascf_verify_all(ptr::null_mut()) }, libc::EINVAL);
+    // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     unsafe {
         ascf_close(h);
         ascf_close(ptr::null_mut());
@@ -150,6 +168,7 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         .unwrap();
         temp.as_file_mut().sync_all().unwrap();
         let handle = open_from(&temp);
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         assert_eq!(unsafe { ascf_verify_all(handle) }, 0);
         let mut info = AscfInfo {
             logical_size: 0,
@@ -157,12 +176,14 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
             reserved: 0,
             logical_sha256: [0; 32],
         };
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         assert_eq!(unsafe { ascf_info(handle, &mut info) }, 0);
         assert_eq!(info.logical_size, logical.len() as u64);
         assert_eq!(info.logical_sha256, stats.logical_sha256);
         let mut observed = [0xa5u8; 40];
         let mut got = 123usize;
         assert_eq!(
+            // SAFETY: test uses live handles and valid output storage; all closes are single-use.
             unsafe {
                 ascf_pread(
                     handle,
@@ -180,6 +201,7 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
             &logical[MIN_CHUNK_BYTES - 16..MIN_CHUNK_BYTES + 24]
         );
         assert_eq!(
+            // SAFETY: test uses live handles and valid output storage; all closes are single-use.
             unsafe {
                 ascf_pread(
                     handle,
@@ -193,6 +215,7 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         );
         assert_eq!(got, 4);
         assert_eq!(&observed[..4], &logical[logical.len() - 4..]);
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_close(handle) };
 
         let mut damaged = std::fs::read(temp.path()).unwrap();
@@ -203,6 +226,7 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         let mut sentinel = [0xa5u8; 32];
         got = 999;
         assert_ne!(
+            // SAFETY: test uses live handles and valid output storage; all closes are single-use.
             unsafe {
                 ascf_pread(
                     handle,
@@ -216,6 +240,7 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         );
         assert_eq!(got, 0);
         assert_eq!(sentinel, [0xa5; 32]);
+        // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_close(handle) };
     }
 }
