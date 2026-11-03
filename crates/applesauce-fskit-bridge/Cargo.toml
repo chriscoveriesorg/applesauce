@@ -11,7 +11,7 @@ publish = false
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-applesauce-core = { path = "../applesauce-core", default-features = false }
+applesauce-core = { path = "../applesauce-core" }
 libc = "0.2"
 
 [dev-dependencies]

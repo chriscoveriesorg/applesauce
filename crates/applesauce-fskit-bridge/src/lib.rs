@@ -107,7 +107,10 @@ pub unsafe extern "C" fn ascf_info(handle: *mut AscfReader, out: *mut AscfInfo) 
     }
     guarded(|| {
         // SAFETY: live opaque handle is required by the API.
-        let reader = unsafe { &*handle }.inner.lock().map_err(|_| posix(libc::EIO))?;
+        let reader = unsafe { &*handle }
+            .inner
+            .lock()
+            .map_err(|_| posix(libc::EIO))?;
         let info = AscfInfo {
             logical_size: reader.logical_size(),
             codec_selector: reader.codec() as u32,
@@ -145,8 +148,14 @@ pub unsafe extern "C" fn ascf_pread(
     }
     guarded(|| {
         // SAFETY: live opaque handle is required by the API.
-        let mut reader = unsafe { &*handle }.inner.lock().map_err(|_| posix(libc::EIO))?;
-        let count = reader.logical_size().saturating_sub(offset).min(capacity as u64) as usize;
+        let mut reader = unsafe { &*handle }
+            .inner
+            .lock()
+            .map_err(|_| posix(libc::EIO))?;
+        let count = reader
+            .logical_size()
+            .saturating_sub(offset)
+            .min(capacity as u64) as usize;
         if count == 0 {
             return Ok(());
         }

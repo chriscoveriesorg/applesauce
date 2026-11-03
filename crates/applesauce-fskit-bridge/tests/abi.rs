@@ -1,16 +1,16 @@
 #![cfg(unix)]
 
+#[cfg(target_os = "macos")]
+use applesauce_core::apple_buffer::Codec;
+#[cfg(target_os = "macos")]
+use applesauce_core::cold_archive::write_archive;
+use applesauce_core::cold_archive::MIN_CHUNK_BYTES;
 use applesauce_fskit_bridge::*;
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::ptr;
 use tempfile::NamedTempFile;
-use applesauce_core::cold_archive::MIN_CHUNK_BYTES;
-#[cfg(target_os = "macos")]
-use applesauce_core::cold_archive::write_archive;
-#[cfg(target_os = "macos")]
-use applesauce_core::apple_buffer::Codec;
 
 fn synthetic_header() -> Vec<u8> {
     // Valid versioned index; deliberately invalid Raven payload. Metadata
@@ -50,7 +50,10 @@ fn metadata_and_eof_work_without_decoder() {
     let temp = file_for(&synthetic_header());
     let handle = open_from(&temp);
     let mut info = AscfInfo {
-        logical_size: 0, codec_selector: 0, reserved: 1, logical_sha256: [0; 32],
+        logical_size: 0,
+        codec_selector: 0,
+        reserved: 1,
+        logical_sha256: [0; 32],
     };
     assert_eq!(unsafe { ascf_info(handle, &mut info) }, 0);
     assert_eq!(info.logical_size, 1);
@@ -61,13 +64,22 @@ fn metadata_and_eof_work_without_decoder() {
     let mut bytes = [0xa5u8; 8];
     let mut count = 55;
     for offset in [1, 2, u64::MAX] {
-        assert_eq!(unsafe { ascf_pread(handle, offset, bytes.as_mut_ptr(), 8, &mut count) }, 0);
+        assert_eq!(
+            unsafe { ascf_pread(handle, offset, bytes.as_mut_ptr(), 8, &mut count) },
+            0
+        );
         assert_eq!(count, 0);
         assert_eq!(bytes, [0xa5; 8]);
     }
-    assert_eq!(unsafe { ascf_pread(handle, 0, ptr::null_mut(), 0, &mut count) }, 0);
+    assert_eq!(
+        unsafe { ascf_pread(handle, 0, ptr::null_mut(), 0, &mut count) },
+        0
+    );
     assert_eq!(count, 0);
-    assert_ne!(unsafe { ascf_pread(handle, 0, bytes.as_mut_ptr(), 8, &mut count) }, 0);
+    assert_ne!(
+        unsafe { ascf_pread(handle, 0, bytes.as_mut_ptr(), 8, &mut count) },
+        0
+    );
     assert_eq!(count, 0);
     assert_eq!(bytes, [0xa5; 8]);
     unsafe { ascf_close(handle) };
@@ -77,56 +89,108 @@ fn metadata_and_eof_work_without_decoder() {
 fn refuses_writable_and_nonregular_fd_and_bad_buffers() {
     let temp = file_for(&synthetic_header());
     let mut handle = ptr::NonNull::<AscfReader>::dangling().as_ptr();
-    assert_eq!(unsafe { ascf_open_fd(temp.as_file().as_raw_fd(), &mut handle) }, libc::EACCES);
+    assert_eq!(
+        unsafe { ascf_open_fd(temp.as_file().as_raw_fd(), &mut handle) },
+        libc::EACCES
+    );
     assert!(handle.is_null());
     assert_eq!(unsafe { ascf_open_fd(-1, &mut handle) }, libc::EINVAL);
     assert_eq!(unsafe { ascf_open_fd(-1, ptr::null_mut()) }, libc::EINVAL);
     let mut pipes = [-1; 2];
     assert_eq!(unsafe { libc::pipe(pipes.as_mut_ptr()) }, 0);
     assert_eq!(unsafe { ascf_open_fd(pipes[0], &mut handle) }, libc::EINVAL);
-    unsafe { libc::close(pipes[0]); libc::close(pipes[1]); }
+    unsafe {
+        libc::close(pipes[0]);
+        libc::close(pipes[1]);
+    }
     let h = open_from(&temp);
     let mut count = 9usize;
-    assert_eq!(unsafe { ascf_pread(h, 0, ptr::null_mut(), 1, &mut count) }, libc::EINVAL);
+    assert_eq!(
+        unsafe { ascf_pread(h, 0, ptr::null_mut(), 1, &mut count) },
+        libc::EINVAL
+    );
     assert_eq!(count, 0);
     let mut sentinel = [0xa5; 1];
-    assert_eq!(unsafe { ascf_pread(h, 0, sentinel.as_mut_ptr(), 8 * 1024 * 1024 + 1, &mut count) }, libc::EINVAL);
+    assert_eq!(
+        unsafe { ascf_pread(h, 0, sentinel.as_mut_ptr(), 8 * 1024 * 1024 + 1, &mut count) },
+        libc::EINVAL
+    );
     assert_eq!(count, 0);
     assert_eq!(sentinel, [0xa5]);
-    assert_eq!(unsafe { ascf_info(ptr::null_mut(), ptr::null_mut()) }, libc::EINVAL);
+    assert_eq!(
+        unsafe { ascf_info(ptr::null_mut(), ptr::null_mut()) },
+        libc::EINVAL
+    );
     assert_eq!(unsafe { ascf_verify_all(ptr::null_mut()) }, libc::EINVAL);
-    unsafe { ascf_close(h); ascf_close(ptr::null_mut()); }
+    unsafe {
+        ascf_close(h);
+        ascf_close(ptr::null_mut());
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
     for codec in [Codec::Lzraven, Codec::Lzmesh] {
-        if !codec.is_supported() { continue; }
+        if !codec.is_supported() {
+            continue;
+        }
         let mut logical = vec![0u8; MIN_CHUNK_BYTES * 2 + 17];
         for (i, b) in logical.iter_mut().enumerate() {
             *b = if i % 37 < 30 { b'Q' } else { (i % 251) as u8 };
         }
         let mut temp = NamedTempFile::new().unwrap();
         let stats = write_archive(
-            logical.as_slice(), temp.as_file_mut(), logical.len() as u64,
-            codec, MIN_CHUNK_BYTES,
-        ).unwrap();
+            logical.as_slice(),
+            temp.as_file_mut(),
+            logical.len() as u64,
+            codec,
+            MIN_CHUNK_BYTES,
+        )
+        .unwrap();
         temp.as_file_mut().sync_all().unwrap();
         let handle = open_from(&temp);
         assert_eq!(unsafe { ascf_verify_all(handle) }, 0);
         let mut info = AscfInfo {
-            logical_size: 0, codec_selector: 0, reserved: 0, logical_sha256: [0; 32],
+            logical_size: 0,
+            codec_selector: 0,
+            reserved: 0,
+            logical_sha256: [0; 32],
         };
         assert_eq!(unsafe { ascf_info(handle, &mut info) }, 0);
         assert_eq!(info.logical_size, logical.len() as u64);
         assert_eq!(info.logical_sha256, stats.logical_sha256);
         let mut observed = [0xa5u8; 40];
         let mut got = 123usize;
-        assert_eq!(unsafe { ascf_pread(handle, (MIN_CHUNK_BYTES - 16) as u64, observed.as_mut_ptr(), 40, &mut got) }, 0);
+        assert_eq!(
+            unsafe {
+                ascf_pread(
+                    handle,
+                    (MIN_CHUNK_BYTES - 16) as u64,
+                    observed.as_mut_ptr(),
+                    40,
+                    &mut got,
+                )
+            },
+            0
+        );
         assert_eq!(got, 40);
-        assert_eq!(&observed[..], &logical[MIN_CHUNK_BYTES - 16..MIN_CHUNK_BYTES + 24]);
-        assert_eq!(unsafe { ascf_pread(handle, (logical.len() - 4) as u64, observed.as_mut_ptr(), 40, &mut got) }, 0);
+        assert_eq!(
+            &observed[..],
+            &logical[MIN_CHUNK_BYTES - 16..MIN_CHUNK_BYTES + 24]
+        );
+        assert_eq!(
+            unsafe {
+                ascf_pread(
+                    handle,
+                    (logical.len() - 4) as u64,
+                    observed.as_mut_ptr(),
+                    40,
+                    &mut got,
+                )
+            },
+            0
+        );
         assert_eq!(got, 4);
         assert_eq!(&observed[..4], &logical[logical.len() - 4..]);
         unsafe { ascf_close(handle) };
@@ -138,7 +202,18 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         let handle = open_from(&damaged_file);
         let mut sentinel = [0xa5u8; 32];
         got = 999;
-        assert_ne!(unsafe { ascf_pread(handle, (MIN_CHUNK_BYTES - 16) as u64, sentinel.as_mut_ptr(), 32, &mut got) }, 0);
+        assert_ne!(
+            unsafe {
+                ascf_pread(
+                    handle,
+                    (MIN_CHUNK_BYTES - 16) as u64,
+                    sentinel.as_mut_ptr(),
+                    32,
+                    &mut got,
+                )
+            },
+            0
+        );
         assert_eq!(got, 0);
         assert_eq!(sentinel, [0xa5; 32]);
         unsafe { ascf_close(handle) };
