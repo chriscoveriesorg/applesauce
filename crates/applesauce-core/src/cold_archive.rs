@@ -618,8 +618,7 @@ mod tests {
             let mut late_corruption = stored.clone();
             let second_payload = archive.entries[1].offset as usize;
             late_corruption[second_payload] ^= 0xff;
-            let mut late_reader =
-                ArchiveReader::open(Cursor::new(late_corruption)).unwrap();
+            let mut late_reader = ArchiveReader::open(Cursor::new(late_corruption)).unwrap();
             let mut destination = vec![0xa5u8; 32];
             assert!(late_reader
                 .read_exact_at((MIN_CHUNK_BYTES - 16) as u64, &mut destination)
