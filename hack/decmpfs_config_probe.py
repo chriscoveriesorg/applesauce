@@ -13,7 +13,12 @@ def configuration_candidate(window):
     code = bytes.fromhex(window['bytes_hex'])
     origin = int(window['address'], 16)
     words = struct.unpack('<' + 'I' * (len(code) // 4), code)
-    for index in range(13, len(words) - 10):
+    # Anchor at the actual called helper entry, never a later adjacent function.
+    prefix = (0xD503245F, 0xD503237F, 0xD10103FF, 0xA9024FF4,
+              0xA9037BFD, 0x9100C3FD, 0xAA0003F3, 0xF9000001)
+    if len(words) < 32 or words[:8] != prefix:
+        return None
+    for index in (21,):
         part = words[index:index + 11]
         if part[0:2] != (0x8B080509, 0xD37EF52A):
             continue
@@ -79,3 +84,10 @@ def inspect_configuration(image, table, capture):
                         results.append({'fetch_branch': branch, 'helper_window': helper,
                                         'configuration': configuration_table(image, candidate)})
     return results
+
+
+def named_decoder_windows(image, capture):
+    names = {'_compression_decode_buffer', '_compression_decode_scratch_buffer_size'}
+    return [{'symbol': name, 'code_window': capture(image, address)}
+            for name, kind, _, address in image.symbols
+            if name in names and kind & 0xE == 0xE and not kind & 0xE0]

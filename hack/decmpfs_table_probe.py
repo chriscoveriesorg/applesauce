@@ -12,7 +12,7 @@ from pathlib import Path
 import struct
 
 import decmpfs_binary_probe as probe
-from decmpfs_config_probe import inspect_configuration
+from decmpfs_config_probe import inspect_configuration, named_decoder_windows
 from kernelcache_container import ContainerError, prepare, system_paths
 
 
@@ -171,7 +171,7 @@ def callback_window(image, address):
         delta = address - section["address"]
         if not section["flags"] & 0x80000400 or address % 4 or not 0 <= delta < section["size"]:
             continue
-        length = min(512, section["size"] - delta) & ~3
+        length = min(2048, section["size"] - delta) & ~3
         code = image.read(section["offset"] + delta, length)
         branches = []
         for offset in range(0, length, 4):
@@ -242,7 +242,8 @@ def inspect(source):
                     table = read_table(image, candidate, fixups)
                     reports.append({"image": image.name, "uuid": image.uuid,
                                     "callsite": call, "table": table,
-                                    "type_configuration": inspect_configuration(image, table, callback_window)})
+                                    "type_configuration": inspect_configuration(image, table, callback_window),
+                                    "named_decoders": named_decoder_windows(image, callback_window)})
     return reports
 
 

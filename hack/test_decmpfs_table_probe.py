@@ -107,7 +107,7 @@ class TableTests(unittest.TestCase):
         struct.pack_into("<II", data, 0x200, 0x94000008, 0x14000003)
         image = probe.Image(Bytes(data), 0, len(data), 0, "synthetic")
         result = table.callback_window(image, 0x100200)
-        self.assertEqual(result["size"], 512)
+        self.assertEqual(result["size"], 2048)
         self.assertEqual(result["direct_branches"][0]["target"], "0x100220")
         self.assertEqual(result["direct_branches"][1]["instruction"], "B")
         self.assertFalse(result["function_boundary_proven"])

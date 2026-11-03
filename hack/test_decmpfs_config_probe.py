@@ -26,11 +26,17 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_changed_shape_or_guard_is_rejected(self):
         data = bytearray.fromhex(WINDOW)
-        for index in list(range(8, 13)) + list(range(21, 32)):
+        for index in list(range(0, 13)) + list(range(21, 32)):
             changed = data[:]
             struct.pack_into('<I', changed, index * 4, 0xD503201F)
             with self.subTest(index=index):
                 self.assertIsNone(config.configuration_candidate(window(changed.hex())))
+
+    def test_adjacent_function_window_is_not_a_call_target(self):
+        self.assertIsNone(config.configuration_candidate(window('1f2003d5' + WINDOW)))
+        data = bytearray.fromhex(WINDOW)
+        struct.pack_into('<I', data, 0, 0xD503201F)
+        self.assertIsNone(config.configuration_candidate(window(data.hex())))
 
     def test_empty_and_short_windows_are_inconclusive(self):
         for data in ('', WINDOW[:64], WINDOW[:160]):
