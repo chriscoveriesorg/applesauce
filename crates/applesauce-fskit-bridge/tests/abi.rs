@@ -152,6 +152,35 @@ fn refuses_writable_and_nonregular_fd_and_bad_buffers() {
     }
 }
 
+#[test]
+fn nonblocking_archive_open_rejects_fifo_without_a_writer() {
+    // A selected *.ascf path may be a named pipe. The Swift FSKit bridge
+    // opens O_NONBLOCK before this ABI verifies that the FD is regular.
+    // Without O_NONBLOCK, a read-only open can hang indefinitely here.
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("archive.ascf");
+    let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is a valid NUL-terminated pathname within the test dir.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    // SAFETY: O_NONBLOCK ensures opening a FIFO requires no concurrent writer.
+    let fd = unsafe {
+        libc::open(
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    assert!(fd >= 0);
+    let mut handle = ptr::null_mut();
+    // SAFETY: the live descriptor and output pointer are valid.
+    assert_eq!(unsafe { ascf_open_fd(fd, &mut handle) }, libc::EINVAL);
+    assert!(handle.is_null());
+    // SAFETY: we own fd and close it only once.
+    assert_eq!(unsafe { libc::close(fd) }, 0);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {

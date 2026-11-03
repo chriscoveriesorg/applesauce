@@ -23,7 +23,9 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     // The bridge takes ownership only of its duplicate FD. The original
     // descriptor is opened O_RDONLY/O_NOFOLLOW and always closed here.
     private static func openArchive(_ url: URL, verify: Bool) throws -> (OpaquePointer, AscfInfo) {
-        let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        // Opening a FIFO named *.ascf must never block FSKit's probe or load.
+        // The bridge rejects every nonregular descriptor before parsing it.
+        let fd = Darwin.open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw error(errno) }
         defer { _ = Darwin.close(fd) }
         var handle: OpaquePointer?
