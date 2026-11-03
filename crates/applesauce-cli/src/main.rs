@@ -17,6 +17,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
+mod archive;
 mod codecs;
 mod progress;
 
@@ -67,6 +68,9 @@ enum Commands {
 
     /// Compare Apple buffer codecs on generated data or one file (read-only)
     BenchmarkCodecs(codecs::Benchmark),
+
+    /// Encode, verify, or restore separate Raven/Mesh cold-file archives (not native APFS)
+    Archive(archive::Args),
 }
 
 #[derive(Debug, clap::Args)]
@@ -202,16 +206,17 @@ fn main() {
 
     // Diagnostics never start the file-mutating pipeline or create trace files.
     let diagnostic = match &cli.command {
-        Commands::Capabilities(_) | Commands::BenchmarkCodecs(_)
+        Commands::Capabilities(_) | Commands::BenchmarkCodecs(_) | Commands::Archive(_)
             if cli.chrome_tracing.is_some() =>
         {
             Some(Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "--chrome-tracing is not supported for read-only codec diagnostics",
+                "--chrome-tracing is not supported for codec and archive commands",
             )))
         }
         Commands::Capabilities(args) => Some(codecs::capabilities(args)),
         Commands::BenchmarkCodecs(args) => Some(codecs::benchmark(args)),
+        Commands::Archive(args) => Some(archive::run(args)),
         _ => None,
     };
     if let Some(result) = diagnostic {
@@ -255,7 +260,7 @@ fn main() {
         .init();
 
     match cli.command {
-        Commands::Capabilities(_) | Commands::BenchmarkCodecs(_) => {
+        Commands::Capabilities(_) | Commands::BenchmarkCodecs(_) | Commands::Archive(_) => {
             unreachable!("handled before tracing")
         }
         Commands::Compress(Compress {
