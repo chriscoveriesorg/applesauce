@@ -123,7 +123,8 @@ def digest(path, nofollow=False, include_identity=False):
         if fd >= 0:
             os.close(fd)
     result = (total, checksum.hexdigest())
-    return (*result, (identity.st_dev, identity.st_ino)) if include_identity else result
+    return (*result, (identity.st_dev, identity.st_ino, identity.st_size,
+                      identity.st_mtime_ns, identity.st_ctime_ns)) if include_identity else result
 
 
 def signed_mount_identity(mount):
@@ -198,7 +199,7 @@ def verify_mount(mount, original, require_real_mount=True):
         original, nofollow=True, include_identity=True)
     mounted_size, mounted_sha, mounted_identity = digest(
         mounted, nofollow=True, include_identity=True)
-    require(original_identity != mounted_identity,
+    require(original_identity[:2] != mounted_identity[:2],
             "mounted file aliases original cleartext after digest")
     require(original_size == mounted_size, "mounted logical byte length differs")
     require(original_sha == mounted_sha, "full mounted SHA-256 differs from cleartext")
@@ -210,13 +211,15 @@ def verify_mount(mount, original, require_real_mount=True):
     try:
         source_stat = os.fstat(source_fd)
         require(stat.S_ISREG(source_stat.st_mode), "random-read original is not a regular file")
-        require((source_stat.st_dev, source_stat.st_ino) == original_identity,
+        require((source_stat.st_dev, source_stat.st_ino, source_stat.st_size,
+                 source_stat.st_mtime_ns, source_stat.st_ctime_ns) == original_identity,
                 "original file changed between digest and random reads")
         mounted_fd = os.open(mounted, read_flags | os.O_NOFOLLOW)
         try:
             mounted_stat = os.fstat(mounted_fd)
             require(stat.S_ISREG(mounted_stat.st_mode), "random-read mounted input is not a regular file")
-            require((mounted_stat.st_dev, mounted_stat.st_ino) == mounted_identity,
+            require((mounted_stat.st_dev, mounted_stat.st_ino, mounted_stat.st_size,
+                     mounted_stat.st_mtime_ns, mounted_stat.st_ctime_ns) == mounted_identity,
                     "mounted file changed between digest and random reads")
             offsets = sampled_offsets(original_size)
             for offset in offsets:
@@ -325,6 +328,41 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "random-read mounted input is not a regular file"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertFalse(pread_called, "must reject nonregular descriptor before pread")
+
+    def test_same_inode_mutation_between_digest_and_random_open_rejected(self):
+        # A rewrite after SHA-256 but before reopening must not pass merely
+        # because the inode remains unchanged. Force a deterministic mtime
+        # change without relying on filesystem timestamp resolution.
+        real_open = os.open
+        mounted_opens = 0
+        mutated = False
+
+        def mutate_before_random_open(path, flags, *args, **kwargs):
+            nonlocal mounted_opens, mutated
+            candidate = Path(path)
+            if (candidate.name == self.restored.name
+                    and candidate.parent.resolve(strict=True)
+                    == self.restored.parent.resolve(strict=True)
+                    and flags & os.O_ACCMODE == os.O_RDONLY):
+                mounted_opens += 1
+                if mounted_opens == 2:
+                    with open(self.restored, "r+b") as stream:
+                        stream.seek(0)
+                        stream.write(b"Z")
+                    before = self.restored.stat()
+                    os.utime(self.restored, ns=(before.st_atime_ns,
+                                               before.st_mtime_ns + 2_000_000_000))
+                    mutated = True
+            if (candidate.name == self.restored.name
+                    and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)):
+                raise OSError(errno.EROFS, "read-only filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=mutate_before_random_open):
+            with self.assertRaisesRegex(MountCheckError,
+                                        "mounted file changed between digest"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(mutated)
 
     def test_random_reads_reject_concurrent_mounted_mutation(self):
         # Mutate an unsampled byte during pread; metadata must expose the
