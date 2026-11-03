@@ -117,7 +117,7 @@ private struct ASCFMountView: View {
             // Includes volumes mounted before this host window was opened.
             if mountedURL?.standardizedFileURL != volume.standardizedFileURL {
                 mountedURL = volume
-                status = "Existing read-only ASCF volume at \\(volume.path)"
+                status = "Existing read-only ASCF volume at \(volume.path)"
             }
         } else if mountedURL != nil {
             mountedURL = nil
@@ -136,7 +136,7 @@ private struct ASCFMountView: View {
             DispatchQueue.main.async {
                 if let error {
                     isWorking = false
-                    status = "FSKit extension discovery failed: \\(error.localizedDescription)"
+                    status = "FSKit extension discovery failed: \(error.localizedDescription)"
                     return
                 }
                 let moduleID = "org.chriscoveries.applesauce.ascfhost.ascfextension"
@@ -174,10 +174,10 @@ private struct ASCFMountView: View {
             DispatchQueue.main.async {
                 isWorking = false
                 if let error {
-                    status = "Mount failed: \\(error.localizedDescription)"
+                    status = "Mount failed: \(error.localizedDescription)"
                 } else if let mounted {
                     mountedURL = mounted
-                    status = "Mounted at \\(mounted.path)"
+                    status = "Mounted at \(mounted.path)"
                 } else {
                     status = "FSKit returned no mounted volume."
                 }
