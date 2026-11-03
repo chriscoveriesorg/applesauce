@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::Write;
 use std::mem::size_of;
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::FileExt;
 use std::ptr;
 use tempfile::NamedTempFile;
 
@@ -215,6 +217,35 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         );
         assert_eq!(got, 4);
         assert_eq!(&observed[..4], &logical[logical.len() - 4..]);
+        // Regression: another process can mutate an ASCF source after the
+        // full pre-mount verification. Each subsequent read must authenticate
+        // its chunk again and leave caller memory unchanged on corruption.
+        let before = std::fs::read(temp.path()).unwrap();
+        let second_offset = u64::from_le_bytes(before[112..120].try_into().unwrap());
+        assert_eq!(
+            temp.as_file()
+                .write_at(&[before[second_offset as usize] ^ 0xff], second_offset)
+                .unwrap(),
+            1
+        );
+        temp.as_file().sync_all().unwrap();
+        let mut late_sentinel = [0xa5u8; 32];
+        got = 999;
+        assert_ne!(
+            // SAFETY: test uses live handles and valid output storage; all closes are single-use.
+            unsafe {
+                ascf_pread(
+                    handle,
+                    MIN_CHUNK_BYTES as u64,
+                    late_sentinel.as_mut_ptr(),
+                    late_sentinel.len(),
+                    &mut got,
+                )
+            },
+            0
+        );
+        assert_eq!(got, 0);
+        assert_eq!(late_sentinel, [0xa5; 32]);
         // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_close(handle) };
 

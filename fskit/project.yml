@@ -3,6 +3,10 @@ options:
   bundleIdPrefix: org.chriscoveries.applesauce
   deploymentTarget:
     macOS: "27.0"
+settings:
+  base:
+    MARKETING_VERSION: "0.5.31"
+    CURRENT_PROJECT_VERSION: "1"
 targets:
   ASCFHost:
     type: application
