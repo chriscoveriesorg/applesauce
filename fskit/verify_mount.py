@@ -170,7 +170,7 @@ def verify_mount(mount, original, require_real_mount=True):
     require(not os.path.samefile(original, mounted), "source and mounted file are identical")
 
     original_size, original_sha, original_identity = digest(
-        original, include_identity=True)
+        original, nofollow=True, include_identity=True)
     mounted_size, mounted_sha, mounted_identity = digest(
         mounted, nofollow=True, include_identity=True)
     require(original_size == mounted_size, "mounted logical byte length differs")
@@ -179,7 +179,7 @@ def verify_mount(mount, original, require_real_mount=True):
     # Open read-only and compare deterministic independent-block boundary
     # windows. The final zero-byte read must return EOF.
     read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    source_fd = os.open(original, read_flags)
+    source_fd = os.open(original, read_flags | os.O_NOFOLLOW)
     try:
         source_stat = os.fstat(source_fd)
         require((source_stat.st_dev, source_stat.st_ino) == original_identity,
@@ -320,6 +320,30 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "changed between digest"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped, "regular-file replacement must be exercised")
+
+    def test_original_symlink_swap_rejected_before_digest(self):
+        # A reference pathname replaced after resolve() must never be followed
+        # during the original SHA-256 read, even on a disposable test host.
+        real_open = os.open
+        original_parent = self.original.parent.resolve(strict=True)
+        swapped = False
+
+        def swap_reference(path, flags, *args, **kwargs):
+            nonlocal swapped
+            candidate = Path(path)
+            if (not swapped and candidate.name == self.original.name
+                    and candidate.parent.resolve(strict=True) == original_parent):
+                swapped = True
+                replacement = self.original.with_suffix(".saved")
+                self.original.replace(replacement)
+                self.original.symlink_to(replacement)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=swap_reference):
+            with self.assertRaises(OSError) as raised:
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(swapped, "reference symlink swap must be exercised")
+        self.assertEqual(raised.exception.errno, errno.ELOOP)
 
     def test_original_regular_file_swap_rejected_after_digest(self):
         # The reference pread must use the same file whose digest was checked.
