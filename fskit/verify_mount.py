@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import stat
 import sys
 import tempfile
 import unittest
@@ -123,7 +122,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.restored.write_bytes(payload)
 
     def readonly_open(self, *args, **kwargs):
-        if Path(args[0]) == self.restored and args[1] & os.O_ACCMODE == os.O_WRONLY:
+        if Path(args[0]).resolve() == self.restored.resolve() and args[1] & os.O_ACCMODE == os.O_WRONLY:
             raise OSError(errno.EROFS, "read-only filesystem")
         return self.real_open(*args, **kwargs)
 
