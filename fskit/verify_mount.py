@@ -111,6 +111,14 @@ def digest(path, nofollow=False, include_identity=False):
                     break
                 total += len(data)
                 checksum.update(data)
+            after = os.fstat(source.fileno())
+            require((identity.st_dev, identity.st_ino, identity.st_size,
+                     identity.st_mtime_ns, identity.st_ctime_ns) ==
+                    (after.st_dev, after.st_ino, after.st_size,
+                     after.st_mtime_ns, after.st_ctime_ns),
+                    "digest input changed during hashing")
+            require(total == identity.st_size,
+                    "digest input length changed during hashing")
     finally:
         if fd >= 0:
             os.close(fd)
@@ -368,6 +376,31 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "changed between digest"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped, "regular-file replacement must be exercised")
+
+    def test_digest_rejects_concurrent_same_size_mutation(self):
+        # A stable inode alone cannot authenticate bytes across a rewrite.
+        fixture = self.original
+        real_fstat = os.fstat
+        observations = 0
+
+        def changing_fstat(fd):
+            nonlocal observations
+            result = real_fstat(fd)
+            reference = fixture.stat()
+            if (result.st_dev, result.st_ino) == (reference.st_dev, reference.st_ino):
+                observations += 1
+                if observations == 2:
+                    with open(fixture, "r+b") as stream:
+                        first = stream.read(1)
+                        stream.seek(0)
+                        stream.write(bytes([first[0] ^ 1]))
+                    result = real_fstat(fd)
+            return result
+
+        with mock.patch("os.fstat", side_effect=changing_fstat):
+            with self.assertRaisesRegex(MountCheckError, "changed during hashing"):
+                digest(fixture, nofollow=True)
+        self.assertEqual(observations, 2)
 
     def test_original_symlink_is_not_silently_resolved(self):
         # A symlink supplied as the reference path must not bypass the
