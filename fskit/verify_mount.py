@@ -120,7 +120,7 @@ def verify_mount(mount, original, require_real_mount=True):
     # O_CREAT, unlink(), xattr changes, or renames to a mount.
     for access in (os.O_WRONLY, os.O_RDWR):
         try:
-            writable_fd = os.open(mounted, access | getattr(os, "O_CLOEXEC", 0))
+            writable_fd = os.open(mounted, access | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW)
         except OSError as error:
             require(error.errno in DENIED, f"unexpected write-open error: {error}")
         else:
@@ -228,6 +228,31 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         with mock.patch("os.open", side_effect=selective_open):
             with self.assertRaisesRegex(MountCheckError, "permitted write"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
+
+    def test_write_probes_do_not_follow_swapped_symlinks(self):
+        # A replacement after the readback phase must not cause write-open
+        # probes to follow a link to the original cleartext fixture.
+        real_open = os.open
+        original_inode = self.original.stat().st_ino
+        restored_parent = self.restored.parent.resolve(strict=True)
+        probes = []
+
+        def guarded_open(path, flags, *args, **kwargs):
+            candidate = Path(path)
+            is_restored = (candidate.name == self.restored.name
+                           and candidate.parent.resolve(strict=True) == restored_parent)
+            if is_restored and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
+                probes.append(flags)
+                if not flags & os.O_NOFOLLOW:
+                    raise MountCheckError("write probe lacks O_NOFOLLOW")
+                raise OSError(errno.EROFS, "read-only filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=guarded_open):
+            report = verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertEqual(report["result"], "pass")
+        self.assertEqual(len(probes), 2)
+        self.assertEqual(self.original.stat().st_ino, original_inode)
 
     def test_offsets_cover_distant_blocks_with_bounded_reads(self):
         size = 64 * 1024 * 1024
