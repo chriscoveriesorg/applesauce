@@ -121,8 +121,10 @@ PY
         die "$codec corrupted payload unexpectedly passed archive verification"
       fi
     done
-    /usr/bin/shasum -a 256 \
-      "$out"/source.*.jsonl "$out"/source.*.ascf > "$out/SHA256SUMS"
+    # Portable relative paths: SHA256SUMS must still verify when the entire
+    # acceptance bundle is copied onto another disposable Mac.
+    (cd "$out" && /usr/bin/shasum -a 256 source.*.jsonl source.*.ascf > SHA256SUMS)
+    (cd "$out" && /usr/bin/shasum -a 256 -c SHA256SUMS) > "$out/manifest-verified.log"
     /usr/bin/sw_vers > "$out/macos.txt"
     cat > "$out/NEXT-STEPS.txt" <<'STEPS'
 These files are synthetic. Preserve the originals and the signed app.
