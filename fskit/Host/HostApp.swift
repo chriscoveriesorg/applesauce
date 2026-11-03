@@ -1,6 +1,7 @@
 // The host deliberately mounts a separate read-only volume. It never alters
 // the original file's APFS xattrs or asserts native decmpfs support.
 import AppKit
+import Darwin
 import FSKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -19,6 +20,7 @@ private struct ASCFMountView: View {
     @State private var status = "Select a verified ASCF archive to mount separately."
     @State private var mountedURL: URL?
     @State private var isWorking = false
+    @State private var multipleASCFMounts = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -28,7 +30,7 @@ private struct ASCFMountView: View {
             Button("Choose .ascf archive and mount") {
                 selectingArchive = true
             }
-            .disabled(isWorking || mountedURL != nil)
+            .disabled(isWorking || mountedURL != nil || multipleASCFMounts)
             Button("Open File System Extensions settings") {
                 if !FSClient.shared.openFileSystemExtensionsSettings() {
                     status = "macOS could not open File System Extensions settings."
@@ -47,14 +49,21 @@ private struct ASCFMountView: View {
         }
         .padding(24)
         .frame(minWidth: 460, minHeight: 220)
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { note in
-            // Finder may eject the separate volume without using this window.
-            guard let mountedURL,
-                  let path = note.userInfo?["NSDevicePath"] as? String,
-                  URL(fileURLWithPath: path).standardizedFileURL == mountedURL.standardizedFileURL
-            else { return }
-            self.mountedURL = nil
-            status = "Volume unmounted."
+        .onAppear { reconcileMountedVolumes() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
+            // Finder or a different process may unmount an archive after the
+            // host's last successful mount. Rebuild state from the VFS rather
+            // than trusting the last button action.
+            reconcileMountedVolumes()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+            reconcileMountedVolumes()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didRenameVolumeNotification)) { _ in
+            reconcileMountedVolumes()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)) { _ in
+            reconcileMountedVolumes()
         }
         .fileImporter(
             isPresented: $selectingArchive,
@@ -72,6 +81,47 @@ private struct ASCFMountView: View {
             case .failure(let error):
                 status = "Archive selection failed: \(error.localizedDescription)"
             }
+        }
+    }
+
+    // A host restart must not strand an already mounted archive. Recover
+    // active volumes by the kernel filesystem type and read-only mount flag;
+    // the volume label alone is user-controlled and is not an identity test.
+    private func mountedASCFVolumes() -> [URL] {
+        let mounted = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: nil, options: []
+        ) ?? []
+        return mounted.filter { volume in
+            guard volume.path.hasPrefix("/Volumes/") else { return false }
+            var info = statfs()
+            let result = volume.withUnsafeFileSystemRepresentation { path -> Int32 in
+                guard let path else { return -1 }
+                return Darwin.statfs(path, &info)
+            }
+            guard result == 0 else { return false }
+            let type = withUnsafeBytes(of: info.f_fstypename) { bytes in
+                String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
+            }
+            return type == "ascf" && (info.f_flags & UInt32(MNT_RDONLY)) != 0
+        }
+    }
+
+    private func reconcileMountedVolumes() {
+        guard !isWorking else { return }
+        let volumes = mountedASCFVolumes()
+        multipleASCFMounts = volumes.count > 1
+        if volumes.count > 1 {
+            mountedURL = nil
+            status = "Multiple ASCF volumes found. Unmount extras in Finder before selecting another archive."
+        } else if let volume = volumes.first {
+            // Includes volumes mounted before this host window was opened.
+            if mountedURL?.standardizedFileURL != volume.standardizedFileURL {
+                mountedURL = volume
+                status = "Existing read-only ASCF volume at \\(volume.path)"
+            }
+        } else if mountedURL != nil {
+            mountedURL = nil
+            status = "ASCF volume is no longer mounted."
         }
     }
 
