@@ -35,7 +35,9 @@ jobs:
     timeout-minutes: 120
     env:
       APPLESAUCE_BENCH_SUITE: ${{ github.event_name == 'issue_comment' && 'standard' || inputs.suite }}
-      APPLESAUCE_BENCH_MANIFEST: target/applesauce-bench/manifest.csv
+      # Cargo executes benchmark binaries from the package root, not necessarily
+      # from the workspace. Keep the manifest alongside the workflow's artifact.
+      APPLESAUCE_BENCH_MANIFEST: ${{ github.workspace }}/target/applesauce-bench/manifest.csv
       BENCH_RESULTS: target/applesauce-bench
       BENCHMARK_TRIGGER_URL: ${{ github.event.comment.html_url || '' }}
     steps:

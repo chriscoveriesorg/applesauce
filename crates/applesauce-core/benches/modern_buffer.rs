@@ -170,7 +170,14 @@ fn prepare(codec: Codec, mode: Mode, pieces: &[&[u8]]) -> Prepared {
 }
 
 fn manifest_writer() -> Option<BufWriter<File>> {
-    let path = std::env::var_os("APPLESAUCE_BENCH_MANIFEST")?;
+    let path = std::path::PathBuf::from(std::env::var_os("APPLESAUCE_BENCH_MANIFEST")?);
+    // Cargo may run a workspace benchmark with the package root as cwd,
+    // and a standalone benchmark may use a fresh nested output directory.
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).expect("create benchmark manifest directory");
+        }
+    }
     let mut writer = BufWriter::new(File::create(path).expect("create benchmark manifest"));
     writeln!(
         writer,

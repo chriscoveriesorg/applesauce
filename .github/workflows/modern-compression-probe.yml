@@ -177,6 +177,8 @@ jobs:
       - name: Smoke-check versioned benchmark fixtures and speed harness
         env:
           APPLESAUCE_BENCH_SUITE: smoke
+          # Exercise manifest creation in a previously nonexistent directory.
+          APPLESAUCE_BENCH_MANIFEST: ${{ runner.temp }}/applesauce-smoke-manifest/nested/manifest.csv
         run: |
           set -euo pipefail
           cargo test --locked -p applesauce-core --test benchmark_fixtures \
@@ -185,6 +187,9 @@ jobs:
             2>&1 | tee "$PROBE_RESULTS/benchmark-summary-tests.log"
           cargo bench --locked -p applesauce-core --bench modern_buffer -- --test \
             2>&1 | tee "$PROBE_RESULTS/benchmark-smoke-tests.log"
+          python3 hack/validate-benchmark-matrix.py "$APPLESAUCE_BENCH_MANIFEST" smoke \
+            2>&1 | tee "$PROBE_RESULTS/benchmark-smoke-matrix-check.txt"
+          cp "$APPLESAUCE_BENCH_MANIFEST" "$PROBE_RESULTS/benchmark-smoke-manifest.csv"
           printf '## Benchmark harness\n\nDeterministic fixtures, CSV report parser, and macOS public-buffer encode/decode smoke cases passed. Full timed Criterion runs are manual-only.\n' \
             >> "$GITHUB_STEP_SUMMARY"
       - name: Exercise read-only Rust capabilities and generated buffer benchmark
