@@ -494,6 +494,19 @@ mod tests {
     }
 
     #[test]
+    fn reused_buffer_grows_fallibly_and_preserves_bytes() {
+        let mut buffer = vec![0x5a, 0xa5];
+        let original = buffer.as_ptr();
+        grow_buffer(&mut buffer, 1).unwrap();
+        assert_eq!(buffer.as_ptr(), original);
+        assert_eq!(buffer, vec![0x5a, 0xa5]);
+        grow_buffer(&mut buffer, 4).unwrap();
+        assert_eq!(buffer, vec![0x5a, 0xa5, 0, 0]);
+        assert!(grow_buffer(&mut buffer, usize::MAX).is_err());
+        assert_eq!(buffer, vec![0x5a, 0xa5, 0, 0]);
+    }
+
+    #[test]
     fn synthetic_header_is_readable_without_claiming_codec_support() {
         let reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
         assert_eq!(reader.codec(), Codec::Lzraven);
@@ -657,6 +670,33 @@ mod tests {
                     &clear[start..start + length]
                 );
             }
+            // Decode and pread storage must be retained across repeated
+            // random reads instead of reallocating up to 24 MiB on each
+            // FSKit call. verify_all above has visited every source chunk.
+            let mut mounted_read = vec![0xa5; 128];
+            archive
+                .read_exact_at((MIN_CHUNK_BYTES - 16) as u64, &mut mounted_read)
+                .unwrap();
+            assert_eq!(
+                mounted_read,
+                &clear[MIN_CHUNK_BYTES - 16..MIN_CHUNK_BYTES - 16 + 128]
+            );
+            let encoded_ptr = archive.encoded_storage.as_ptr();
+            let decoded_ptr = archive.decoded_storage.as_ptr();
+            let staging_ptr = archive.read_staging.as_ptr();
+            for offset in [0, MIN_CHUNK_BYTES - 16, MIN_CHUNK_BYTES + 7, 100] {
+                archive.read_exact_at(offset as u64, &mut mounted_read).unwrap();
+                assert_eq!(mounted_read, &clear[offset..offset + 128]);
+                assert_eq!(archive.encoded_storage.as_ptr(), encoded_ptr);
+                assert_eq!(archive.decoded_storage.as_ptr(), decoded_ptr);
+                assert_eq!(archive.read_staging.as_ptr(), staging_ptr);
+            }
+            let mut untouched = [0xa5; 8];
+            assert!(archive
+                .read_exact_at(clear.len() as u64, &mut untouched)
+                .is_err());
+            assert_eq!(untouched, [0xa5; 8]);
+
             let mut sentinel = vec![0xa5u8; 100];
             let mut damaged = stored.clone();
             let first_payload = archive.entries[0].offset as usize;
