@@ -66,9 +66,11 @@ python3 fskit/verify_mount.py --mount "/Volumes/Applesauce ASCF" --original "/pa
 
 The verifier refuses an unmounted directory, symlinks, multi-file mounts,
 unexpected writable opens and any mismatched logical bytes. It reads the whole
-restored file for SHA-256, samples boundary-crossing random reads and EOF, and
-attempts **only an O_WRONLY open** for the negative read-only check. It never
-writes to or changes the mounted file, source, ASCF archive or APFS metadata.
+restored file for SHA-256, samples bounded, evenly distributed offsets throughout the logical file,
+including 4 KiB, 64 KiB and 8 MiB boundaries, and rejects reads that return
+bytes at or beyond EOF. Its negative read-only check tries both **O_WRONLY**
+and **O_RDWR** opens without issuing any writes. It never changes the mounted
+file, source, ASCF archive or APFS metadata.
 Store the JSON report alongside the signed extension identity, macOS build,
 archive creation command, mount/unmount evidence and CLI verification output.
 A passing synthetic unit test does not qualify the FSKit runtime.
