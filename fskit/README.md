@@ -49,3 +49,32 @@ unsigned development builds validate compilation only. A complete signed
 install, extension enablement, mounted listing and SHA-256 comparison on
 an authorized disposable Mac remain required before claiming runtime
 compatibility. If the host lacks either entitlement, expect mount failure.
+
+## Reproducible mounted-file acceptance
+
+The unsigned build and Swift typecheck cannot prove that macOS will register
+an extension or serve bytes through the actual mount. On an **authorized
+disposable** macOS 27+ host, sign and enable the module, then use the host UI
+to mount an ASCF archive created from a retained, uncompressed test fixture.
+
+Run from the repository checkout with the separate volume's actual mount
+point and that fixture:
+
+```sh
+python3 fskit/verify_mount.py --mount "/Volumes/Applesauce ASCF" --original "/path/to/fixture"
+```
+
+The verifier refuses an unmounted directory, symlinks, multi-file mounts,
+unexpected writable opens and any mismatched logical bytes. It reads the whole
+restored file for SHA-256, samples boundary-crossing random reads and EOF, and
+attempts **only an O_WRONLY open** for the negative read-only check. It never
+writes to or changes the mounted file, source, ASCF archive or APFS metadata.
+Store the JSON report alongside the signed extension identity, macOS build,
+archive creation command, mount/unmount evidence and CLI verification output.
+A passing synthetic unit test does not qualify the FSKit runtime.
+
+Portable acceptance harness tests (also run in FSKit CI):
+
+```sh
+python3 fskit/verify_mount.py --self-test
+```
