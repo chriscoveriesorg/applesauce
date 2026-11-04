@@ -127,8 +127,24 @@ private struct ASCFMountView: View {
         }
         guard fd >= 0 else { return false }
         defer { _ = Darwin.close(fd) }
+        var opened = stat()
+        guard Darwin.fstat(fd, &opened) == 0 else { return false }
+        // An open directory can outlive the pathname that selected it.
+        // Match the live pathname to the descriptor on both sides of fstatfs,
+        // so an unmounted/replaced volume cannot be reported as mounted.
+        func pathMatchesDescriptor() -> Bool {
+            var current = stat()
+            let inspected = volume.withUnsafeFileSystemRepresentation { path -> Bool in
+                guard let path else { return false }
+                return Darwin.lstat(path, &current) == 0
+            }
+            return inspected && current.st_dev == opened.st_dev
+                && current.st_ino == opened.st_ino
+        }
+        guard pathMatchesDescriptor() else { return false }
         var info = statfs()
         guard Darwin.fstatfs(fd, &info) == 0 else { return false }
+        guard pathMatchesDescriptor() else { return false }
         let type = withUnsafeBytes(of: info.f_fstypename) { bytes in
             String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
         }
