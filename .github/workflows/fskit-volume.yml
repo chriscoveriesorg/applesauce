@@ -26,6 +26,18 @@ jobs:
       - uses: actions/checkout@v6
       - name: Run portable mounted-readback acceptance tests
         run: python3 fskit/verify_mount.py --self-test
+      - name: Check mounted-acceptance Darwin fstatfs ABI on real macOS
+        run: |
+          python3 - <<'PY'
+          import sys
+          import tempfile
+          sys.path.insert(0, "fskit")
+          from verify_mount import darwin_statfs
+          info = darwin_statfs(tempfile.gettempdir())
+          kind = info.f_fstypename.decode("ascii")
+          assert kind and info.f_bsize > 0, "fstatfs returned invalid VFS identity"
+          print("Darwin descriptor-bound VFS inspection:", kind, "block size", info.f_bsize)
+          PY
       - name: Validate signed FSKit handoff and Finder acceptance scripts
         run: |
           bash -n fskit/signed_acceptance.sh
