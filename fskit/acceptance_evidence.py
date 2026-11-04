@@ -48,6 +48,9 @@ def validate(bundle, codec, first, unmounted, remounted, refusal):
                 stage + ": VFS read-only proof missing")
         require(report.get("readonly_open_denied") is True,
                 stage + ": denied write opens not established")
+        require(report.get("finder_copy_verified") is True
+                and report.get("finder_copy_sha256") == digest,
+                stage + ": Finder copy-out whole-file verification missing")
         require(report.get("restored_file") == "source." + codec,
                 stage + ": unexpected archive member")
         require(report.get("logical_bytes") == len(reference)
@@ -122,6 +125,7 @@ class EvidenceTests(unittest.TestCase):
             "result": "pass", "filesystem_type": "ascf",
             "kernel_readonly": True, "mount_flags": 1,
             "readonly_open_denied": True, "restored_file": "source.lzmesh",
+            "finder_copy_verified": True, "finder_copy_sha256": self.sha,
             "logical_bytes": 100, "sha256": self.sha,
             "mount": "/Volumes/Applesauce ASCF", "macos_version": "27.0",
             "macos_build": "fixture", "random_read_offsets": list(range(20)) + [100]
@@ -158,6 +162,12 @@ class EvidenceTests(unittest.TestCase):
     def test_inconclusive_corruption(self):
         self.items[3].write_text("CORRUPT_REFUSAL_INCONCLUSIVE")
         with self.assertRaisesRegex(EvidenceError, "corruption refusal"):
+            self.check()
+    def test_finder_missing(self):
+        report = load_json(self.items[2])
+        report.pop("finder_copy_verified")
+        self.items[2].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "Finder copy-out"):
             self.check()
     def test_reused_mount_report(self):
         self.items[2].write_bytes(self.items[0].read_bytes())
