@@ -420,9 +420,9 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                             raise FileNotFoundError(errno.ENOENT, "mount disappeared")
                     return real_stat(path, *args, **kwargs)
 
-                with mock.patch("os.stat", side_effect=disappearing_stat), \\
+                with mock.patch("os.stat", side_effect=disappearing_stat), \
                         mock.patch("ctypes.CDLL", return_value=mock.Mock(
-                            fstatfs=mock.Mock(return_value=0))), \\
+                            fstatfs=mock.Mock(return_value=0))), \
                         mock.patch("os.uname", return_value=mock.Mock(machine="arm64")):
                     with self.assertRaisesRegex(MountCheckError,
                                                 "ASCF mount path unavailable"):
