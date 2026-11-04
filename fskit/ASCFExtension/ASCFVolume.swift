@@ -226,11 +226,15 @@ extension ASCFVolume: FSVolume.ReadWriteOperations {
     func read(from item: FSItem, at offset: off_t, length: Int,
               into buffer: FSMutableFileDataBuffer) async throws -> Int {
         guard isFile(item) else { throw failure(EISDIR) }
-        guard offset >= 0, length >= 0 else { throw failure(EINVAL) }
+        // Bound every call before invoking the C ABI. In particular, an EOF
+        // request and a zero-length buffer return immediately, without
+        // asking the decoder to produce bytes it cannot legally return.
+        guard let count = ASCFReadBounds.count(
+            offset: Int64(offset), requested: length, bufferLength: buffer.length,
+            logicalSize: file.attributes.size
+        ) else { throw failure(EINVAL) }
         try requireOriginalArchive()
-        // A short read is valid. The bridge bounds each request to 8 MiB and
-        // leaves the output unchanged on corrupt chunk or decoder failure.
-        let count = min(length, buffer.length, 8 * 1024 * 1024)
+        guard count > 0 else { return 0 }
         var actual = 0
         let status: Int32 = buffer.withUnsafeMutableBytes { bytes in
             ascf_pread(handle, UInt64(offset),
@@ -238,6 +242,12 @@ extension ASCFVolume: FSVolume.ReadWriteOperations {
                        count, &actual)
         }
         guard status == 0 else { throw failure(status) }
+        // A successful zero-byte read before logical EOF can cause Finder or
+        // copy clients to silently truncate data. Reject it as a bridge bug.
+        // Short, positive reads remain valid FSKit behavior.
+        guard ASCFReadBounds.isValidReadResult(actual, capacity: count) else {
+            throw failure(EIO)
+        }
         try requireOriginalArchive()
         return actual
     }
