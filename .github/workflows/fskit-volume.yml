@@ -19,6 +19,59 @@ permissions:
   contents: read
 
 jobs:
+  # The signed FSKit/Xcode qualification still runs on xcode-27 below.
+  # Make the portable evidence and bundle safety checks independently
+  # visible when the macOS 27 runner has a long provisioning queue.
+  portable-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check executable owner handoff and signed evidence gates
+        run: |
+          bash -n fskit/signed_acceptance.sh
+          python3 fskit/verify_mount.py --self-test
+          python3 fskit/acceptance_evidence.py --self-test
+          python3 fskit/signing_profile.py --self-test
+          python3 fskit/replacement_acceptance.py --self-test
+      - name: Authenticate synthetic transfer bundle and reject tampering
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import pathlib
+          import subprocess
+          import tempfile
+
+          script = pathlib.Path("fskit/signed_acceptance.sh").resolve()
+          members = subprocess.check_output(
+              ["bash", str(script), "manifest-paths"], text=True
+          ).splitlines()
+          assert len(members) == len(set(members)) and len(members) >= 15
+          with tempfile.TemporaryDirectory() as directory:
+              root = pathlib.Path(directory)
+              for name in members:
+                  path = root / name
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_bytes(("synthetic:" + name).encode())
+              (root / "SHA256SUMS").write_text("".join(
+                  hashlib.sha256((root / name).read_bytes()).hexdigest()
+                  + "  " + name + "\n" for name in members
+              ))
+              def authenticate():
+                  return subprocess.run(
+                      ["bash", str(script), "manifest-check", str(root)],
+                      capture_output=True, text=True
+                  )
+              result = authenticate()
+              assert result.returncode == 0, result.stdout + result.stderr
+              signed_binary = root / "ASCFHost.app/Contents/MacOS/ASCFHost"
+              signed_binary.write_bytes(b"modified")
+              assert authenticate().returncode != 0, "altered signed binary accepted"
+              signed_binary.write_bytes(b"synthetic:ASCFHost.app/Contents/MacOS/ASCFHost")
+              (root / "ASCFHost.app/Contents/embedded.provisionprofile").unlink()
+              assert authenticate().returncode != 0, "missing provisioning profile accepted"
+          PY
+
   macos-sdk:
     runs-on: xcode-27
     timeout-minutes: 30
