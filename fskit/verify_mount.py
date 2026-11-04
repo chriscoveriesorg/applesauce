@@ -433,7 +433,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                     return real_scandir(path)
 
                 self.real_open = os.open
-                with mock.patch("os.open", side_effect=self.readonly_open), \\
+                with mock.patch("os.open", side_effect=self.readonly_open), \
                         mock.patch("os.scandir", side_effect=failing_scandir):
                     with self.assertRaisesRegex(MountCheckError, expected):
                         verify_mount(self.mount, self.original, require_real_mount=False)
