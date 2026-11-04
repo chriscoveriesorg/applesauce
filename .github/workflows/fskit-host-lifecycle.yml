@@ -1,0 +1,38 @@
+name: FSKit host lifecycle
+
+on:
+  pull_request:
+    paths:
+      - 'fskit/Host/**'
+      - 'fskit/tests/OperationGateTests.swift'
+      - '.github/workflows/fskit-host-lifecycle.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'fskit/Host/**'
+      - 'fskit/tests/OperationGateTests.swift'
+      - '.github/workflows/fskit-host-lifecycle.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ascf-host-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  operation-gate:
+    # No FSKit dependency: the same production gate runs on this Swift host.
+    # The complete macOS 27 app/extension build remains mandatory separately.
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Record Swift compiler and test request ownership
+        run: |
+          set -euo pipefail
+          xcrun swiftc --version
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            fskit/Host/OperationGate.swift fskit/tests/OperationGateTests.swift \
+            -o "$RUNNER_TEMP/ascf-operation-gate-tests"
+          "$RUNNER_TEMP/ascf-operation-gate-tests"

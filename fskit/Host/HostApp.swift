@@ -1,81 +1,83 @@
 // The host deliberately mounts a separate read-only volume. It never alters
 // the original file's APFS xattrs or asserts native decmpfs support.
 import AppKit
+import Combine
 import Darwin
 import FSKit
 import SwiftUI
 import UniformTypeIdentifiers
 
 @main
+@MainActor
 struct ApplesauceASCFHost: App {
+    // App ownership survives closing a window and is shared by every window.
+    // A view-owned @State lock would allow simultaneous FSClient requests.
+    @StateObject private var controller = ASCFMountController()
+
     var body: some Scene {
         WindowGroup {
-            ASCFMountView()
+            ASCFMountView().environmentObject(controller)
         }
     }
 }
 
+@MainActor
 private struct ASCFMountView: View {
+    @EnvironmentObject private var controller: ASCFMountController
     @State private var selectingArchive = false
     @State private var selectingCorruptArchive = false
-    @State private var status = "Select a verified ASCF archive to mount separately."
-    @State private var mountedURL: URL?
-    @State private var isWorking = false
-    @State private var multipleASCFMounts = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Applesauce ASCF").font(.title2)
             Text("Read-only LZRaven / LZMesh archive mount")
-            Text(status).textSelection(.enabled)
+            Text(controller.status).textSelection(.enabled)
             Button("Choose .ascf archive and mount") {
                 selectingArchive = true
             }
-            .disabled(isWorking || mountedURL != nil || multipleASCFMounts)
+            .disabled(controller.isWorking || controller.mountedURL != nil || controller.multipleASCFMounts)
             // This is an explicit user-driven negative control on the signed
             // host. It runs the actual FSClient mount path against a generated
             // corrupted copy, rather than substituting a decoder unit test.
             Button("Test corrupted archive mount refusal") {
                 selectingCorruptArchive = true
             }
-            .disabled(isWorking || mountedURL != nil || multipleASCFMounts)
+            .disabled(controller.isWorking || controller.mountedURL != nil || controller.multipleASCFMounts)
             Button("Copy mount diagnostic") {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(status, forType: .string)
+                NSPasteboard.general.setString(controller.status, forType: .string)
             }
             Button("Open File System Extensions settings") {
-                if !FSClient.shared.openFileSystemExtensionsSettings() {
-                    status = "macOS could not open File System Extensions settings."
-                }
+                controller.openExtensionSettings()
             }
-            .disabled(isWorking)
-            if let mountedURL {
+            .disabled(controller.isWorking)
+            if let mountedURL = controller.mountedURL {
                 Button("Reveal mounted archive in Finder") {
                     NSWorkspace.shared.open(mountedURL)
                 }
                 Button("Unmount read-only volume") {
-                    unmount(mountedURL)
+                    controller.unmount(mountedURL)
                 }
-                .disabled(isWorking)
+                .disabled(controller.isWorking)
             }
         }
         .padding(24)
         .frame(minWidth: 460, minHeight: 220)
-        .onAppear { reconcileMountedVolumes() }
+        .onAppear { controller.reconcileMountedVolumes() }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
             // Finder or a different process may unmount an archive after the
             // host's last successful mount. Rebuild state from the VFS rather
             // than trusting the last button action.
-            reconcileMountedVolumes()
+            controller.reconcileMountedVolumes()
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
-            reconcileMountedVolumes()
+            controller.reconcileMountedVolumes()
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didRenameVolumeNotification)) { _ in
-            reconcileMountedVolumes()
+            controller.reconcileMountedVolumes()
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)) { _ in
-            reconcileMountedVolumes()
+            controller.reconcileMountedVolumes()
         }
         .fileImporter(
             isPresented: $selectingArchive,
@@ -86,12 +88,12 @@ private struct ASCFMountView: View {
             case .success(let urls):
                 guard let url = urls.first else { return }
                 guard url.pathExtension.lowercased() == "ascf" else {
-                    status = "Select a .ascf archive."
+                    controller.showIdleStatus("Select a .ascf archive.")
                     return
                 }
-                mount(url, expectCorruptRefusal: false)
+                controller.mount(url, expectCorruptRefusal: false)
             case .failure(let error):
-                status = "Archive selection failed: \(error.localizedDescription)"
+                controller.showIdleStatus("Archive selection failed: \(error.localizedDescription)")
             }
         }
         .fileImporter(
@@ -103,13 +105,39 @@ private struct ASCFMountView: View {
             case .success(let urls):
                 guard let url = urls.first else { return }
                 guard url.lastPathComponent.hasSuffix(".corrupt.ascf") else {
-                    status = "Select the generated source.<codec>.corrupt.ascf negative-control fixture."
+                    controller.showIdleStatus("Select the generated source.<codec>.corrupt.ascf negative-control fixture.")
                     return
                 }
-                mount(url, expectCorruptRefusal: true)
+                controller.mount(url, expectCorruptRefusal: true)
             case .failure(let error):
-                status = "Corruption-control selection failed: \(error.localizedDescription)"
+                controller.showIdleStatus("Corruption-control selection failed: \(error.localizedDescription)")
             }
+        }
+    }
+}
+
+// One main-actor controller owns FSClient requests for the entire process.
+// Windows only own their file pickers; closing one cannot discard an operation.
+@MainActor
+private final class ASCFMountController: ObservableObject {
+    @Published private(set) var status = "Select a verified ASCF archive to mount separately."
+    @Published private(set) var mountedURL: URL?
+    @Published private(set) var multipleASCFMounts = false
+    @Published private var operations = ASCFOperationGate()
+
+    var isWorking: Bool { operations.isBusy }
+    private var mountedVolumeCount: Int { multipleASCFMounts ? 2 : (mountedURL == nil ? 0 : 1) }
+
+    func showIdleStatus(_ message: String) {
+        // A cancelled picker in another window must not replace live diagnostics.
+        guard !isWorking else { return }
+        status = message
+    }
+
+    func openExtensionSettings() {
+        guard !isWorking else { return }
+        if !FSClient.shared.openFileSystemExtensionsSettings() {
+            status = "macOS could not open File System Extensions settings."
         }
     }
 
@@ -160,7 +188,7 @@ private struct ASCFMountView: View {
         return mounted.filter { isVerifiedReadOnlyASCFMount($0) }
     }
 
-    private func reconcileMountedVolumes() {
+    func reconcileMountedVolumes() {
         guard !isWorking else { return }
         let volumes = mountedASCFVolumes()
         multipleASCFMounts = volumes.count > 1
@@ -179,43 +207,54 @@ private struct ASCFMountView: View {
         }
     }
 
-    private func mount(_ url: URL, expectCorruptRefusal: Bool) {
-        guard !isWorking, mountedURL == nil else { return }
-        isWorking = true
+    func mount(_ url: URL, expectCorruptRefusal: Bool) {
+        guard !isWorking else { return }
+        // The picker may have stayed open while another window/process mounted.
+        reconcileMountedVolumes()
+        guard let ticket = operations.begin(.mount, mountedVolumeCount: mountedVolumeCount) else { return }
         status = expectCorruptRefusal
             ? "Checking installed FSKit extension before corrupted mount attempt..."
             : "Checking installed FSKit extension..."
         // A valid signed app may still have an extension that macOS has not
         // registered or that the user has disabled. Show the actionable cause
         // before opening the security-scoped archive or requesting a mount.
-        FSClient.shared.fetchInstalledExtensions { modules, error in
-            DispatchQueue.main.async {
+        FSClient.shared.fetchInstalledExtensions { [self] modules, error in
+            DispatchQueue.main.async { [self] in
+                guard operations.isCurrent(ticket) else { return }
                 if let error {
-                    isWorking = false
+                    operations.finish(ticket)
                     status = "FSKit extension discovery failed: \(error.localizedDescription)"
                     return
                 }
                 let moduleID = "org.chriscoveries.applesauce.ascfhost.ascfextension"
                 guard let module = modules?.first(where: { $0.bundleIdentifier == moduleID }) else {
-                    isWorking = false
+                    operations.finish(ticket)
                     status = "ASCF extension is not installed. Install the signed host, then enable its extension in System Settings."
                     return
                 }
                 guard module.isEnabled else {
-                    isWorking = false
+                    operations.finish(ticket)
                     status = "ASCF extension is disabled. Enable it in File System Extensions settings."
                     return
                 }
-                beginMount(url, expectCorruptRefusal: expectCorruptRefusal)
+                beginMount(url, expectCorruptRefusal: expectCorruptRefusal, ticket: ticket)
             }
         }
     }
 
-    private func beginMount(_ url: URL, expectCorruptRefusal: Bool) {
+    private func beginMount(_ url: URL, expectCorruptRefusal: Bool,
+                            ticket: ASCFOperationGate.Ticket) {
+        guard operations.isCurrent(ticket) else { return }
+        // Discovery is asynchronous. Recheck external mounts before FSClient.
+        guard mountedASCFVolumes().isEmpty else {
+            operations.finish(ticket)
+            reconcileMountedVolumes()
+            return
+        }
         // The picker supplies a security-scoped URL. FSKit conveys the scope
         // to the extension; neither process needs write access to the archive.
         guard url.startAccessingSecurityScopedResource() else {
-            isWorking = false
+            operations.finish(ticket)
             status = "macOS did not grant read access to the selected archive."
             return
         }
@@ -227,10 +266,10 @@ private struct ASCFMountView: View {
             resource: resource,
             bundleID: "org.chriscoveries.applesauce.ascfhost.ascfextension",
             options: []
-        ) { mounted, error in
+        ) { [self] mounted, error in
             url.stopAccessingSecurityScopedResource()
-            DispatchQueue.main.async {
-                isWorking = false
+            DispatchQueue.main.async { [self] in
+                guard operations.finish(ticket) else { return }
                 if expectCorruptRefusal {
                     // An error is evidence of refusal only after successful
                     // extension discovery and an actual FSClient callback.
@@ -275,16 +314,18 @@ private struct ASCFMountView: View {
         }
     }
 
-    private func unmount(_ url: URL) {
-        guard !isWorking, mountedURL?.standardizedFileURL == url.standardizedFileURL else { return }
-        isWorking = true
+    func unmount(_ url: URL) {
+        guard !isWorking else { return }
+        reconcileMountedVolumes()
+        guard mountedURL?.standardizedFileURL == url.standardizedFileURL,
+              let ticket = operations.begin(.unmount, mountedVolumeCount: mountedVolumeCount) else { return }
         status = "Unmounting the read-only volume..."
         // FSKit publishes a logical volume, not an ejectable disk device.
         // FileManager's asynchronous volume unmount handles virtual mounts,
         // reports busy-volume failures and never requests forced ejection.
-        FileManager.default.unmountVolume(at: url, options: []) { error in
-            DispatchQueue.main.async {
-                isWorking = false
+        FileManager.default.unmountVolume(at: url, options: []) { [self] error in
+            DispatchQueue.main.async { [self] in
+                guard operations.finish(ticket) else { return }
                 if let error {
                     // Reconcile a concurrent Finder unmount while retaining
                     // the OS error for troubleshooting and acceptance.
