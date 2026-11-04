@@ -160,15 +160,53 @@ ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/_CodeSignature/Cod
 PATHS
 }
 verify_package_manifest() {
-  local bundle="$1" out="$2" path
+  local bundle="$1" out="$2"
   test -f "$bundle/SHA256SUMS" || die "bundle SHA256SUMS missing"
-  while IFS= read -r path; do
-    test -f "$bundle/$path" || die "bundle missing required member: $path"
-    /usr/bin/awk -v expected="$path" \
-      '$2 == expected { found=1 } END { exit !found }' "$bundle/SHA256SUMS" \
-      || die "bundle manifest does not authenticate required member: $path"
-  done < <(required_manifest_paths)
-  (cd "$bundle" && /usr/bin/shasum -a 256 -c SHA256SUMS) \
+  # Validate the manifest BEFORE shasum -c processes any filenames. Only
+  # packaged members may be read. Extra entries, duplicates and any symlink
+  # along a member's path could otherwise redirect verification outside the
+  # selected portable bundle, even with a matching SHA-256.
+  need python3
+  ASCF_REQUIRED_PATHS="$(required_manifest_paths)" \
+    /usr/bin/python3 - "$bundle" <<'PY' \
+    || die "bundle SHA256SUMS has unsafe, missing or unexpected members"
+import os
+from pathlib import Path, PurePosixPath
+import re
+import sys
+
+root = Path(sys.argv[1])
+expected = set(os.environ["ASCF_REQUIRED_PATHS"].splitlines())
+manifest = root / "SHA256SUMS"
+if not expected or manifest.is_symlink():
+    sys.exit("missing expected files or symlinked manifest")
+seen = set()
+for line in manifest.read_text(encoding="utf-8").splitlines():
+    # Our packager emits only ordinary two-space shasum records.
+    match = re.fullmatch(r"[0-9a-fA-F]{64}  (.+)", line)
+    if not match:
+        sys.exit("noncanonical SHA256SUMS entry")
+    member = match.group(1)
+    path = PurePosixPath(member)
+    if (member not in expected or member in seen or path.is_absolute()
+            or any(part in (".", "..") for part in path.parts)):
+        sys.exit("unexpected or duplicate SHA256SUMS path: " + member)
+    cursor = root
+    for component in path.parts:
+        cursor = cursor / component
+        if cursor.is_symlink():
+            sys.exit("symlink in signed bundle member: " + member)
+    if not cursor.is_file():
+        sys.exit("missing regular bundle member: " + member)
+    seen.add(member)
+if seen != expected:
+    sys.exit("bundle manifest omits required members")
+PY
+  # Verify against the checked manifest snapshot, not a potentially replaced
+  # source SHA256SUMS between path inspection and checksum execution.
+  /bin/cp "$bundle/SHA256SUMS" "$out/SHA256SUMS.checked" \
+    || die "cannot stage checked bundle manifest"
+  (cd "$bundle" && /usr/bin/shasum -a 256 -c "$out/SHA256SUMS.checked") \
     > "$out/manifest-verified.log" 2>&1 \
     || die "bundle hash verification failed; see $out/manifest-verified.log"
 }

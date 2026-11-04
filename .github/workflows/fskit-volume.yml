@@ -71,6 +71,21 @@ jobs:
                   )
               result = authenticate()
               assert result.returncode == 0, result.stdout + result.stderr
+              # Refuse attempts to make shasum open files outside the bundle.
+              manifest = root / "SHA256SUMS"
+              clean_manifest = manifest.read_text()
+              manifest.write_text(clean_manifest + "0" * 64 + "  ../outside.txt\n")
+              assert authenticate().returncode != 0, "path traversal accepted"
+              manifest.write_text(clean_manifest + clean_manifest.splitlines()[0] + "\n")
+              assert authenticate().returncode != 0, "duplicate manifest member accepted"
+              manifest.write_text(clean_manifest)
+              steps = root / "NEXT-STEPS.txt"
+              steps.rename(root / "steps-target")
+              steps.symlink_to("steps-target")
+              assert authenticate().returncode != 0, "symlinked member accepted"
+              steps.unlink()
+              (root / "steps-target").rename(steps)
+              assert authenticate().returncode == 0, "restored safe bundle rejected"
               signed_binary = root / "ASCFHost.app/Contents/MacOS/ASCFHost"
               signed_binary.write_bytes(b"modified")
               assert authenticate().returncode != 0, "altered signed binary accepted"
