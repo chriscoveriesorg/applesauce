@@ -24,9 +24,9 @@ fixture: creates an independent, synthetic >8 MiB original and verified ASCF.
 package: builds signed host + BOTH codecs and prepares a portable acceptance
 bundle with SHA-256 manifest, its own verifier, and negative fixtures.
 bundle-readback: verify the portable bundle manifest, signed host, restored
-filename, full logical SHA-256, random reads and FSKit mount identity.
+filename, full logical SHA-256, random reads, Finder enumeration and FSKit mount identity.
 readback: checks signed host + extension provisioned capabilities and runs
-actual statfs, SHA-256, unaligned reads, EOF and denied write-open acceptance.
+actual statfs, SHA-256, unaligned reads, EOF, Finder and denied write-open acceptance.
 unmounted: after normal host/Finder unmount, prove a previously verified
 ASCF mount is gone using its successful readback JSON as evidence.
 Each command uses a new temporary directory and preserves existing data.
@@ -147,12 +147,13 @@ PY
     /bin/mkdir "$out/fskit"
     /bin/cp "$ROOT/fskit/signed_acceptance.sh" "$out/fskit/signed_acceptance.sh"
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
+    /bin/cp "$ROOT/fskit/finder_readback.applescript" "$out/fskit/finder_readback.applescript"
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
       > "$out/portable-verifier-tests.log" 2>&1 \
       || die "packaged verifier self-tests failed; see $out/portable-verifier-tests.log"
     # Relative paths survive moving the bundle. Hash the executable acceptance
     # harness as well as the valid and deliberately corrupted synthetic inputs.
-    (cd "$out" && /usr/bin/shasum -a 256 source.*.jsonl source.*.ascf fskit/*.sh fskit/*.py > SHA256SUMS)
+    (cd "$out" && /usr/bin/shasum -a 256 source.*.jsonl source.*.ascf fskit/*.sh fskit/*.py fskit/*.applescript > SHA256SUMS)
     (cd "$out" && /usr/bin/shasum -a 256 -c SHA256SUMS) > "$out/manifest-verified.log"
     /usr/bin/sw_vers > "$out/macos.txt"
     cat > "$out/NEXT-STEPS.txt" <<'STEPS'
@@ -254,8 +255,16 @@ expected = "source." + sys.argv[2]
 if evidence.get("result") != "pass" or evidence.get("restored_file") != expected:
     sys.exit("FSKit mounted file is not the expected archive member " + expected)
 PY
+    # Independent Finder metadata enumeration, rather than assuming a good
+    # POSIX readback also means ordinary GUI applications see the volume.
+    # An Apple Events permission failure blocks mounted acceptance explicitly.
+    /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
+      "source.$codec" "$(/usr/bin/stat -f %z "$bundle/source.$codec.jsonl")" \
+      > "$out/finder-readback.txt" 2> "$out/finder-error.txt" \
+      || die "Finder could not enumerate mounted ASCF bytes; diagnostics: $out/finder-error.txt"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
+    cat "$out/finder-readback.txt"
     printf 'Bundle readback evidence: %s\n' "$out"
     ;;
   readback)
@@ -269,8 +278,14 @@ PY
     /sbin/mount > "$out/mounts-before.txt"
     /usr/bin/python3 "$ROOT/fskit/verify_mount.py" --mount "$3" --original "$4" \
       > "$out/readback.json" || die "mounted readback failed; see $out"
+    restored_name="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["restored_file"])' "$out/readback.json")"
+    /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
+      "$restored_name" "$(/usr/bin/stat -f %z "$4")" \
+      > "$out/finder-readback.txt" 2> "$out/finder-error.txt" \
+      || die "Finder could not enumerate mounted ASCF bytes; diagnostics: $out/finder-error.txt"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
+    cat "$out/finder-readback.txt"
     printf 'Readback evidence: %s\n' "$out"
     ;;
   unmounted)

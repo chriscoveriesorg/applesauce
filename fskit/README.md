@@ -131,8 +131,8 @@ one payload-corrupted ASCF fixture per codec, and confirms both corrupted
 fixtures fail CLI verification. It writes an isolated directory with
 `ASCFHost.app`, `SHA256SUMS`, fixture generation/build logs,
 `NEXT-STEPS.txt`, the original test data and **copies of both acceptance scripts**.
-The manifest includes the scripts and every fixture; a copied folder can be
-verified without Rust or the original repository checkout. Test the two valid
+The manifest includes both scripts, the Finder AppleScript and every fixture;
+a copied folder can be verified without Rust or the original repository checkout. Test the two valid
 files for mounted readback, normal unmount and remount; then attempt to mount
 both damaged archives and retain macOS rejection evidence. CLI verification proves that
 damaged data fails the archive decoder; only a real FSKit mount refusal
@@ -151,6 +151,11 @@ bash fskit/signed_acceptance.sh bundle-readback . \
 The command validates the relative SHA256SUMS manifest, signed host and
 extension entitlements, the actual `ascf` mount type, SHA-256, random reads,
 EOF, denied write-open and the expected restored filename `source.lzmesh`.
+It also asks Finder through Apple Events to enumerate the one restored file and
+confirm its name and logical size. Keep the `finder-readback.txt` result beside
+the SHA-256 evidence. macOS may ask the invoking Terminal for permission to
+control Finder; a denial fails acceptance and is logged to `finder-error.txt`.
+The test opens no user files in Finder and makes no write requests.
 Repeat using `lzraven` after remounting its archive. The result includes the
 path to `readback.json` for subsequent `unmounted` verification. Neither
 `bundle-readback` nor `unmounted` installs, mounts or edits a volume.
