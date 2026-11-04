@@ -497,7 +497,12 @@ PY
   replacement-check)
     test "$#" -eq 4 || die "replacement-check requires STAGE_DIR MOUNT_DIR ORIGINAL_JSONL"
     mac_only
-    /usr/bin/python3 "$ROOT/fskit/replacement_acceptance.py" check "$2" "$3" "$4"
+    out="$(mktemp -d /tmp/ascf-replacement-evidence.XXXXXXXX)"
+    if ! /usr/bin/python3 "$ROOT/fskit/replacement_acceptance.py" check "$2" "$3" "$4" > "$out/replacement.json"; then
+      die "replacement refusal failed; staged archive may be replaced; see $out"
+    fi
+    cat "$out/replacement.json"
+    printf 'Replacement evidence: %s/replacement.json\n' "$out"
     ;;
   unmounted)
     test "$#" -eq 3 || die "unmounted requires MOUNT_DIR READBACK_JSON"

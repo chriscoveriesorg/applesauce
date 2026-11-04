@@ -122,7 +122,8 @@ def check(directory, mount, original, verifier=None, read_probe=probe_read):
             and report.get("filesystem_type") == "ascf"
             and report.get("kernel_readonly") is True
             and report.get("restored_file") == expected.name
-            and report.get("sha256") == metadata["original_sha256"],
+            and report.get("sha256") == metadata["original_sha256"]
+            and bool(report.get("macos_build")),
             "mounted ASCF readback prerequisite failed")
     before = good.stat()
     os.replace(bad, good)  # Only generated /tmp archive copy.
@@ -139,7 +140,13 @@ def check(directory, mount, original, verifier=None, read_probe=probe_read):
         outcome = {"result": "pass", "codec": metadata["codec"],
                    "stage": str(good.parent), "archive": str(good),
                    "replacement_sha256": metadata["replacement_sha256"],
+                   "source_archive_sha256": metadata["good_sha256"],
                    "original_sha256": metadata["original_sha256"],
+                   "before_replacement_sha256": report["sha256"],
+                   "filesystem_type": report["filesystem_type"],
+                   "kernel_readonly": report["kernel_readonly"],
+                   "restored_file": report["restored_file"],
+                   "macos_build": report["macos_build"],
                    "mount": str(mount), "denied_errno": error.errno,
                    "verified_at_utc": datetime.datetime.now(
                        datetime.timezone.utc).isoformat(),
@@ -184,13 +191,15 @@ class ReplacementTests(unittest.TestCase):
         meta, good, bad = self.prepare()
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
-                    "restored_file": "source.lzmesh", "sha256": meta["original_sha256"]}
+                    "restored_file": "source.lzmesh", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
         def refused(_path):
             raise OSError(errno.ESTALE, "source identity changed")
         with mock.patch("builtins.print"):
             result = check(self.stage_dir, "/Volumes/ASCF",
                            self.bundle / "source.lzmesh.jsonl", verified, refused)
         self.assertEqual(result["denied_errno"], errno.ESTALE)
+        self.assertEqual(result["source_archive_sha256"], meta["good_sha256"])
+        self.assertEqual(result["before_replacement_sha256"], meta["original_sha256"])
         self.assertFalse(bad.exists())
         self.assertEqual(sha256(good), meta["replacement_sha256"])
 
@@ -198,7 +207,7 @@ class ReplacementTests(unittest.TestCase):
         meta, _, _ = self.prepare("lzraven")
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
-                    "restored_file": "source.lzraven", "sha256": meta["original_sha256"]}
+                    "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
         with self.assertRaisesRegex(ValueError, "served a newly opened"):
             check(self.stage_dir, "/Volumes/ASCF",
                   self.bundle / "source.lzraven.jsonl", verified, lambda _: b"x")
@@ -207,7 +216,7 @@ class ReplacementTests(unittest.TestCase):
         meta, _, _ = self.prepare("lzraven")
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
-                    "restored_file": "source.lzraven", "sha256": meta["original_sha256"]}
+                    "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
         def denied(_):
             raise OSError(errno.EACCES, "permissions")
         with self.assertRaisesRegex(ValueError, "unrelated reason"):
