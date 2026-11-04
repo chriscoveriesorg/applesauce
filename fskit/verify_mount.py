@@ -114,7 +114,10 @@ def darwin_statfs(mount):
                 "ASCF mount path changed during VFS inspection")
         return info
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError as error:
+            raise MountCheckError(f"cannot close ASCF mount VFS descriptor: {error}") from error
 
 
 def darwin_filesystem_type(mount):
@@ -443,6 +446,27 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                                                 "ASCF mount path unavailable"):
                         darwin_statfs(self.mount)
                 self.assertEqual(observations, missing_at)
+
+    def test_darwin_statfs_close_failure_fails_closed(self):
+        # A failed descriptor close must not turn an otherwise successful
+        # VFS inspection into a reported acceptance pass.
+        real_close = os.close
+        closed = False
+
+        def failing_close(fd):
+            nonlocal closed
+            real_close(fd)
+            closed = True
+            raise OSError(errno.EIO, "simulated descriptor close failure")
+
+        with mock.patch("ctypes.CDLL", return_value=mock.Mock(
+                fstatfs=mock.Mock(return_value=0))), \
+                mock.patch("os.uname", return_value=mock.Mock(machine="arm64")), \
+                mock.patch("os.close", side_effect=failing_close):
+            with self.assertRaisesRegex(
+                    MountCheckError, "cannot close ASCF mount VFS descriptor"):
+                darwin_statfs(self.mount)
+        self.assertTrue(closed)
 
     def readonly_open(self, *args, **kwargs):
         if Path(args[0]).resolve() == self.restored.resolve() and args[1] & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
