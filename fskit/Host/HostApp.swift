@@ -246,7 +246,7 @@ private struct ASCFMountView: View {
                             let detail = "\(actualError.domain) code \(actualError.code): \(actualError.localizedDescription)"
                             if actualError.domain == FSKitErrorDomain
                                 && actualError.code == FSError.Code.resourceDamaged.rawValue {
-                                status = "CORRUPT_REFUSAL_CONFIRMED: signed FSKit probe rejected the recognized ASCF payload: \(detail)"
+                                status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): signed FSKit probe rejected the recognized ASCF payload: \(detail)"
                             } else {
                                 status = "CORRUPT_REFUSAL_INCONCLUSIVE: mount failed without a verified ASCF damage error: \(detail). Check activation, entitlements and access."
                             }
