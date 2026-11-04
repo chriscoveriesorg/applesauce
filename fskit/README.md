@@ -131,7 +131,13 @@ one payload-corrupted ASCF fixture per codec, and confirms both corrupted
 fixtures fail CLI verification. It writes an isolated directory with
 `ASCFHost.app`, `SHA256SUMS`, fixture generation/build logs,
 `NEXT-STEPS.txt`, the original test data and **copies of both acceptance scripts**.
-The manifest includes both scripts, the Finder AppleScript and every fixture;
+The manifest includes both scripts, the Finder AppleScript and every fixture,
+plus the exact signed host and extension executables, their Info.plists,
+code-signing resource seals and embedded provisioning profiles. The bundle
+records the clean source HEAD in `source-provenance.txt`. Packaging refuses
+tracked source modifications to keep that attribution reproducible. Run
+`bash fskit/signed_acceptance.sh manifest-check /path/to/bundle` before
+installing to verify every mandatory member and its SHA-256 independently.
 a copied folder can be verified without Rust or the original repository checkout. Test the two valid
 files for mounted readback, normal unmount and remount; then attempt to mount
 both damaged archives and retain macOS rejection evidence. CLI verification proves that
