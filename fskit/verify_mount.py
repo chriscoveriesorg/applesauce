@@ -211,6 +211,10 @@ def sampled_offsets(size):
 
 
 def verify_mount(mount, original, require_real_mount=True):
+    # Resolve parent aliases (including macOS /var), but never silently
+    # follow a symlink supplied as the mountpoint itself.
+    require(not stat.S_ISLNK(os.lstat(mount).st_mode),
+            "mount argument must not be a symlink")
     mount = Path(mount).resolve(strict=True)
     # Preserve the reference leaf: resolve() would silently follow a symlink
     # before digest() can enforce O_NOFOLLOW on its opened descriptor.
@@ -905,6 +909,15 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "original file changed"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped, "original-file replacement must be exercised")
+
+    def test_mountpoint_symlink_refused_before_resolution(self):
+        # A symlink to a real mount must not substitute a different pathname
+        # for the directory the caller explicitly asked us to authenticate.
+        alias = self.mount.parent / "mount-alias"
+        alias.symlink_to(self.mount, target_is_directory=True)
+        with self.assertRaisesRegex(MountCheckError,
+                                    "mount argument must not be a symlink"):
+            verify_mount(alias, self.original, require_real_mount=False)
 
     def test_extra_file_refused(self):
         (self.mount / "unexpected").write_bytes(b"")
