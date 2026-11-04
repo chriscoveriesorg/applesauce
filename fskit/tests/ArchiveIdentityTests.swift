@@ -26,15 +26,29 @@ struct ASCFArchiveIdentityTests {
         try manager.moveItem(at: selected, to: moved)
         try content.write(to: selected)
         precondition(!verified.matchesPath(selected), "byte-identical replacement accepted")
-        precondition(verified.matchesPath(moved), "original pinned inode rejected")
+        // macOS may update ctime on rename, which must invalidate a
+        // previous path-bound verification even for the same pinned inode.
+        precondition(!verified.matchesPath(moved), "archive rename accepted")
         try manager.removeItem(at: selected)
         try manager.createSymbolicLink(at: selected, withDestinationURL: moved)
         precondition(!verified.matchesPath(selected), "symlink replacement accepted")
         try manager.removeItem(at: selected)
 
-        // In-place same-size edits must also invalidate the prior digest gate.
-        try Data(repeating: 0x42, count: content.count).write(to: moved)
-        precondition(!verified.matchesPath(moved), "same-size edit accepted")
+        // Capture a fresh unchanged descriptor, then change one byte in
+        // place without replacing the inode or changing the file length.
+        let cleanFD: Int32 = moved.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return -1 }
+            return Darwin.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        }
+        precondition(cleanFD >= 0, "cannot reopen moved archive")
+        let cleanIdentity = try ASCFArchiveIdentity.capture(openDescriptor: cleanFD)
+        _ = Darwin.close(cleanFD)
+        precondition(cleanIdentity.matchesPath(moved), "fresh archive identity rejected")
+        let writer = try FileHandle(forWritingTo: moved)
+        try writer.write(contentsOf: Data([0x42]))
+        try writer.synchronize()
+        try writer.close()
+        precondition(!cleanIdentity.matchesPath(moved), "same-size in-place edit accepted")
         precondition(!verified.matchesPath(selected), "missing source accepted")
         print("ASCF source identity gate: replacement, symlink, and edits refused")
     }
