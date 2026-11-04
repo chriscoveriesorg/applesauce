@@ -103,10 +103,21 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             let nsError = error as NSError
             if nsError.domain == FSKitErrorDomain
                 && nsError.code == FSError.Code.resourceDamaged.rawValue {
-                // A valid ASCF header that fails payload verification is a
-                // damaged resource, not an unrelated filesystem.
+                // A recognized ASCF payload failed codec or SHA-256 verification.
+                // Preserve the typed failure for the host's negative control.
+                replyHandler(nil, error)
+            } else if nsError.domain == NSPOSIXErrorDomain
+                && [Int(EACCES), Int(EPERM), Int(ESTALE), Int(EMFILE),
+                    Int(ENFILE), Int(ENOMEM)].contains(nsError.code) {
+                // Probe can run with a security-scoped resource that was
+                // revoked, moved or blocked by a sandbox/signing restriction.
+                // Report those operational failures to FSClient. Masking them
+                // as notRecognized makes a correctly selected .ascf archive
+                // indistinguishable from an unsupported file.
                 replyHandler(nil, error)
             } else {
+                // Other formats and unparseable ASCF headers remain ordinary
+                // probe misses, avoiding claimed support for random files.
                 replyHandler(.notRecognized, nil)
             }
         }
