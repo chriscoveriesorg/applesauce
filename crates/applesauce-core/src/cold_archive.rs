@@ -72,6 +72,16 @@ fn allocate_buffer(size: usize) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
+// Reuse the largest buffers seen by a mounted reader. Resizing down does not
+// discard capacity; failed growth leaves the previous storage intact.
+fn resize_reusable(buffer: &mut Vec<u8>, size: usize) -> io::Result<()> {
+    if size > buffer.len() {
+        buffer.try_reserve_exact(size - buffer.len()).map_err(io::Error::other)?;
+    }
+    buffer.resize(size, 0);
+    Ok(())
+}
+
 fn file_codec(raw: u32) -> io::Result<Codec> {
     match raw {
         0xD05 => Ok(Codec::Lzraven),
@@ -258,6 +268,10 @@ pub struct ArchiveReader<R> {
     // Lazy so portable metadata inspection works without Apple codecs.
     // Reuse aligned decoder scratch across random reads and verify_all.
     decode_scratch: Option<crate::apple_buffer::Scratch>,
+    // Reused across verify_all and FSKit random reads. Both allocations
+    // remain bounded by the authenticated chunk table (<= 8 MiB clear).
+    encoded_storage: Vec<u8>,
+    decoded_storage: Vec<u8>,
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
@@ -325,6 +339,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
             logical_sha256,
             entries,
             decode_scratch: None,
+            encoded_storage: Vec::new(),
+            decoded_storage: Vec::new(),
         })
     }
 
@@ -343,20 +359,30 @@ impl<R: Read + Seek> ArchiveReader<R> {
         self.logical_sha256
     }
 
-    fn decode_chunk(&mut self, index: usize) -> io::Result<Vec<u8>> {
+    fn decode_chunk(&mut self, index: usize) -> io::Result<&[u8]> {
         let entry = &self.entries[index];
-        let mut encoded = allocate_buffer(entry.stored_len as usize)?;
+        let stored_len = entry.stored_len as usize;
+        let clear_len = entry.clear_len as usize;
+        resize_reusable(&mut self.encoded_storage, stored_len)?;
         self.source.seek(SeekFrom::Start(entry.offset))?;
-        self.source.read_exact(&mut encoded)?;
+        self.source.read_exact(&mut self.encoded_storage[..stored_len])?;
         if self.decode_scratch.is_none() {
             self.decode_scratch = Some(self.codec.reusable_scratch()?);
         }
-        let decoded = self
+        // A full-size destination could conceal truncated output in Apple's
+        // Compression API. The extra byte detects overlong decompression.
+        resize_reusable(&mut self.decoded_storage, clear_len + 1)?;
+        let count = self
             .decode_scratch
             .as_mut()
             .expect("scratch initialized above")
-            .decode_exact(&encoded, entry.clear_len as usize)?;
-        let digest: [u8; 32] = Sha256::digest(&decoded).into();
+            .decode_into(&mut self.decoded_storage[..clear_len + 1],
+                         &self.encoded_storage[..stored_len])?;
+        if count != clear_len {
+            return Err(invalid("archive chunk decoded to the wrong length"));
+        }
+        let decoded = &self.decoded_storage[..clear_len];
+        let digest: [u8; 32] = Sha256::digest(decoded).into();
         if digest != entry.clear_sha256 {
             return Err(invalid("archive chunk SHA-256 mismatch"));
         }
@@ -594,6 +620,13 @@ mod tests {
             assert!(archive.decode_scratch.is_none());
             archive.verify_all().unwrap();
             assert!(archive.decode_scratch.is_some());
+            // A sequential verification and later random read must reuse
+            // the authenticated decode storage rather than allocate for
+            // every chunk. This test runs only with supported Apple codecs.
+            let first_decoded_storage = archive.decode_chunk(0).unwrap().as_ptr();
+            let first_encoded_storage = archive.encoded_storage.as_ptr();
+            assert_eq!(archive.decode_chunk(1).unwrap().as_ptr(), first_decoded_storage);
+            assert_eq!(archive.encoded_storage.as_ptr(), first_encoded_storage);
             for (start, length) in [
                 (0, 1),
                 (MIN_CHUNK_BYTES - 9, 29),
