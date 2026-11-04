@@ -886,7 +886,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "beyond EOF"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
 
-    def check_signed_gate(self, filesystem_type, mount_flags=1):
+    def check_signed_gate(self, filesystem_type, mount_flags=1,
+                          final_filesystem_type=None, final_mount_flags=None):
         # The signed acceptance path must use macOS statfs, rather than
         # accepting an unrelated mounted disk with one matching file.
         self.real_open = os.open
@@ -905,15 +906,20 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         filesystem = DarwinStatFS()
         filesystem.f_fstypename = filesystem_type.encode("ascii")
         filesystem.f_flags = mount_flags
+        final_filesystem = DarwinStatFS()
+        final_filesystem.f_fstypename = (final_filesystem_type or filesystem_type).encode("ascii")
+        final_filesystem.f_flags = mount_flags if final_mount_flags is None else final_mount_flags
         with mock.patch("sys.platform", "darwin"), mock.patch(
             "os.path.ismount", return_value=True
         ), mock.patch.object(
-            sys.modules[__name__], "darwin_statfs", return_value=filesystem
+            sys.modules[__name__], "darwin_statfs", side_effect=[filesystem, final_filesystem]
         ) as statfs_call, mock.patch(
             "subprocess.run", side_effect=command
         ), mock.patch("os.open", side_effect=self.readonly_open):
             outcome = verify_mount(self.mount, self.original)
-        statfs_call.assert_called_once_with(self.mount.resolve(strict=True))
+        expected_mount = self.mount.resolve(strict=True)
+        self.assertEqual(statfs_call.call_args_list,
+                         [mock.call(expected_mount), mock.call(expected_mount)])
         return outcome, seen
 
     def test_darwin_statfs_decodes_actual_filesystem_type(self):
@@ -969,7 +975,13 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.assertTrue(report["kernel_readonly"])
         self.assertEqual(report["macos_version"], "27.2")
         self.assertEqual(report["macos_build"], "26B123")
-        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(seen), 4)
+
+    def test_real_mount_gate_rejects_changed_provenance_at_completion(self):
+        # A mount can change after byte verification. Recheck the VFS identity
+        # and refuse a different read-only mount under the same path.
+        with self.assertRaisesRegex(MountCheckError, "ASCF mount provenance changed"):
+            self.check_signed_gate("ascf", final_mount_flags=0x5)
 
     def test_real_mount_gate_rejects_unrelated_apfs_volume(self):
         with self.assertRaisesRegex(MountCheckError, "expected ASCF FSKit mount"):
