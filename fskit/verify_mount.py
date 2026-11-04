@@ -1127,7 +1127,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
     def test_real_mount_gate_rejects_nonascii_filesystem_type(self):
         # Malformed kernel VFS identity must produce a controlled refusal.
         filesystem = DarwinStatFS()
-        filesystem.f_fstypename = b"\\xffascf"
+        filesystem.f_fstypename = bytes([0xff]) + b"ascf"
         filesystem.f_flags = 1
         with mock.patch("sys.platform", "darwin"), mock.patch.object(
                 sys.modules[__name__], "darwin_statfs", return_value=filesystem):
