@@ -96,7 +96,8 @@ def digest(path, nofollow=False, include_identity=False):
     checksum = hashlib.sha256()
     if nofollow:
         require(hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW unavailable for mounted read")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    require(bool(getattr(os, "O_NONBLOCK", 0)), "O_NONBLOCK unavailable for safe descriptor open")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK
     if nofollow:
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags)
@@ -206,7 +207,8 @@ def verify_mount(mount, original, require_real_mount=True):
 
     # Open read-only and compare deterministic independent-block boundary
     # windows. The final zero-byte read must return EOF.
-    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    require(bool(getattr(os, "O_NONBLOCK", 0)), "O_NONBLOCK unavailable for safe descriptor open")
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK
     source_fd = os.open(original, read_flags | os.O_NOFOLLOW)
     try:
         source_stat = os.fstat(source_fd)
@@ -251,7 +253,7 @@ def verify_mount(mount, original, require_real_mount=True):
     # O_CREAT, unlink(), xattr changes, or renames to a mount.
     for access in (os.O_WRONLY, os.O_RDWR):
         try:
-            writable_fd = os.open(mounted, access | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0) | os.O_NOFOLLOW)
+            writable_fd = os.open(mounted, access | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK | os.O_NOFOLLOW)
         except OSError as error:
             require(error.errno in DENIED, f"unexpected write-open error: {error}")
         else:
@@ -439,6 +441,13 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(MountCheckError, "not a regular file"):
                 digest(self.original, nofollow=True)
         self.assertTrue(swapped)
+
+    def test_missing_nonblocking_flag_fails_closed(self):
+        # Never fall back to blocking FIFO opens on unsupported hosts.
+        with mock.patch.object(os, "O_NONBLOCK", 0, create=True):
+            # A zero-valued flag is not useful protection either.
+            with self.assertRaisesRegex(MountCheckError, "O_NONBLOCK unavailable"):
+                digest(self.original, nofollow=True)
 
     def test_digest_rejects_nonregular_descriptor(self):
         # A pathname can change after directory enumeration. Do not read a
