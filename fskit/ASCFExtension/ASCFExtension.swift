@@ -106,7 +106,8 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                 // A recognized ASCF payload failed codec or SHA-256 verification.
                 // Preserve the typed failure for the host's negative control.
                 replyHandler(nil, error)
-            } else if nsError.domain == NSPOSIXErrorDomain
+            } else if url.pathExtension.lowercased() == "ascf"
+                && nsError.domain == NSPOSIXErrorDomain
                 && [Int(EACCES), Int(EPERM), Int(ESTALE), Int(EMFILE),
                     Int(ENFILE), Int(ENOMEM)].contains(nsError.code) {
                 // Probe can run with a security-scoped resource that was
