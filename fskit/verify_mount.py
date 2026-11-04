@@ -114,10 +114,14 @@ def darwin_statfs(mount):
                 "ASCF mount path changed during VFS inspection")
         return info
     finally:
+        # Preserve the original verification refusal if descriptor cleanup
+        # also fails; otherwise a close error must fail acceptance itself.
+        already_failing = sys.exc_info()[0] is not None
         try:
             os.close(fd)
         except OSError as error:
-            raise MountCheckError(f"cannot close ASCF mount VFS descriptor: {error}") from error
+            if not already_failing:
+                raise MountCheckError(f"cannot close ASCF mount VFS descriptor: {error}") from error
 
 
 def darwin_filesystem_type(mount):
@@ -465,6 +469,26 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 mock.patch("os.close", side_effect=failing_close):
             with self.assertRaisesRegex(
                     MountCheckError, "cannot close ASCF mount VFS descriptor"):
+                darwin_statfs(self.mount)
+        self.assertTrue(closed)
+
+    def test_darwin_statfs_preserves_primary_failure_when_close_also_fails(self):
+        # A cleanup error must not hide the VFS failure that triggered it.
+        real_close = os.close
+        closed = False
+
+        def failing_close(fd):
+            nonlocal closed
+            real_close(fd)
+            closed = True
+            raise OSError(errno.EIO, "simulated descriptor close failure")
+
+        with mock.patch("ctypes.CDLL", return_value=mock.Mock(
+                fstatfs=mock.Mock(return_value=-1))), \
+                mock.patch("os.uname", return_value=mock.Mock(machine="arm64")), \
+                mock.patch("ctypes.get_errno", return_value=errno.EIO), \
+                mock.patch("os.close", side_effect=failing_close):
+            with self.assertRaisesRegex(MountCheckError, "fstatfs failed for ASCF mount"):
                 darwin_statfs(self.mount)
         self.assertTrue(closed)
 
