@@ -30,6 +30,8 @@ jobs:
         run: python3 fskit/acceptance_evidence.py --self-test
       - name: Verify host/extension signing-profile compatibility gate
         run: python3 fskit/signing_profile.py --self-test
+      - name: Verify disposable ASCF archive-replacement refusal acceptance
+        run: python3 fskit/replacement_acceptance.py --self-test
       - name: Check mounted-acceptance Darwin fstatfs ABI on real macOS
         run: |
           python3 - <<'PY'
