@@ -836,27 +836,33 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.assertEqual(DarwinStatFS.f_fstypename.offset, 72)
         self.assertEqual(ctypes.sizeof(DarwinStatFS), 2168)
 
-        def fake_statfs(path, pointer):
-            self.assertEqual(path, os.fsencode(self.mount))
+        def fake_fstatfs(fd, pointer):
+            # The acceptance verifier must bind VFS identity to a live
+            # descriptor, not a pathname that could be replaced mid-check.
+            opened = os.fstat(fd)
+            expected = self.mount.stat()
+            self.assertEqual((opened.st_dev, opened.st_ino),
+                             (expected.st_dev, expected.st_ino))
             ctypes.cast(pointer, ctypes.POINTER(DarwinStatFS)).contents.f_fstypename = b"ascf"
             return 0
 
-        call = mock.Mock(side_effect=fake_statfs)
-        with mock.patch("ctypes.CDLL", return_value=mock.Mock(statfs=call)), mock.patch(
+        call = mock.Mock(side_effect=fake_fstatfs)
+        with mock.patch("ctypes.CDLL", return_value=mock.Mock(fstatfs=call)), mock.patch(
             "os.uname", return_value=mock.Mock(machine="arm64")
         ):
             self.assertEqual(darwin_filesystem_type(self.mount), "ascf")
         call.assert_called_once()
 
     def test_darwin_intel_uses_inode64_entry_point(self):
-        def fake_statfs(path, pointer):
+        def fake_fstatfs(fd, pointer):
+            self.assertTrue(stat.S_ISDIR(os.fstat(fd).st_mode))
             ctypes.cast(pointer, ctypes.POINTER(DarwinStatFS)).contents.f_fstypename = b"ascf"
             return 0
 
         libc = mock.Mock()
-        legacy = libc.statfs
-        inode64 = mock.Mock(side_effect=fake_statfs)
-        setattr(libc, "statfs$INODE64", inode64)
+        legacy = libc.fstatfs
+        inode64 = mock.Mock(side_effect=fake_fstatfs)
+        setattr(libc, "fstatfs$INODE64", inode64)
         with mock.patch("ctypes.CDLL", return_value=libc), mock.patch(
             "os.uname", return_value=mock.Mock(machine="x86_64")
         ):
@@ -866,10 +872,10 @@ class SyntheticAcceptanceTests(unittest.TestCase):
 
     def test_darwin_statfs_failure_is_closed(self):
         call = mock.Mock(return_value=-1)
-        with mock.patch("ctypes.CDLL", return_value=mock.Mock(statfs=call)), mock.patch(
+        with mock.patch("ctypes.CDLL", return_value=mock.Mock(fstatfs=call)), mock.patch(
             "ctypes.get_errno", return_value=errno.EIO
         ), mock.patch("os.uname", return_value=mock.Mock(machine="arm64")):
-            with self.assertRaisesRegex(MountCheckError, "statfs failed"):
+            with self.assertRaisesRegex(MountCheckError, "fstatfs failed"):
                 darwin_filesystem_type(self.mount)
 
     def test_real_mount_gate_records_fskit_identity_and_macos_build(self):
