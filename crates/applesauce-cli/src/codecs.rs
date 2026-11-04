@@ -623,4 +623,111 @@ mod tests {
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(read_bounded_file(&link).is_err());
     }
+
+    #[test]
+    fn native_gate_has_no_flag_bypass_for_raven_mesh() {
+        use clap::Parser;
+        // The compress `-c` enum has no Raven/Mesh variant; try spellings an
+        // operator might reach for, including case tricks and near misses.
+        for codec in [
+            "lzraven", "lzmesh", "LZRAVEN", "LZMESH", "LzRaven", "lz4", "lz4_raw",
+        ] {
+            for flag in ["-c", "--compression"] {
+                assert!(
+                    crate::Cli::try_parse_from(["applesauce", "compress", flag, codec, "input",])
+                        .is_err(),
+                    "compress {flag} {codec} must not parse"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clap_codec_variants_match_capability_table() {
+        use clap::ValueEnum;
+        // If a variant is ever added to the flag surface it must also appear
+        // in the capability sweep, so both tables report the same truth.
+        let variants: Vec<CodecName> = CodecName::value_variants().to_vec();
+        assert_eq!(variants.len(), CodecName::ALL.len());
+        for name in CodecName::ALL {
+            assert!(variants.contains(&name));
+        }
+    }
+
+    #[test]
+    fn native_gate_ignores_environment_overrides() {
+        // Operators and wrappers must not be able to lift the Raven/Mesh
+        // gate with plausible environment variables.
+        let attempts = [
+            "APPLESAUCE_ENABLE_NATIVE",
+            "APPLESAUCE_NATIVE",
+            "APPLESAUCE_NATIVE_RAVEN",
+            "APPLESAUCE_NATIVE_MESH",
+            "APPLESAUCE_ENABLE_LZRAVEN",
+            "APPLESAUCE_ENABLE_LZMESH",
+            "APPLESAUCE_UNSAFE",
+            "APPLESAUCE_UNSAFE_NATIVE",
+            "APPLESAUCE_FORCE_DECMPFS",
+            "APPLESAUCE_DECMPFS_TYPES",
+            "APPLESAUCE_EXPERIMENTAL",
+            "APPLESAUCE_ALLOW_RAVEN_MESH",
+            "RAVEN_DECMPFS_TYPE",
+            "LZMESH_DECMPFS_TYPE",
+            "ENABLE_NATIVE_COMPRESSION",
+        ];
+        for key in attempts {
+            std::env::set_var(key, "1");
+        }
+        let result = std::panic::catch_unwind(|| {
+            for name in [CodecName::Lzraven, CodecName::Lzmesh] {
+                assert!(name.native_kind().is_none());
+                assert!(!name.native_cli_enabled());
+                let native = native_capability(name);
+                assert!(!native.writable);
+                assert!(native.decmpfs_types.is_empty());
+            }
+        });
+        for key in attempts {
+            std::env::remove_var(key);
+        }
+        result.unwrap();
+    }
+
+    #[test]
+    fn gate_source_has_no_env_or_config_lookup() {
+        // A runtime bypass requires a runtime read. These sources gate the
+        // native writer; none may consult the environment or a config file.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let needles = [["env", "::", "var"].concat(), ["option", "_env"].concat()];
+        for file in ["codecs.rs", "archive.rs", "main.rs"] {
+            let text = std::fs::read_to_string(root.join(file)).unwrap();
+            for needle in &needles {
+                assert!(
+                    !text.contains(needle),
+                    "{file} must not contain {needle:?} in the gate path"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn require_native_fails_closed_for_every_nonwritable_codec() {
+        for name in CodecName::ALL {
+            let native = native_capability(name);
+            if native.writable && !native.decmpfs_types.is_empty() {
+                continue;
+            }
+            for json in [true, false] {
+                assert!(
+                    capabilities(&Capabilities {
+                        json,
+                        require_native: Some(name),
+                    })
+                    .is_err(),
+                    "--require-native {} must fail closed",
+                    name.name()
+                );
+            }
+        }
+    }
 }
