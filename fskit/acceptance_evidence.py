@@ -86,8 +86,9 @@ def validate(bundle, codec, first, unmounted, remounted, refusal):
             "unmount report does not bind the first readback verification")
     text = Path(refusal).read_text(encoding="utf-8")
     require("CORRUPT_REFUSAL_CONFIRMED:" in text
+            and "source." + codec + ".corrupt.ascf" in text
             and "signed FSKit probe rejected the recognized ASCF payload" in text,
-            "typed signed-host corruption refusal evidence missing")
+            "typed codec-specific signed-host corruption refusal evidence missing")
 
     paths = (first, unmounted, remounted, refusal)
     evidence_hashes = {
@@ -138,7 +139,7 @@ class EvidenceTests(unittest.TestCase):
             "previous_verification_id": "first"
         }))
         self.items[3].write_text(
-            "CORRUPT_REFUSAL_CONFIRMED: signed FSKit probe rejected the recognized ASCF payload")
+            "CORRUPT_REFUSAL_CONFIRMED: source.lzmesh.corrupt.ascf: signed FSKit probe rejected the recognized ASCF payload")
     def check(self):
         return validate(self.base, "lzmesh", *self.items)
     def test_valid_chain(self):
@@ -162,6 +163,12 @@ class EvidenceTests(unittest.TestCase):
     def test_inconclusive_corruption(self):
         self.items[3].write_text("CORRUPT_REFUSAL_INCONCLUSIVE")
         with self.assertRaisesRegex(EvidenceError, "corruption refusal"):
+            self.check()
+    def test_wrong_codec_refusal(self):
+        self.items[3].write_text(
+            "CORRUPT_REFUSAL_CONFIRMED: source.lzraven.corrupt.ascf: "
+            "signed FSKit probe rejected the recognized ASCF payload")
+        with self.assertRaisesRegex(EvidenceError, "codec-specific"):
             self.check()
     def test_finder_missing(self):
         report = load_json(self.items[2])
