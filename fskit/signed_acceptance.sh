@@ -302,9 +302,15 @@ case "$1" in
     verify_host "$bundle/ASCFHost.app" "$out"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-before.txt"
-    if ! /sbin/mount -t ascf -o rdonly "$archive" "$out/mount" \
+    # -F selects the registered FSKit module, avoiding mount_ascf helper
+    # lookup. -k refuses a substituted symlink at the private mountpoint;
+    # -r requests a kernel-level read-only VFS mount independently of the
+    # extension's requestedMountOptions. Never retry without these flags.
+    printf '/sbin/mount -F -k -r -t ascf %q %q\n' "$archive" "$out/mount" \
+      > "$out/mount-command.txt"
+    if ! /sbin/mount -F -k -r -t ascf "$archive" "$out/mount" \
         > "$out/mount-command.log" 2>&1; then
-      die "FSKit Terminal mount failed; see $out/mount-command.log. Check extension activation/permissions; the host UI remains available."
+      die "FSKit Terminal mount failed; see $out/mount-command.txt and $out/mount-command.log. Check extension activation/permissions; the host UI remains available."
     fi
     /sbin/mount > "$out/mounts-after.txt"
     if ! /usr/bin/python3 "$ROOT/fskit/verify_mount.py" \
