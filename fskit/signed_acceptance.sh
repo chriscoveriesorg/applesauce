@@ -9,6 +9,7 @@ mac_only() { test "$(uname -s)" = Darwin || die "requires a disposable macOS 27+
 usage() {
   cat <<'HELP'
 Usage:
+  bash fskit/signed_acceptance.sh preflight
   bash fskit/signed_acceptance.sh signed-build
   bash fskit/signed_acceptance.sh fixture [lzraven|lzmesh]
   bash fskit/signed_acceptance.sh package
@@ -17,6 +18,8 @@ Usage:
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
 
+preflight: verify macOS 27+, matching SDK, local tools and an unlocked
+Apple Development signing identity for ASCFSKIT_TEAM_ID. Read-only checks.
 signed-build: set ASCFSKIT_TEAM_ID to your Apple Developer Team ID, with
 FSKit mount and module capabilities enabled for their respective App IDs.
 The local Xcode account must already have matching provisioning profiles.
@@ -35,6 +38,35 @@ ASCF mount is gone using its successful readback JSON as evidence.
 Each command uses a new temporary directory and preserves existing data.
 No installation, elevation, mounting, unmounting or APFS writes are automated.
 HELP
+}
+# Fail early with a useful local diagnosis before compiling Rust or creating
+# signed build artifacts. The actual entitlement/profile grant is independently
+# checked against the finished bundles by verify_host().
+signing_preflight() {
+  mac_only
+  local tool product major sdk sdk_major team identities
+  for tool in cargo xcodegen xcodebuild xcrun codesign security python3 shasum ditto git; do
+    need "$tool"
+  done
+  product="$(/usr/bin/sw_vers -productVersion)" || die "cannot read macOS version"
+  major="${product%%.*}"
+  [[ "$major" =~ ^[0-9]+$ ]] && (( 10#$major >= 27 )) \
+    || die "macOS 27+ required for Raven/Mesh mounted acceptance (found $product)"
+  sdk="$(xcrun --sdk macosx --show-sdk-version)" || die "macOS SDK unavailable in active Xcode"
+  sdk_major="${sdk%%.*}"
+  [[ "$sdk_major" =~ ^[0-9]+$ ]] && (( 10#$sdk_major >= 27 )) \
+    || die "macOS 27+ SDK required for FSClient mountSingleVolume (found $sdk)"
+  team="${ASCFSKIT_TEAM_ID:-}"
+  [[ "$team" =~ ^[A-Z0-9]{10}$ ]] \
+    || die "export ASCFSKIT_TEAM_ID as the provisioned 10-character Apple Developer Team ID"
+  identities="$(/usr/bin/security find-identity -v -p codesigning)" \
+    || die "cannot inspect local code-signing identities"
+  if ! /usr/bin/grep -E "Apple Development:.*\\($team\\)" <<< "$identities" >/dev/null; then
+    die "no available Apple Development signing identity for team $team; install/unlock its certificate before signed-build"
+  fi
+  printf 'Signing preflight: macOS %s, SDK %s, developer team %s, tools and signing identity present.\\n' \
+    "$product" "$sdk" "$team"
+  printf 'FSKit entitlement grants still require signed-build profile validation.\\n'
 }
 verify_bundle() {
   local bundle="$1" key="$2" name="$3" out="$4"
@@ -131,6 +163,10 @@ verify_package_manifest() {
 }
 if test "$#" -eq 0; then usage; exit 2; fi
 case "$1" in
+  preflight)
+    test "$#" -eq 1 || die "preflight takes no arguments"
+    signing_preflight
+    ;;
   manifest-paths)
     # Stable machine-readable list for the handoff validator's CI regression.
     test "$#" -eq 1 || die "manifest-paths takes no arguments"
@@ -244,10 +280,8 @@ STEPS
     ;;
   signed-build)
     test "$#" -eq 1 || die "signed-build takes no arguments"
-    mac_only
-    for t in cargo xcodegen xcodebuild codesign security python3; do need "$t"; done
-    team="$(printenv ASCFSKIT_TEAM_ID || true)"
-    test -n "$team" || die "ASCFSKIT_TEAM_ID must specify the provisioned team"
+    signing_preflight
+    team="${ASCFSKIT_TEAM_ID}"
     out="$(mktemp -d /tmp/ascf-signed.XXXXXXXX)"
     cargo build --locked --release -p applesauce-fskit-bridge
     xcodegen generate --spec fskit/project.yml
