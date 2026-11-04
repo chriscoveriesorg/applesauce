@@ -5,6 +5,9 @@ on:
     paths:
       - 'fskit/**'
       - 'crates/applesauce-fskit-bridge/**'
+      # The mounted bridge delegates all logical reads to ArchiveReader.
+      - 'crates/applesauce-core/src/cold_archive.rs'
+      - 'crates/applesauce-core/src/apple_buffer.rs'
       - 'Cargo.lock'
       - '.github/workflows/fskit-volume.yml'
   push:
@@ -12,6 +15,9 @@ on:
     paths:
       - 'fskit/**'
       - 'crates/applesauce-fskit-bridge/**'
+      # The mounted bridge delegates all logical reads to ArchiveReader.
+      - 'crates/applesauce-core/src/cold_archive.rs'
+      - 'crates/applesauce-core/src/apple_buffer.rs'
       - 'Cargo.lock'
       - '.github/workflows/fskit-volume.yml'
 
