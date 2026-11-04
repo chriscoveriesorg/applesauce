@@ -227,8 +227,12 @@ These files are synthetic. Preserve the originals and the signed app.
    bash fskit/signed_acceptance.sh unmounted "/Volumes/Applesauce ASCF" /path/to/readback.json
    Then remount and repeat bundle-readback.
 5. Repeat steps 3-4 with source.lzraven.ascf and codec lzraven.
-6. Attempt to mount each source.<codec>.corrupt.ascf. Each MUST be refused;
-   do not record a passed acceptance if any corrupted archive mounts.
+6. In ASCFHost choose "Test corrupted archive mount refusal" and select
+   source.lzmesh.corrupt.ascf. Use "Copy mount diagnostic" to save the result.
+   Repeat for source.lzraven.corrupt.ascf. A returned mount is a hard failure.
+   Only accept CORRUPT_REFUSAL_OBSERVED when its error confirms archive
+   corruption/format refusal; permission or entitlement errors are inconclusive.
+   Keep the signed host diagnostic and the unchanged ASCF mount listing.
 The bundle hashes the signed host and extension binaries and provisioning
 profiles alongside every fixture and verifier; source-provenance.txt records
 the clean source checkout commit. It does not need Rust on the receiving Mac.
