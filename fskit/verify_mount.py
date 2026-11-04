@@ -465,7 +465,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
     def test_tiny_and_empty_files_preserve_exact_readback(self):
         # Boundary sizes exercise EOF at offset zero and the first byte.
         # The mounted copy must still be independently authenticated.
-        for payload in (b"", b"\\x00", b"\\xff"):
+        for payload in (b"", bytes([0]), bytes([255])):
             with self.subTest(payload=payload):
                 self.original.write_bytes(payload)
                 self.restored.write_bytes(payload)
