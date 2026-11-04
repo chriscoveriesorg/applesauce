@@ -758,16 +758,18 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 raise AssertionError(f"unexpected provenance command: {argv}")
             return subprocess.CompletedProcess(argv, 0, stdout=value + "\n", stderr="")
 
+        filesystem = DarwinStatFS()
+        filesystem.f_fstypename = filesystem_type.encode("ascii")
+        filesystem.f_flags = mount_flags
         with mock.patch("sys.platform", "darwin"), mock.patch(
             "os.path.ismount", return_value=True
         ), mock.patch.object(
-            sys.modules[__name__], "darwin_filesystem_type", return_value=filesystem_type
-        ), mock.patch.object(
-            sys.modules[__name__], "darwin_mount_flags", return_value=mount_flags
-        ), mock.patch("subprocess.run", side_effect=command), mock.patch(
-            "os.open", side_effect=self.readonly_open
-        ):
+            sys.modules[__name__], "darwin_statfs", return_value=filesystem
+        ) as statfs_call, mock.patch(
+            "subprocess.run", side_effect=command
+        ), mock.patch("os.open", side_effect=self.readonly_open):
             outcome = verify_mount(self.mount, self.original)
+        statfs_call.assert_called_once_with(self.mount.resolve(strict=True))
         return outcome, seen
 
     def test_darwin_statfs_decodes_actual_filesystem_type(self):
