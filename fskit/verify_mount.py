@@ -107,7 +107,10 @@ def darwin_statfs(mount):
 
 def darwin_filesystem_type(mount):
     """Read f_fstypename from statfs(2), not BSD stat(1)'s file-type %T."""
-    name = darwin_statfs(mount).f_fstypename.decode("ascii")
+    try:
+        name = darwin_statfs(mount).f_fstypename.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise MountCheckError("invalid non-ASCII filesystem type") from error
     require(bool(name), "statfs returned an empty filesystem type")
     return name
 
@@ -1133,6 +1136,15 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 sys.modules[__name__], "darwin_statfs", return_value=filesystem):
             with self.assertRaisesRegex(MountCheckError, "non-ASCII"):
                 signed_mount_identity(self.mount)
+
+    def test_filesystem_type_helper_rejects_nonascii_vfs_bytes(self):
+        # The standalone type reader must also fail through MountCheckError,
+        # rather than leaking UnicodeDecodeError on malformed kernel data.
+        filesystem = DarwinStatFS()
+        filesystem.f_fstypename = bytes([0xff])
+        with mock.patch(__name__ + ".darwin_statfs", return_value=filesystem):
+            with self.assertRaisesRegex(MountCheckError, "non-ASCII"):
+                darwin_filesystem_type(self.mount)
 
     def test_real_mount_gate_rejects_unrelated_apfs_volume(self):
         with self.assertRaisesRegex(MountCheckError, "expected ASCF FSKit mount"):
