@@ -222,6 +222,37 @@ an extension, request privileges, mount or force-unmount it. Owner-run
 acceptance is **still pending** until a signed disposable Mac demonstrates
 the full lifecycle; synthetic CI remains only a prerequisite.
 
+### Real mounted archive-replacement refusal on disposable test copies
+
+A valid ASCF archive must refuse fresh reads when its underlying pathname
+has been replaced after mounting. Test this separately from the corrupted
+payload control, using only private synthetic copies. On the authorized
+disposable macOS host, inside the signed acceptance bundle:
+
+```sh
+bash fskit/signed_acceptance.sh replacement-stage . lzmesh
+# Select the printed /tmp/ascf-replacement-.../source.lzmesh.ascf
+# in the signed host and mount it. Then execute with that stage path:
+bash fskit/signed_acceptance.sh replacement-check \
+  /tmp/ascf-replacement-XXXXXXXX "/Volumes/Applesauce ASCF" \
+  ./source.lzmesh.jsonl
+# Unmount normally, then repeat with lzraven.
+```
+
+The first command checks the signed bundle and copies its intact archive and
+independently damaged replacement into a private mode-0700 temporary directory.
+The second authenticates the **real mounted ASCF VFS** and whole logical
+SHA-256 before atomically replacing only the staged copy. It requires a fresh
+open/read of the mounted file to fail with ESTALE, EIO or ENODEV. Readable
+cached data or an unrelated access error fails the test. Save its JSON,
+source hashes and signed-host diagnostics for independent review. This check
+never installs, mounts, unmounts, changes xattrs or touches the source bundle.
+The operator must unmount normally after the negative-control attempt.
+
+Tests of this helper run as part of the macOS FSKit compile workflow and the
+signed acceptance package. A successful synthetic test never establishes
+actual mounted acceptance.
+
 ### Machine-check the full signed lifecycle evidence
 
 For each codec, run `bundle-readback` on its first mount and again after
