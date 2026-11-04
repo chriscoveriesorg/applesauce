@@ -519,8 +519,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                     return real_stat(path, *args, **kwargs)
 
                 self.real_open = os.open
-                with mock.patch("os.open", side_effect=self.readonly_open), \\
-                        mock.patch("os.scandir", side_effect=track_scandir), \\
+                with mock.patch("os.open", side_effect=self.readonly_open), \
+                        mock.patch("os.scandir", side_effect=track_scandir), \
                         mock.patch("os.stat", side_effect=missing_final_path):
                     with self.assertRaisesRegex(MountCheckError,
                                                 message + " path unavailable during final verification"):
