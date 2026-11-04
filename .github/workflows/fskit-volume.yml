@@ -43,6 +43,54 @@ jobs:
           bash -n fskit/signed_acceptance.sh
           bash fskit/signed_acceptance.sh --help
           /usr/bin/osacompile -o "$RUNNER_TEMP/ascf-finder-acceptance.scpt" fskit/finder_readback.applescript
+      - name: Reject missing or tampered signed acceptance bundle members
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import pathlib
+          import subprocess
+          import tempfile
+
+          script = pathlib.Path("fskit/signed_acceptance.sh").resolve()
+          required = subprocess.check_output(
+              ["bash", str(script), "manifest-paths"], text=True
+          ).splitlines()
+          assert len(required) == len(set(required)) and len(required) >= 15
+          assert "ASCFHost.app/Contents/MacOS/ASCFHost" in required
+          assert "ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/MacOS/ASCFExtension" in required
+
+          with tempfile.TemporaryDirectory() as tmp:
+              bundle = pathlib.Path(tmp)
+              for name in required:
+                  path = bundle / name
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_bytes(("synthetic-" + name).encode())
+
+              def write_manifest(members):
+                  (bundle / "SHA256SUMS").write_text(
+                      "".join(hashlib.sha256((bundle / name).read_bytes()).hexdigest()
+                              + "  " + name + "\n" for name in members)
+                  )
+
+              def verify(expect_success):
+                  outcome = subprocess.run(
+                      ["bash", str(script), "manifest-check", str(bundle)],
+                      capture_output=True, text=True
+                  )
+                  assert (outcome.returncode == 0) is expect_success, (
+                      outcome.stdout + outcome.stderr
+                  )
+
+              write_manifest(required)
+              verify(True)
+              executable = bundle / "ASCFHost.app/Contents/MacOS/ASCFHost"
+              executable.write_bytes(b"tampered")
+              verify(False)
+              executable.write_bytes(b"synthetic-ASCFHost.app/Contents/MacOS/ASCFHost")
+              write_manifest([name for name in required
+                              if name != "ASCFHost.app/Contents/embedded.provisionprofile"])
+              verify(False)
+          PY
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Verify Rust bridge
