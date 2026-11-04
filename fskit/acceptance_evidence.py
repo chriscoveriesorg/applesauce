@@ -8,6 +8,7 @@ cryptographic attestation of the physical Mac. Independent review remains
 a separate merge requirement.
 """
 import argparse
+import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -28,6 +29,20 @@ def require(condition, message):
 def load_json(path):
     with open(path, encoding="utf-8") as stream:
         return json.load(stream)
+
+
+def evidence_time(report, stage):
+    """Require an unambiguous UTC event time for a witnessed mount lifecycle."""
+    raw = report.get("verified_at_utc")
+    require(isinstance(raw, str), stage + ": missing UTC verification timestamp")
+    try:
+        timestamp = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise EvidenceError(stage + ": invalid verification timestamp") from error
+    require(timestamp.tzinfo is not None and
+            timestamp.utcoffset() == datetime.timedelta(0),
+            stage + ": verification timestamp must be UTC")
+    return timestamp
 
 
 def validate(bundle, codec, first, unmounted, remounted, refusal):
@@ -87,6 +102,11 @@ def validate(bundle, codec, first, unmounted, remounted, refusal):
             "unmount report references a different cleartext")
     require(off.get("previous_verification_id") == first_id,
             "unmount report does not bind the first readback verification")
+    first_at = evidence_time(reports[0], "first mount")
+    unmount_at = evidence_time(off, "unmount")
+    remount_at = evidence_time(reports[1], "remount")
+    require(first_at < unmount_at < remount_at,
+            "mount/unmount/remount timestamps are out of order")
     text = Path(refusal).read_text(encoding="utf-8")
     require("CORRUPT_REFUSAL_CONFIRMED:" in text
             and "source." + codec + ".corrupt.ascf" in text
@@ -134,12 +154,17 @@ class EvidenceTests(unittest.TestCase):
             "mount": "/Volumes/Applesauce ASCF", "macos_version": "27.0",
             "macos_build": "fixture", "random_read_offsets": list(range(20)) + [100]
         }
-        for label, item in zip(("first", "second"), (self.items[0], self.items[2])):
-            item.write_text(json.dumps({**report, "verification_id": label}))
+        for label, item, instant in zip(
+            ("first", "second"), (self.items[0], self.items[2]),
+            ("2026-11-04T00:00:00+00:00", "2026-11-04T00:00:10+00:00")
+        ):
+            item.write_text(json.dumps({**report, "verification_id": label,
+                                        "verified_at_utc": instant}))
         self.items[1].write_text(json.dumps({
             "result": "pass", "unmounted": True,
             "mount": report["mount"], "previous_sha256": self.sha,
-            "previous_verification_id": "first"
+            "previous_verification_id": "first",
+            "verified_at_utc": "2026-11-04T00:00:05+00:00"
         }))
         self.items[3].write_text(
             "CORRUPT_REFUSAL_CONFIRMED: source.lzmesh.corrupt.ascf: signed FSKit probe rejected the recognized ASCF payload")
@@ -151,6 +176,34 @@ class EvidenceTests(unittest.TestCase):
         (self.base / "source.lzmesh.jsonl").write_bytes(b"altered")
         with self.assertRaisesRegex(EvidenceError, "logical bytes"):
             self.check()
+    def test_missing_unmount_timestamp(self):
+        off = load_json(self.items[1])
+        off.pop("verified_at_utc")
+        self.items[1].write_text(json.dumps(off))
+        with self.assertRaisesRegex(EvidenceError, "missing UTC"):
+            self.check()
+
+    def test_unmount_before_first_readback(self):
+        off = load_json(self.items[1])
+        off["verified_at_utc"] = "2026-11-03T23:59:59+00:00"
+        self.items[1].write_text(json.dumps(off))
+        with self.assertRaisesRegex(EvidenceError, "out of order"):
+            self.check()
+
+    def test_remount_before_unmount(self):
+        remount = load_json(self.items[2])
+        remount["verified_at_utc"] = "2026-11-04T00:00:03+00:00"
+        self.items[2].write_text(json.dumps(remount))
+        with self.assertRaisesRegex(EvidenceError, "out of order"):
+            self.check()
+
+    def test_reject_timezone_naive_readback(self):
+        first = load_json(self.items[0])
+        first["verified_at_utc"] = "2026-11-04T00:00:00"
+        self.items[0].write_text(json.dumps(first))
+        with self.assertRaisesRegex(EvidenceError, "must be UTC"):
+            self.check()
+
     def test_unmount_mismatch(self):
         report = load_json(self.items[1])
         report["mount"] = "/Volumes/Other"

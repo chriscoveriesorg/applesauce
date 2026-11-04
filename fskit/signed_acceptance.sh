@@ -471,6 +471,7 @@ PY
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-after-unmount.txt"
     /usr/bin/python3 - "$2" "$3" > "$out/unmounted.json" <<'PY'
+import datetime
 import json
 import os
 import sys
@@ -491,6 +492,8 @@ if os.path.ismount(mount):
 print(json.dumps({"result": "pass", "mount": mount,
                   "previous_sha256": previous.get("sha256"),
                   "previous_verification_id": previous["verification_id"],
+                  "verified_at_utc": datetime.datetime.now(
+                      datetime.timezone.utc).isoformat(),
                   "unmounted": True}, sort_keys=True, indent=2))
 PY
     cat "$out/unmounted.json"
