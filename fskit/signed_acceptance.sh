@@ -215,7 +215,9 @@ case "$1" in
     ;;
   manifest-check)
     test "$#" -eq 2 || die "manifest-check requires BUNDLE_DIR"
-    mac_only
+    # SHA-256 authentication is portable. Allow independent verification of
+    # a signed Mac-generated handoff on Linux, including before transfer.
+    need shasum
     test -d "$2" || die "missing bundle directory: $2"
     out="$(mktemp -d /tmp/ascf-manifest-check.XXXXXXXX)"
     verify_package_manifest "$(cd "$2" && pwd -P)" "$out"
