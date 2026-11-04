@@ -71,7 +71,10 @@ def darwin_statfs(mount):
     except OSError as error:
         raise MountCheckError(f"cannot open ASCF mount for VFS inspection: {error}") from error
     try:
-        before = os.fstat(fd)
+        try:
+            before = os.fstat(fd)
+        except OSError as error:
+            raise MountCheckError(f"ASCF mount descriptor unavailable before VFS inspection: {error}") from error
         require(stat.S_ISDIR(before.st_mode), "ASCF mount descriptor is not a directory")
         # A mountpoint can be replaced between path validation and opening.
         # Bind the VFS descriptor to the pathname before inspecting it.
@@ -96,7 +99,10 @@ def darwin_statfs(mount):
         if call(fd, ctypes.byref(info)) != 0:
             code = ctypes.get_errno()
             raise MountCheckError(f"fstatfs failed for ASCF mount: {os.strerror(code)}")
-        after = os.fstat(fd)
+        try:
+            after = os.fstat(fd)
+        except OSError as error:
+            raise MountCheckError(f"ASCF mount descriptor unavailable during VFS inspection: {error}") from error
         require((before.st_dev, before.st_ino) == (after.st_dev, after.st_ino),
                 "ASCF mount descriptor changed during VFS inspection")
         try:
@@ -1178,6 +1184,30 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             self.assertEqual(darwin_filesystem_type(self.mount), "ascf")
         inode64.assert_called_once()
         legacy.assert_not_called()
+
+    def test_darwin_statfs_descriptor_disappearance_fails_closed(self):
+        # Descriptor failures before and after fstatfs must be controlled
+        # refusals, even if the mount pathname remains present.
+        real_fstat = os.fstat
+        for fail_at, expected in ((1, "before VFS inspection"),
+                                  (2, "during VFS inspection")):
+            calls = 0
+
+            def disappearing_fstat(fd):
+                nonlocal calls
+                calls += 1
+                if calls == fail_at:
+                    raise OSError(errno.EBADF, "descriptor disappeared")
+                return real_fstat(fd)
+
+            fake_vfs = mock.Mock(return_value=0)
+            with self.subTest(fail_at=fail_at), mock.patch(
+                    "os.fstat", side_effect=disappearing_fstat), mock.patch(
+                    "ctypes.CDLL", return_value=mock.Mock(fstatfs=fake_vfs)), mock.patch(
+                    "os.uname", return_value=mock.Mock(machine="arm64")):
+                with self.assertRaisesRegex(MountCheckError, expected):
+                    darwin_statfs(self.mount)
+            self.assertGreaterEqual(calls, fail_at)
 
     def test_darwin_statfs_failure_is_closed(self):
         call = mock.Mock(return_value=-1)
