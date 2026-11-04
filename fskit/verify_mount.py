@@ -379,6 +379,45 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         with mock.patch("os.open", side_effect=self.readonly_open):
             return verify_mount(self.mount, self.original, require_real_mount=False)
 
+    def test_mount_directory_replacement_at_final_identity_check_rejected(self):
+        # The final directory listing may still describe the original mount,
+        # while its pathname is replaced immediately before the last stat.
+        # A byte-identical replacement must not inherit acceptance.
+        real_stat = os.stat
+        real_scandir = os.scandir
+        final_listing_started = False
+        swapped = False
+        scans = 0
+
+        def track_scandir(path):
+            nonlocal scans, final_listing_started
+            if Path(path) == self.mount:
+                scans += 1
+                if scans == 2:
+                    final_listing_started = True
+            return real_scandir(path)
+
+        def swap_at_final_stat(path, *args, **kwargs):
+            nonlocal swapped
+            if Path(path) == self.mount and final_listing_started and not swapped:
+                old_mount = self.mount.parent / "previous_mount"
+                os.rename(self.mount, old_mount)
+                self.mount.mkdir()
+                (self.mount / self.restored.name).write_bytes(
+                    (old_mount / self.restored.name).read_bytes())
+                swapped = True
+            return real_stat(path, *args, **kwargs)
+
+        self.real_open = os.open
+        with mock.patch("os.open", side_effect=self.readonly_open), \
+                mock.patch("os.scandir", side_effect=track_scandir), \
+                mock.patch("os.stat", side_effect=swap_at_final_stat):
+            with self.assertRaisesRegex(
+                    MountCheckError, "ASCF mount directory changed during verification"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(swapped)
+        self.assertEqual(scans, 2)
+
     def test_clean_random_readback_and_eof(self):
         report = self.check()
         self.assertEqual(report["result"], "pass")
