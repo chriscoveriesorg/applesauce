@@ -55,24 +55,44 @@ class DarwinStatFS(ctypes.Structure):
 
 
 def darwin_statfs(mount):
-    """Read the actual Darwin statfs(2) record, including VFS mount flags."""
+    """Read Darwin VFS identity through an open directory, resisting path swaps.
+
+    A path-based statfs can inspect a different mount if a volume is
+    detached or replaced between the initial mountpoint check and statfs.
+    fstatfs pins the inspection to the descriptor, like the FSKit host.
+    """
     if ctypes.sizeof(DarwinStatFS) != 2168 or DarwinStatFS.f_fstypename.offset != 72:
         raise MountCheckError("unsupported Darwin statfs ABI layout")
-    info = DarwinStatFS()
-    libc = ctypes.CDLL(None, use_errno=True)
-    # Intel Darwin retains a legacy unsuffixed statfs entry point. The
-    # $INODE64 variant matches our 64-bit ABI; arm64 uses unsuffixed statfs.
-    symbol = "statfs$INODE64" if os.uname().machine == "x86_64" else "statfs"
+    require(bool(getattr(os, "O_DIRECTORY", 0)), "O_DIRECTORY unavailable for mounted VFS inspection")
+    require(bool(getattr(os, "O_NOFOLLOW", 0)), "O_NOFOLLOW unavailable for mounted VFS inspection")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     try:
-        call = getattr(libc, symbol)
-    except AttributeError as error:
-        raise MountCheckError(f"Darwin libc lacks {symbol}") from error
-    call.argtypes = (ctypes.c_char_p, ctypes.POINTER(DarwinStatFS))
-    call.restype = ctypes.c_int
-    if call(os.fsencode(mount), ctypes.byref(info)) != 0:
-        code = ctypes.get_errno()
-        raise MountCheckError(f"statfs failed for ASCF mount: {os.strerror(code)}")
-    return info
+        fd = os.open(mount, flags)
+    except OSError as error:
+        raise MountCheckError(f"cannot open ASCF mount for VFS inspection: {error}") from error
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISDIR(before.st_mode), "ASCF mount descriptor is not a directory")
+        info = DarwinStatFS()
+        libc = ctypes.CDLL(None, use_errno=True)
+        # Darwin x86_64 exports the inode64 ABI separately from legacy
+        # fstatfs. arm64 uses the unsuffixed symbol for this structure.
+        symbol = "fstatfs$INODE64" if os.uname().machine == "x86_64" else "fstatfs"
+        try:
+            call = getattr(libc, symbol)
+        except AttributeError as error:
+            raise MountCheckError(f"Darwin libc lacks {symbol}") from error
+        call.argtypes = (ctypes.c_int, ctypes.POINTER(DarwinStatFS))
+        call.restype = ctypes.c_int
+        if call(fd, ctypes.byref(info)) != 0:
+            code = ctypes.get_errno()
+            raise MountCheckError(f"fstatfs failed for ASCF mount: {os.strerror(code)}")
+        after = os.fstat(fd)
+        require((before.st_dev, before.st_ino) == (after.st_dev, after.st_ino),
+                "ASCF mount descriptor changed during VFS inspection")
+        return info
+    finally:
+        os.close(fd)
 
 
 def darwin_filesystem_type(mount):
