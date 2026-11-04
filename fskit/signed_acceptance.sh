@@ -167,8 +167,13 @@ verify_package_manifest() {
   # along a member's path could otherwise redirect verification outside the
   # selected portable bundle, even with a matching SHA-256.
   need python3
+  test ! -L "$bundle/SHA256SUMS" || die "symlinked SHA256SUMS manifest"
+  # Copy before validation so shasum checks the identical reviewed list.
+  # All callers use their own mode-0700 staging/evidence directory.
+  /bin/cp "$bundle/SHA256SUMS" "$out/SHA256SUMS.checked" \
+    || die "cannot snapshot bundle SHA256SUMS"
   ASCF_REQUIRED_PATHS="$(required_manifest_paths)" \
-    /usr/bin/python3 - "$bundle" <<'PY' \
+    /usr/bin/python3 - "$bundle" "$out/SHA256SUMS.checked" <<'PY' \
     || die "bundle SHA256SUMS has unsafe, missing or unexpected members"
 import os
 from pathlib import Path, PurePosixPath
@@ -177,8 +182,8 @@ import sys
 
 root = Path(sys.argv[1])
 expected = set(os.environ["ASCF_REQUIRED_PATHS"].splitlines())
-manifest = root / "SHA256SUMS"
-if not expected or manifest.is_symlink():
+manifest = Path(sys.argv[2])
+if not expected:
     sys.exit("missing expected files or symlinked manifest")
 seen = set()
 for line in manifest.read_text(encoding="utf-8").splitlines():
@@ -202,13 +207,11 @@ for line in manifest.read_text(encoding="utf-8").splitlines():
 if seen != expected:
     sys.exit("bundle manifest omits required members")
 PY
-  # Verify against the checked manifest snapshot, not a potentially replaced
-  # source SHA256SUMS between path inspection and checksum execution.
-  /bin/cp "$bundle/SHA256SUMS" "$out/SHA256SUMS.checked" \
-    || die "cannot stage checked bundle manifest"
+  # Verify exactly the checked snapshot, then discard our temporary copy.
   (cd "$bundle" && /usr/bin/shasum -a 256 -c "$out/SHA256SUMS.checked") \
     > "$out/manifest-verified.log" 2>&1 \
     || die "bundle hash verification failed; see $out/manifest-verified.log"
+  /bin/rm -f "$out/SHA256SUMS.checked"
 }
 # Stamp successful mounted readbacks with unique run identities. The
 # unmount verifier binds to that exact first readback; a reused JSON report
