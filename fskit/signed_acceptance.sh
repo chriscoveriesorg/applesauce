@@ -64,9 +64,9 @@ signing_preflight() {
   if ! /usr/bin/grep -E "Apple Development:.*\\($team\\)" <<< "$identities" >/dev/null; then
     die "no available Apple Development signing identity for team $team; install/unlock its certificate before signed-build"
   fi
-  printf 'Signing preflight: macOS %s, SDK %s, developer team %s, tools and signing identity present.\\n' \
+  printf 'Signing preflight: macOS %s, SDK %s, developer team %s, tools and signing identity present.\n' \
     "$product" "$sdk" "$team"
-  printf 'FSKit entitlement grants still require signed-build profile validation.\\n'
+  printf 'FSKit entitlement grants still require signed-build profile validation.\n'
 }
 verify_bundle() {
   local bundle="$1" key="$2" name="$3" out="$4"
