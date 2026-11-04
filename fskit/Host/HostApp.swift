@@ -286,10 +286,25 @@ private struct ASCFMountView: View {
             DispatchQueue.main.async {
                 isWorking = false
                 if let error {
+                    // Keep the mount visible for retry if the OS reports an
+                    // error. Finder may have completed an external unmount in
+                    // parallel, so reconcile the state against the VFS.
                     status = "Unmount failed: \(error.localizedDescription)"
+                    reconcileMountedVolumes()
                 } else {
-                    mountedURL = nil
-                    status = "Unmounted read-only archive."
+                    // An asynchronous success callback is not proof that the
+                    // volume disappeared. Reinspect the live VFS before
+                    // telling the operator that unmount acceptance passed.
+                    let remaining = mountedASCFVolumes()
+                    if isVerifiedReadOnlyASCFMount(url) || !remaining.isEmpty {
+                        multipleASCFMounts = remaining.count > 1
+                        mountedURL = remaining.first ?? url
+                        status = "UNMOUNT_INCONCLUSIVE: macOS reported success, but a read-only ASCF volume is still mounted. Inspect Finder and retry."
+                    } else {
+                        mountedURL = nil
+                        multipleASCFMounts = false
+                        status = "Unmounted read-only archive; VFS confirms no ASCF volume remains."
+                    }
                 }
             }
         }
