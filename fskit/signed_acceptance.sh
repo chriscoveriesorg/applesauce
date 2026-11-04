@@ -88,12 +88,52 @@ verify_host() {
   printf 'Verified bundle IDs: %s / %s; signing team: %s\n' \
     "$host_id" "$extension_id" "$host_team" > "$out/host-extension-identity.txt"
 }
+# Critical bundle members must all be covered by the portable manifest.
+# Code signing validates each bundle internally; these hashes additionally
+# bind the signed binaries and provisioning profiles to the source handoff.
+required_manifest_paths() {
+  cat <<'PATHS'
+source.lzmesh.jsonl
+source.lzraven.jsonl
+source.lzmesh.ascf
+source.lzraven.ascf
+source.lzmesh.corrupt.ascf
+source.lzraven.corrupt.ascf
+source-provenance.txt
+fskit/signed_acceptance.sh
+fskit/verify_mount.py
+fskit/finder_readback.applescript
+ASCFHost.app/Contents/Info.plist
+ASCFHost.app/Contents/MacOS/ASCFHost
+ASCFHost.app/Contents/embedded.provisionprofile
+ASCFHost.app/Contents/_CodeSignature/CodeResources
+ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/Info.plist
+ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/MacOS/ASCFExtension
+ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/embedded.provisionprofile
+ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/_CodeSignature/CodeResources
+PATHS
+}
+verify_package_manifest() {
+  local bundle="$1" out="$2" path
+  test -f "$bundle/SHA256SUMS" || die "bundle SHA256SUMS missing"
+  while IFS= read -r path; do
+    test -f "$bundle/$path" || die "bundle missing required member: $path"
+    /usr/bin/awk -v expected="$path" \
+      '$2 == expected { found=1 } END { exit !found }' "$bundle/SHA256SUMS" \
+      || die "bundle manifest does not authenticate required member: $path"
+  done < <(required_manifest_paths)
+  (cd "$bundle" && /usr/bin/shasum -a 256 -c SHA256SUMS) \
+    > "$out/manifest-verified.log" 2>&1 \
+    || die "bundle hash verification failed; see $out/manifest-verified.log"
+}
 if test "$#" -eq 0; then usage; exit 2; fi
 case "$1" in
   package)
     test "$#" -eq 1 || die "package takes no arguments"
     mac_only
-    for t in cargo shasum ditto python3; do need "$t"; done
+    for t in cargo shasum ditto python3 git; do need "$t"; done
+    git diff --quiet && git diff --cached --quiet \
+      || die "package requires a clean tracked source checkout for reproducible provenance"
     # Explicit single-command handoff. Every input is generated from synthetic
     # data. A signed app is copied intact, preserving its embedded extension.
     out="$(mktemp -d /tmp/ascf-acceptance.XXXXXXXX)"
@@ -151,10 +191,14 @@ PY
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
       > "$out/portable-verifier-tests.log" 2>&1 \
       || die "packaged verifier self-tests failed; see $out/portable-verifier-tests.log"
-    # Relative paths survive moving the bundle. Hash the executable acceptance
-    # harness as well as the valid and deliberately corrupted synthetic inputs.
-    (cd "$out" && /usr/bin/shasum -a 256 source.*.jsonl source.*.ascf fskit/*.sh fskit/*.py fskit/*.applescript > SHA256SUMS)
-    (cd "$out" && /usr/bin/shasum -a 256 -c SHA256SUMS) > "$out/manifest-verified.log"
+    # Carry the exact clean source commit; the manifest authenticates the
+    # signed binaries, app/extension provisioning and all test scripts.
+    printf 'repository=chriscoveriesorg/applesauce\ncommit=%s\n' \
+      "$(git rev-parse --verify HEAD)" > "$out/source-provenance.txt"
+    (cd "$out" && required_manifest_paths | while IFS= read -r path; do
+      /usr/bin/shasum -a 256 "$path"
+    done > SHA256SUMS)
+    verify_package_manifest "$out" "$out"
     /usr/bin/sw_vers > "$out/macos.txt"
     cat > "$out/NEXT-STEPS.txt" <<'STEPS'
 These files are synthetic. Preserve the originals and the signed app.
@@ -169,8 +213,9 @@ These files are synthetic. Preserve the originals and the signed app.
 5. Repeat steps 3-4 with source.lzraven.ascf and codec lzraven.
 6. Attempt to mount each source.<codec>.corrupt.ascf. Each MUST be refused;
    do not record a passed acceptance if any corrupted archive mounts.
-The bundle includes its own verification scripts. It does not need the
-original checkout or Rust to check mounted readback.
+The bundle hashes the signed host and extension binaries and provisioning
+profiles alongside every fixture and verifier; source-provenance.txt records
+the clean source checkout commit. It does not need Rust on the receiving Mac.
 Keep the signed readback, unmount, mount, and rejection evidence.
 No data on the target Mac is automatically mounted or overwritten.
 STEPS
@@ -232,13 +277,10 @@ PY
     case "$codec" in lzraven|lzmesh) ;; *) die "invalid codec";; esac
     test -d "$2" || die "missing bundle directory: $2"
     bundle="$(cd "$2" && pwd -P)"
-    test -f "$bundle/SHA256SUMS" || die "bundle SHA256SUMS missing"
     test -f "$bundle/source.$codec.jsonl" || die "bundle source for $codec missing"
     test -f "$bundle/source.$codec.ascf" || die "bundle archive for $codec missing"
     out="$(mktemp -d /tmp/ascf-bundle-readback.XXXXXXXX)"
-    (cd "$bundle" && /usr/bin/shasum -a 256 -c SHA256SUMS) \
-      > "$out/manifest-verified.log" 2>&1 \
-      || die "bundle contents changed; see $out/manifest-verified.log"
+    verify_package_manifest "$bundle" "$out"
     verify_host "$bundle/ASCFHost.app" "$out"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-before.txt"
