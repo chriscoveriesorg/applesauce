@@ -333,6 +333,27 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
 
+    def test_mount_path_swap_before_vfs_inspection_rejected(self):
+        # The descriptor may still point to the old mount after its pathname
+        # is replaced. Refuse provenance from that stale descriptor.
+        real_stat = os.stat
+        swapped = False
+
+        def swap_before_path_stat(path, *args, **kwargs):
+            nonlocal swapped
+            if Path(path) == self.mount and not swapped:
+                moved = self.mount.parent / "previous_mount"
+                os.rename(self.mount, moved)
+                os.mkdir(self.mount)
+                swapped = True
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch("os.stat", side_effect=swap_before_path_stat):
+            with self.assertRaisesRegex(MountCheckError,
+                                        "ASCF mount path changed before VFS inspection"):
+                darwin_statfs(self.mount)
+        self.assertTrue(swapped)
+
     def readonly_open(self, *args, **kwargs):
         if Path(args[0]).resolve() == self.restored.resolve() and args[1] & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
             raise OSError(errno.EROFS, "read-only filesystem")
