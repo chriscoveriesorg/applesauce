@@ -483,7 +483,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             return real_scandir(path)
 
         self.real_open = os.open
-        with mock.patch("os.open", side_effect=self.readonly_open), \\
+        with mock.patch("os.open", side_effect=self.readonly_open), \
                 mock.patch("os.scandir", side_effect=swap_source_on_final_scan):
             with self.assertRaisesRegex(
                     MountCheckError, "original path changed during final directory enumeration"):
