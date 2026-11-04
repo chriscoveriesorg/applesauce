@@ -263,6 +263,19 @@ def verify_mount(mount, original, require_real_mount=True):
             os.close(writable_fd)
             raise MountCheckError("mounted file permitted write access")
 
+    # Revalidate pathname bindings after negative write probes: a replacement
+    # between authenticated reads and the final report must not be accepted.
+    for path, identity, label in ((original, original_identity, "original"),
+                                  (mounted, mounted_identity, "mounted")):
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise MountCheckError(f"{label} path disappeared after verification: {error}") from error
+        require(stat.S_ISREG(current.st_mode) and
+                (current.st_dev, current.st_ino, current.st_size,
+                 current.st_mtime_ns, current.st_ctime_ns) == identity,
+                f"{label} path changed after verification")
+
     return {"result": "pass", "mount": str(mount), "restored_file": entry.name,
             "logical_bytes": original_size, "sha256": original_sha,
             "random_read_offsets": offsets, "readonly_open_denied": True,
@@ -396,6 +409,33 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                                         "mounted changed during random-read verification"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(mutated)
+
+    def test_mounted_path_replacement_during_write_probe_rejected(self):
+        # Negative write probes can race with pathname replacement. Reject
+        # a byte-identical replacement rather than reporting a stale pass.
+        real_open = os.open
+        replaced = False
+        restored_parent = self.restored.parent.resolve(strict=True)
+
+        def replace_on_probe(path, flags, *args, **kwargs):
+            nonlocal replaced
+            candidate = Path(path)
+            if (candidate.name == self.restored.name
+                    and candidate.parent.resolve(strict=True) == restored_parent
+                    and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)):
+                if not replaced:
+                    replacement = self.mount / "replacement"
+                    replacement.write_bytes(self.restored.read_bytes())
+                    replacement.replace(self.restored)
+                    replaced = True
+                raise OSError(errno.EROFS, "read-only filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=replace_on_probe):
+            with self.assertRaisesRegex(MountCheckError,
+                                        "mounted path changed after verification"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(replaced)
 
     def test_write_open_is_nonblocking_if_mount_entry_becomes_fifo(self):
         # A mounted entry may change between digest and the negative write
