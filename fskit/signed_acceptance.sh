@@ -18,6 +18,8 @@ Usage:
   bash fskit/signed_acceptance.sh acceptance-check BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
+  bash fskit/signed_acceptance.sh replacement-stage BUNDLE_DIR lzraven|lzmesh
+  bash fskit/signed_acceptance.sh replacement-check STAGE_DIR MOUNT_DIR ORIGINAL_JSONL
 
 preflight: verify macOS 27+, matching SDK, local tools and an unlocked
 Apple Development signing identity for ASCFSKIT_TEAM_ID. Read-only checks.
@@ -40,6 +42,8 @@ acceptance-check: validate a complete two-mount and corruption-control evidence
 chain for one codec, with signed bundle and source hashes checked first.
 Each command uses a new temporary directory and preserves existing data.
 No installation, elevation, mounting, unmounting or APFS writes are automated.
+replacement-stage creates private synthetic /tmp archive copies. replacement-check
+only atomically replaces the copy after real mounted readback.
 HELP
 }
 # Fail early with a useful local diagnosis before compiling Rust or creating
@@ -141,6 +145,7 @@ fskit/signed_acceptance.sh
 fskit/verify_mount.py
 fskit/acceptance_evidence.py
 fskit/signing_profile.py
+fskit/replacement_acceptance.py
 fskit/finder_readback.applescript
 ASCFHost.app/Contents/Info.plist
 ASCFHost.app/Contents/MacOS/ASCFHost
@@ -277,6 +282,7 @@ PY
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
     /bin/cp "$ROOT/fskit/acceptance_evidence.py" "$out/fskit/acceptance_evidence.py"
     /bin/cp "$ROOT/fskit/signing_profile.py" "$out/fskit/signing_profile.py"
+    /bin/cp "$ROOT/fskit/replacement_acceptance.py" "$out/fskit/replacement_acceptance.py"
     /bin/cp "$ROOT/fskit/finder_readback.applescript" "$out/fskit/finder_readback.applescript"
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
       > "$out/portable-verifier-tests.log" 2>&1 \
@@ -287,6 +293,9 @@ PY
     /usr/bin/python3 "$out/fskit/signing_profile.py" --self-test \
       > "$out/signing-profile-tests.log" 2>&1 \
       || die "packaged signing-profile self-tests failed; see $out/signing-profile-tests.log"
+    /usr/bin/python3 "$out/fskit/replacement_acceptance.py" --self-test \
+      > "$out/replacement-tests.log" 2>&1 \
+      || die "packaged replacement-control tests failed; see $out/replacement-tests.log"
     # Carry the exact clean source commit; the manifest authenticates the
     # signed binaries, app/extension provisioning and all test scripts.
     printf 'repository=chriscoveriesorg/applesauce\ncommit=%s\n' \
@@ -318,6 +327,14 @@ These files are synthetic. Preserve the originals and the signed app.
    readback.json, unmounted.json, remount readback.json, and captured
    CORRUPT_REFUSAL_CONFIRMED diagnostic. Preserve the resulting JSON and
    request independent signed-mount review before merging.
+8. After normally unmounting, stage an independent archive-replacement test:
+   bash fskit/signed_acceptance.sh replacement-stage . lzmesh
+   Select its generated /tmp/.../source.lzmesh.ascf COPY in the signed host.
+   Once mounted, run:
+   bash fskit/signed_acceptance.sh replacement-check STAGE_DIR "/Volumes/Applesauce ASCF" ./source.lzmesh.jsonl
+   Preserve the JSON evidence and unmount normally. Repeat for lzraven.
+   Only an isolated synthetic /tmp copy is atomically replaced. Any readable
+   cached data or unrelated permission failure blocks acceptance.
 The bundle hashes the signed host and extension binaries and provisioning
 profiles alongside every fixture and verifier; source-provenance.txt records
 the clean source checkout commit. It does not need Rust on the receiving Mac.
@@ -465,6 +482,20 @@ PY
       || die "acceptance chain failed; diagnostics: $out/acceptance.json"
     cat "$out/acceptance.json"
     printf 'Acceptance evidence chain: %s\n' "$out"
+    ;;
+  replacement-stage)
+    test "$#" -eq 3 || die "replacement-stage requires BUNDLE_DIR CODEC"
+    mac_only
+    out="$(mktemp -d /tmp/ascf-replacement-preflight.XXXXXXXX)"
+    bundle="$(cd "$2" && pwd -P)" || die "missing signed bundle"
+    verify_package_manifest "$bundle" "$out"
+    verify_host "$bundle/ASCFHost.app" "$out"
+    /usr/bin/python3 "$ROOT/fskit/replacement_acceptance.py" stage "$bundle" "$3"
+    ;;
+  replacement-check)
+    test "$#" -eq 4 || die "replacement-check requires STAGE_DIR MOUNT_DIR ORIGINAL_JSONL"
+    mac_only
+    /usr/bin/python3 "$ROOT/fskit/replacement_acceptance.py" check "$2" "$3" "$4"
     ;;
   unmounted)
     test "$#" -eq 3 || die "unmounted requires MOUNT_DIR READBACK_JSON"
