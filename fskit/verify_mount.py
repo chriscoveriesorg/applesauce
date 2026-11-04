@@ -324,6 +324,15 @@ def verify_mount(mount, original, require_real_mount=True):
              final_file_stat.st_mtime_ns, final_file_stat.st_ctime_ns) == mounted_identity,
             "mounted path changed during final directory enumeration")
 
+    # Final directory enumeration is not atomic with the earlier source
+    # pathname check. Rebind the source after enumeration as well.
+    final_original_stat = os.stat(original, follow_symlinks=False)
+    require(stat.S_ISREG(final_original_stat.st_mode) and
+            (final_original_stat.st_dev, final_original_stat.st_ino,
+             final_original_stat.st_size, final_original_stat.st_mtime_ns,
+             final_original_stat.st_ctime_ns) == original_identity,
+            "original path changed during final directory enumeration")
+
     # The directory itself must still be the one authenticated at entry.
     # Otherwise a same-name replacement mount could inherit the final checks.
     final_mount_stat = os.stat(mount, follow_symlinks=False)
@@ -451,6 +460,33 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 mock.patch("os.scandir", side_effect=swap_on_final_scan):
             with self.assertRaisesRegex(
                     MountCheckError, "mounted path changed during final directory enumeration"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(swapped)
+        self.assertEqual(scans, 2)
+
+    def test_original_swap_during_final_directory_scan_rejected(self):
+        # A source replacement after its post-write identity check must not
+        # inherit acceptance even when the replacement bytes are identical.
+        real_scandir = os.scandir
+        scans = 0
+        swapped = False
+
+        def swap_source_on_final_scan(path):
+            nonlocal scans, swapped
+            if Path(path) == self.mount:
+                scans += 1
+                if scans == 2:
+                    replacement = self.original.with_suffix(".replacement")
+                    replacement.write_bytes(self.original.read_bytes())
+                    replacement.replace(self.original)
+                    swapped = True
+            return real_scandir(path)
+
+        self.real_open = os.open
+        with mock.patch("os.open", side_effect=self.readonly_open), \\
+                mock.patch("os.scandir", side_effect=swap_source_on_final_scan):
+            with self.assertRaisesRegex(
+                    MountCheckError, "original path changed during final directory enumeration"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped)
         self.assertEqual(scans, 2)
