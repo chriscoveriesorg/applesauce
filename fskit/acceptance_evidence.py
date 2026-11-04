@@ -48,14 +48,17 @@ def validate(bundle, codec, first, unmounted, remounted, refusal):
                 stage + ": VFS read-only proof missing")
         require(report.get("readonly_open_denied") is True,
                 stage + ": denied write opens not established")
-        require(report.get("finder_copy_verified") is True
-                and report.get("finder_copy_sha256") == digest,
-                stage + ": Finder copy-out whole-file verification missing")
-        require(report.get("restored_file") == "source." + codec,
-                stage + ": unexpected archive member")
+        # Check the mounted bytes against the reference before checking the
+        # independently copied Finder output. A replaced synthetic source must
+        # fail at the logical-byte contract, even if the Finder proof is stale.
         require(report.get("logical_bytes") == len(reference)
                 and report.get("sha256") == digest,
                 stage + ": original logical bytes do not match bundle")
+        require(report.get("restored_file") == "source." + codec,
+                stage + ": unexpected archive member")
+        require(report.get("finder_copy_verified") is True
+                and report.get("finder_copy_sha256") == digest,
+                stage + ": Finder copy-out whole-file verification missing")
         mount = report.get("mount")
         require(isinstance(mount, str) and mount.startswith("/Volumes/")
                 and "/../" not in mount and "/./" not in mount,
@@ -176,6 +179,30 @@ class EvidenceTests(unittest.TestCase):
         self.items[2].write_text(json.dumps(report))
         with self.assertRaisesRegex(EvidenceError, "Finder copy-out"):
             self.check()
+    def test_finder_mismatched_digest(self):
+        report = load_json(self.items[2])
+        report["finder_copy_sha256"] = "0" * 64
+        self.items[2].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "Finder copy-out"):
+            self.check()
+    def test_direct_readback_stamps_only_after_finder_copy(self):
+        # The owner-run direct-readback path used to call stamp_readback
+        # before Finder copied a file. That dies on a missing second argv.
+        # Keep both handoff paths single-stamp and copy-first.
+        script = (Path(__file__).parent / "signed_acceptance.sh").read_text(
+            encoding="utf-8")
+        for label, section in (
+            ("direct", script.split("\n  readback)\n", 1)[1].split(
+                "\n  acceptance-check)\n", 1)[0]),
+            ("bundle", script.split("\n  bundle-readback)\n", 1)[1].split(
+                "\n  readback)\n", 1)[0]),
+        ):
+            with self.subTest(path=label):
+                self.assertEqual(section.count('stamp_readback "$out/readback.json"'),
+                                 1, "exactly one Finder-bound verification stamp required")
+                self.assertLess(section.index("/usr/bin/cmp -s"),
+                                section.index('stamp_readback "$out/readback.json"'),
+                                "Finder copy must be compared before stamping")
     def test_reused_mount_report(self):
         self.items[2].write_bytes(self.items[0].read_bytes())
         with self.assertRaisesRegex(EvidenceError, "independent mounted-readback"):
