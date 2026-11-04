@@ -9,6 +9,7 @@ a separate merge requirement.
 """
 import argparse
 import datetime
+import errno
 import hashlib
 import json
 from pathlib import Path
@@ -45,7 +46,7 @@ def evidence_time(report, stage):
     return timestamp
 
 
-def validate(bundle, codec, first, unmounted, remounted, refusal):
+def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     require(codec in ("lzraven", "lzmesh"), "unsupported codec")
     source = Path(bundle) / ("source." + codec + ".jsonl")
     require(source.is_file(), "missing synthetic reference cleartext")
@@ -107,16 +108,43 @@ def validate(bundle, codec, first, unmounted, remounted, refusal):
     remount_at = evidence_time(reports[1], "remount")
     require(first_at < unmount_at < remount_at,
             "mount/unmount/remount timestamps are out of order")
+    # Complete acceptance needs a second, signed FSKit mount where a staged
+    # synthetic archive is replaced and fresh kernel reads are refused.
+    replaced = load_json(replacement)
+    require(replaced.get("result") == "pass" and replaced.get("codec") == codec,
+            "codec-specific replaced-source refusal evidence missing")
+    require(replaced.get("filesystem_type") == "ascf"
+            and replaced.get("kernel_readonly") is True,
+            "replaced-source refusal lacks read-only ASCF VFS proof")
+    require(replaced.get("restored_file") == "source." + codec
+            and replaced.get("mount") == reports[1]["mount"],
+            "replaced-source refusal refers to a different mounted file")
+    require(replaced.get("macos_build") == reports[1]["macos_build"],
+            "replaced-source refusal has different macOS build")
+    require(replaced.get("original_sha256") == digest
+            and replaced.get("before_replacement_sha256") == digest,
+            "replaced-source refusal differs from original logical digest")
+    for field, suffix in (("source_archive_sha256", ".ascf"),
+                          ("replacement_sha256", ".corrupt.ascf")):
+        archive = Path(bundle) / ("source." + codec + suffix)
+        require(archive.is_file(), "required signed-bundle archive fixture missing")
+        require(replaced.get(field) == hashlib.sha256(archive.read_bytes()).hexdigest(),
+                "replaced-source refusal has wrong " + field)
+    require(replaced.get("denied_errno") in (errno.ESTALE, errno.EIO, errno.ENODEV),
+            "replaced-source fresh read did not fail with the permitted errno")
+    require(evidence_time(replaced, "source replacement") > remount_at,
+            "source replacement must follow the verified remount")
+
     text = Path(refusal).read_text(encoding="utf-8")
     require("CORRUPT_REFUSAL_CONFIRMED:" in text
             and "source." + codec + ".corrupt.ascf" in text
             and "signed FSKit probe rejected the recognized ASCF payload" in text,
             "typed codec-specific signed-host corruption refusal evidence missing")
 
-    paths = (first, unmounted, remounted, refusal)
+    paths = (first, unmounted, remounted, refusal, replacement)
     evidence_hashes = {
         name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        for name, path in zip(("first", "unmounted", "remounted", "refusal"), paths)
+        for name, path in zip(("first", "unmounted", "remounted", "refusal", "replacement"), paths)
     }
     return {
         "result": "pass",
@@ -143,7 +171,8 @@ class EvidenceTests(unittest.TestCase):
         self.sha = hashlib.sha256((self.base / "source.lzmesh.jsonl").read_bytes()).hexdigest()
         self.items = [
             self.base / "first.json", self.base / "off.json",
-            self.base / "remount.json", self.base / "refusal.txt"
+            self.base / "remount.json", self.base / "refusal.txt",
+            self.base / "replacement.json"
         ]
         report = {
             "result": "pass", "filesystem_type": "ascf",
@@ -168,10 +197,52 @@ class EvidenceTests(unittest.TestCase):
         }))
         self.items[3].write_text(
             "CORRUPT_REFUSAL_CONFIRMED: source.lzmesh.corrupt.ascf: signed FSKit probe rejected the recognized ASCF payload")
+        valid = b"ASCF0001-clean"
+        corrupt = b"ASCF0001-damaged"
+        (self.base / "source.lzmesh.ascf").write_bytes(valid)
+        (self.base / "source.lzmesh.corrupt.ascf").write_bytes(corrupt)
+        self.items[4].write_text(json.dumps({
+            "result": "pass", "codec": "lzmesh", "filesystem_type": "ascf",
+            "kernel_readonly": True, "restored_file": "source.lzmesh",
+            "mount": "/Volumes/Applesauce ASCF", "macos_build": "fixture",
+            "original_sha256": self.sha, "before_replacement_sha256": self.sha,
+            "source_archive_sha256": hashlib.sha256(valid).hexdigest(),
+            "replacement_sha256": hashlib.sha256(corrupt).hexdigest(),
+            "denied_errno": errno.ESTALE,
+            "verified_at_utc": "2026-11-04T00:00:20+00:00"
+        }))
     def check(self):
         return validate(self.base, "lzmesh", *self.items)
     def test_valid_chain(self):
         self.assertEqual(self.check()["result"], "pass")
+    def test_replaced_source_wrong_digest(self):
+        report = load_json(self.items[4])
+        report["replacement_sha256"] = "0" * 64
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "wrong replacement_sha256"):
+            self.check()
+
+    def test_replaced_source_cached_read(self):
+        report = load_json(self.items[4])
+        report["denied_errno"] = 0
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "permitted errno"):
+            self.check()
+
+    def test_replaced_source_wrong_codec(self):
+        report = load_json(self.items[4])
+        report["codec"] = "lzraven"
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "codec-specific"):
+            self.check()
+
+    def test_replaced_source_precedes_remount(self):
+        report = load_json(self.items[4])
+        report["verified_at_utc"] = "2026-11-04T00:00:07+00:00"
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "follow the verified remount"):
+            self.check()
+
     def test_wrong_source(self):
         (self.base / "source.lzmesh.jsonl").write_bytes(b"altered")
         with self.assertRaisesRegex(EvidenceError, "logical bytes"):
@@ -277,16 +348,17 @@ def main():
     parser.add_argument("--unmounted")
     parser.add_argument("--remounted")
     parser.add_argument("--refusal")
+    parser.add_argument("--replacement")
     args = parser.parse_args()
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(EvidenceTests)
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
     if not all((args.bundle, args.codec, args.first, args.unmounted,
-                args.remounted, args.refusal)):
-        parser.error("bundle, codec, first, unmounted, remounted and refusal are required")
+                args.remounted, args.refusal, args.replacement)):
+        parser.error("bundle, codec, first, unmounted, remounted, refusal and replacement are required")
     try:
         report = validate(args.bundle, args.codec, args.first, args.unmounted,
-                          args.remounted, args.refusal)
+                          args.remounted, args.refusal, args.replacement)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print("acceptance evidence failed: " + str(error), file=sys.stderr)
         return 1

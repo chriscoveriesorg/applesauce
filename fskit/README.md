@@ -249,6 +249,14 @@ source hashes and signed-host diagnostics for independent review. This check
 never installs, mounts, unmounts, changes xattrs or touches the source bundle.
 The operator must unmount normally after the negative-control attempt.
 
+The replacement-check command saves its verified report as
+/tmp/ascf-replacement-evidence.XXXXXXXX/replacement.json. Pass that file to
+acceptance-check as the last argument, after recording the first mount,
+witnessed unmount and remount. The final evidence gate binds both archive
+SHA-256 values, restored logical bytes, actual ASCF read-only VFS identity,
+macOS build, stale-read errno and event ordering to the signed bundle.
+Archive replacement refusal is required for both Raven and Mesh.
+
 Tests of this helper run as part of the macOS FSKit compile workflow and the
 signed acceptance package. A successful synthetic test never establishes
 actual mounted acceptance.

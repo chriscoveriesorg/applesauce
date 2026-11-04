@@ -15,7 +15,7 @@ Usage:
   bash fskit/signed_acceptance.sh package
   bash fskit/signed_acceptance.sh manifest-check BUNDLE_DIR
   bash fskit/signed_acceptance.sh bundle-readback BUNDLE_DIR MOUNT_DIR lzraven|lzmesh
-  bash fskit/signed_acceptance.sh acceptance-check BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT
+  bash fskit/signed_acceptance.sh acceptance-check BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT REPLACEMENT_JSON
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
   bash fskit/signed_acceptance.sh replacement-stage BUNDLE_DIR lzraven|lzmesh
@@ -325,18 +325,17 @@ These files are synthetic. Preserve the originals and the signed app.
    each fixture. CORRUPT_REFUSAL_INCONCLUSIVE means diagnose provisioning,
    permissions, sandbox or activation before claiming corruption refusal.
    Keep the signed host diagnostic and the unchanged ASCF mount listing.
-7. For each codec, run acceptance-check from this bundle with the first
-   readback.json, unmounted.json, remount readback.json, and captured
-   CORRUPT_REFUSAL_CONFIRMED diagnostic. Preserve the resulting JSON and
-   request independent signed-mount review before merging.
-8. After normally unmounting, stage an independent archive-replacement test:
+7. After normally unmounting, stage an independent archive-replacement test:
    bash fskit/signed_acceptance.sh replacement-stage . lzmesh
    Select its generated /tmp/.../source.lzmesh.ascf COPY in the signed host.
    Once mounted, run:
    bash fskit/signed_acceptance.sh replacement-check STAGE_DIR "/Volumes/Applesauce ASCF" ./source.lzmesh.jsonl
-   Preserve the JSON evidence and unmount normally. Repeat for lzraven.
-   Only an isolated synthetic /tmp copy is atomically replaced. Any readable
-   cached data or unrelated permission failure blocks acceptance.
+   Preserve the printed replacement.json path and unmount normally.
+   Repeat for lzraven. Only the private synthetic /tmp copy is replaced.
+   Any cached read or unrelated permission failure blocks acceptance.
+8. For each codec, run acceptance-check with first readback.json,
+   unmounted.json, remount readback.json, the CORRUPT_REFUSAL_CONFIRMED
+   diagnostic and replacement.json. Preserve the complete result for review.
 The bundle hashes the signed host and extension binaries and provisioning
 profiles alongside every fixture and verifier; source-provenance.txt records
 the clean source checkout commit. It does not need Rust on the receiving Mac.
@@ -469,7 +468,7 @@ PY
     printf 'Readback evidence: %s\n' "$out"
     ;;
   acceptance-check)
-    test "$#" -eq 7 || die "acceptance-check requires BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT"
+    test "$#" -eq 8 || die "acceptance-check requires BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT REPLACEMENT_JSON"
     mac_only
     bundle="$(cd "$2" && pwd -P)" || die "missing bundle: $2"
     codec="$3"
@@ -479,7 +478,7 @@ PY
     verify_host "$bundle/ASCFHost.app" "$out"
     /usr/bin/python3 "$ROOT/fskit/acceptance_evidence.py" \
       --bundle "$bundle" --codec "$codec" --first "$4" \
-      --unmounted "$5" --remounted "$6" --refusal "$7" \
+      --unmounted "$5" --remounted "$6" --refusal "$7" --replacement "$8" \
       > "$out/acceptance.json" \
       || die "acceptance chain failed; diagnostics: $out/acceptance.json"
     cat "$out/acceptance.json"
