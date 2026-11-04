@@ -27,9 +27,9 @@ bundle with SHA-256 manifest, its own verifier, and negative fixtures.
 manifest-check: independently verify all critical bundle bytes and coverage
 before installation; does not require signing or attempt to mount anything.
 bundle-readback: verify the portable bundle manifest, signed host, restored
-filename, full logical SHA-256, random reads, Finder enumeration and FSKit mount identity.
+filename, full logical SHA-256, random reads, Finder copy/readback and FSKit mount identity.
 readback: checks signed host + extension provisioned capabilities and runs
-actual statfs, SHA-256, unaligned reads, EOF, Finder and denied write-open acceptance.
+actual statfs, SHA-256, unaligned reads, EOF, Finder-copied byte comparison and denied write-open acceptance.
 unmounted: after normal host/Finder unmount, prove a previously verified
 ASCF mount is gone using its successful readback JSON as evidence.
 Each command uses a new temporary directory and preserves existing data.
@@ -321,10 +321,16 @@ PY
     # Independent Finder metadata enumeration, rather than assuming a good
     # POSIX readback also means ordinary GUI applications see the volume.
     # An Apple Events permission failure blocks mounted acceptance explicitly.
+    /bin/mkdir "$out/finder-copy"
     /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
       "source.$codec" "$(/usr/bin/stat -f %z "$bundle/source.$codec.jsonl")" \
+      "$out/finder-copy" \
       > "$out/finder-readback.txt" 2> "$out/finder-error.txt" \
-      || die "Finder could not enumerate mounted ASCF bytes; diagnostics: $out/finder-error.txt"
+      || die "Finder could not copy mounted ASCF bytes; diagnostics: $out/finder-error.txt"
+    /usr/bin/cmp -s "$out/finder-copy/source.$codec" "$bundle/source.$codec.jsonl" \
+      || die "Finder-copied logical bytes differ from the original source"
+    /usr/bin/shasum -a 256 "$out/finder-copy/source.$codec" \
+      "$bundle/source.$codec.jsonl" > "$out/finder-copy.sha256"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
     cat "$out/finder-readback.txt"
@@ -342,10 +348,16 @@ PY
     /usr/bin/python3 "$ROOT/fskit/verify_mount.py" --mount "$3" --original "$4" \
       > "$out/readback.json" || die "mounted readback failed; see $out"
     restored_name="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["restored_file"])' "$out/readback.json")"
+    /bin/mkdir "$out/finder-copy"
     /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
       "$restored_name" "$(/usr/bin/stat -f %z "$4")" \
+      "$out/finder-copy" \
       > "$out/finder-readback.txt" 2> "$out/finder-error.txt" \
-      || die "Finder could not enumerate mounted ASCF bytes; diagnostics: $out/finder-error.txt"
+      || die "Finder could not copy mounted ASCF bytes; diagnostics: $out/finder-error.txt"
+    /usr/bin/cmp -s "$out/finder-copy/$restored_name" "$4" \
+      || die "Finder-copied logical bytes differ from the original source"
+    /usr/bin/shasum -a 256 "$out/finder-copy/$restored_name" "$4" \
+      > "$out/finder-copy.sha256"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
     cat "$out/finder-readback.txt"
