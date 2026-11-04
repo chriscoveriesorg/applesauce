@@ -88,14 +88,17 @@ bash fskit/signed_acceptance.sh cli-mount . lzraven
 # Follow the printed Finder readback and normal unmount commands.
 ```
 
-This invokes macOS `mount -t ascf -o rdonly` on a newly created private
-directory under `/private/tmp`. It authenticates the signed host and extension,
-their provisioning profiles, the handoff manifest and selected synthetic
-archive before mounting. Afterwards, an independent reader verifies the
-actual read-only ASCF filesystem identity, complete logical SHA-256,
-unaligned/random reads, EOF and denied write-opens. The command retains its
-diagnostics and never elevates privileges, overwrites an existing path,
-changes APFS metadata or forces unmount.
+This invokes macOS `mount -F -k -r -t ascf` on a newly created private
+directory under `/private/tmp`. The `-F` flag selects the registered FSKit
+module instead of a traditional `mount_ascf` helper; `-k` refuses symlink
+substitution of the mountpoint, and `-r` requests a read-only kernel mount.
+The script checks the signed host and extension, provisioning profiles,
+handoff manifest and selected synthetic archive before the mount request.
+It retains the exact invocation in `mount-command.txt`, together with
+`mount-command.log`. An independent reader then verifies actual ASCF VFS
+identity, whole-file SHA-256, unaligned/random reads, EOF and denied write-opens.
+The command never elevates privileges, overwrites an existing path, changes
+APFS metadata or forces unmount.
 
 The signed host UI remains the required path for the full mount/unmount/remount,
 source-replacement and corrupt-mount refusal evidence chain. Terminal mounting
