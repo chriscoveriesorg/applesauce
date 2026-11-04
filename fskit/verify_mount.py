@@ -257,8 +257,11 @@ def verify_mount(mount, original, require_real_mount=True):
         require(os.path.ismount(mount), "path is not a filesystem mount point")
         mount_identity = signed_mount_identity(mount)
     require(original.is_file(), "original cleartext is not a regular file")
-    with os.scandir(mount) as scanner:
-        entries = list(scanner)
+    try:
+        with os.scandir(mount) as scanner:
+            entries = list(scanner)
+    except OSError as error:
+        raise MountCheckError("cannot enumerate ASCF mount entries") from error
     require(len(entries) == 1, "ASCF mount must expose exactly one restored file")
     entry = entries[0]
     require(entry.is_file(follow_symlinks=False), "mounted entry is not a regular file")
@@ -344,8 +347,11 @@ def verify_mount(mount, original, require_real_mount=True):
 
     # A second directory entry introduced during write probes invalidates the
     # one-file volume contract, even when the authenticated file is unchanged.
-    with os.scandir(mount) as scanner:
-        final_entries = list(scanner)
+    try:
+        with os.scandir(mount) as scanner:
+            final_entries = list(scanner)
+    except OSError as error:
+        raise MountCheckError("cannot enumerate final ASCF mount entries") from error
     require(len(final_entries) == 1 and final_entries[0].name == entry.name
             and final_entries[0].is_file(follow_symlinks=False),
             "ASCF mount entries changed after verification")
@@ -408,6 +414,30 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_mount_enumeration_disappearance_fails_closed(self):
+        # A disappearing mount or unreadable directory must fail through the
+        # controlled acceptance error path at either directory scan.
+        real_scandir = os.scandir
+        for failing_scan, expected in ((1, "cannot enumerate ASCF mount entries"),
+                                       (2, "cannot enumerate final ASCF mount entries")):
+            with self.subTest(failing_scan=failing_scan):
+                scans = 0
+
+                def failing_scandir(path):
+                    nonlocal scans
+                    if Path(path) == self.mount:
+                        scans += 1
+                        if scans == failing_scan:
+                            raise OSError(errno.EIO, "synthetic directory read failure")
+                    return real_scandir(path)
+
+                self.real_open = os.open
+                with mock.patch("os.open", side_effect=self.readonly_open), \\
+                        mock.patch("os.scandir", side_effect=failing_scandir):
+                    with self.assertRaisesRegex(MountCheckError, expected):
+                        verify_mount(self.mount, self.original, require_real_mount=False)
+                self.assertEqual(scans, failing_scan)
 
     def test_missing_mount_leaf_fails_closed(self):
         # Missing mountpoint before canonicalization must be a controlled
