@@ -334,7 +334,10 @@ def verify_mount(mount, original, require_real_mount=True):
             "ASCF mount entries changed after verification")
     # Directory enumeration can race with replacement of its sole file.
     # Rebind the final pathname to the authenticated digest-time identity.
-    final_file_stat = os.stat(mounted, follow_symlinks=False)
+    try:
+        final_file_stat = os.stat(mounted, follow_symlinks=False)
+    except OSError as error:
+        raise MountCheckError("mounted path unavailable during final verification") from error
     require(stat.S_ISREG(final_file_stat.st_mode) and
             (final_file_stat.st_dev, final_file_stat.st_ino, final_file_stat.st_size,
              final_file_stat.st_mtime_ns, final_file_stat.st_ctime_ns) == mounted_identity,
@@ -342,7 +345,10 @@ def verify_mount(mount, original, require_real_mount=True):
 
     # Final directory enumeration is not atomic with the earlier source
     # pathname check. Rebind the source after enumeration as well.
-    final_original_stat = os.stat(original, follow_symlinks=False)
+    try:
+        final_original_stat = os.stat(original, follow_symlinks=False)
+    except OSError as error:
+        raise MountCheckError("original path unavailable during final verification") from error
     require(stat.S_ISREG(final_original_stat.st_mode) and
             (final_original_stat.st_dev, final_original_stat.st_ino,
              final_original_stat.st_size, final_original_stat.st_mtime_ns,
@@ -351,7 +357,10 @@ def verify_mount(mount, original, require_real_mount=True):
 
     # The directory itself must still be the one authenticated at entry.
     # Otherwise a same-name replacement mount could inherit the final checks.
-    final_mount_stat = os.stat(mount, follow_symlinks=False)
+    try:
+        final_mount_stat = os.stat(mount, follow_symlinks=False)
+    except OSError as error:
+        raise MountCheckError("mount path unavailable during final verification") from error
     require(stat.S_ISDIR(final_mount_stat.st_mode) and
             (final_mount_stat.st_dev, final_mount_stat.st_ino) == mount_identity_pair,
             "ASCF mount directory changed during verification")
@@ -477,6 +486,41 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped)
         self.assertEqual(scans, 2)
+
+    def test_final_path_disappearance_rejected_with_mount_error(self):
+        # A path may disappear after the final directory scan. Keep the
+        # failure within the verifier's controlled rejection contract.
+        for target, message in ((self.restored, "mounted"),
+                                (self.original, "original"),
+                                (self.mount, "mount")):
+            with self.subTest(target=target):
+                real_stat = os.stat
+                real_scandir = os.scandir
+                scans = 0
+                triggered = False
+
+                def track_scandir(path):
+                    nonlocal scans
+                    if Path(path) == self.mount:
+                        scans += 1
+                    return real_scandir(path)
+
+                def missing_final_path(path, *args, **kwargs):
+                    nonlocal triggered
+                    if scans == 2 and Path(path) == target and not triggered:
+                        triggered = True
+                        raise FileNotFoundError(errno.ENOENT, "path disappeared")
+                    return real_stat(path, *args, **kwargs)
+
+                self.real_open = os.open
+                with mock.patch("os.open", side_effect=self.readonly_open), \\
+                        mock.patch("os.scandir", side_effect=track_scandir), \\
+                        mock.patch("os.stat", side_effect=missing_final_path):
+                    with self.assertRaisesRegex(MountCheckError,
+                                                message + " path unavailable during final verification"):
+                        verify_mount(self.mount, self.original, require_real_mount=False)
+                self.assertTrue(triggered)
+                self.assertEqual(scans, 2)
 
     def test_file_swap_during_final_directory_scan_rejected(self):
         # The first post-write pathname check can pass before scandir.
