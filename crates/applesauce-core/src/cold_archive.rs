@@ -409,8 +409,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let mut current = offset;
         while current < end {
             let index = (current / self.chunk_size as u64) as usize;
-            let chunk = self.decode_chunk(index)?;
             let chunk_start = (index as u64) * self.chunk_size as u64;
+            let chunk = self.decode_chunk(index)?;
             let within = (current - chunk_start) as usize;
             let n = ((end - current) as usize).min(chunk.len() - within);
             let dst = (current - offset) as usize;
