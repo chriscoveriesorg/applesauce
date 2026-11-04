@@ -435,8 +435,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             return Err(error);
         }
         let stored_len = self.entries[index].stored_len as usize;
-        let encoded_digest: [u8; 32] =
-            Sha256::digest(&self.encoded_storage[..stored_len]).into();
+        let encoded_digest: [u8; 32] = Sha256::digest(&self.encoded_storage[..stored_len]).into();
         if self.verified_encoded_chunk == Some((index, encoded_digest)) {
             #[cfg(test)]
             {
@@ -679,9 +678,13 @@ mod tests {
             let clear = vec![0x5au8; MIN_CHUNK_BYTES + 13];
             let mut output = Cursor::new(Vec::new());
             write_archive(
-                clear.as_slice(), &mut output, clear.len() as u64,
-                codec, MIN_CHUNK_BYTES,
-            ).unwrap();
+                clear.as_slice(),
+                &mut output,
+                clear.len() as u64,
+                codec,
+                MIN_CHUNK_BYTES,
+            )
+            .unwrap();
             let mut reader = ArchiveReader::open(Cursor::new(output.into_inner())).unwrap();
 
             let mut observed = [0u8; 48];
