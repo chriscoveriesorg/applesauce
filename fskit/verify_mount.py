@@ -238,7 +238,11 @@ def sampled_offsets(size):
 def verify_mount(mount, original, require_real_mount=True):
     # Resolve parent aliases (including macOS /var), but never silently
     # follow a symlink supplied as the mountpoint itself.
-    require(not stat.S_ISLNK(os.lstat(mount).st_mode),
+    try:
+        mount_leaf = os.lstat(mount)
+    except OSError as error:
+        raise MountCheckError(f"cannot inspect mount argument: {error}") from error
+    require(not stat.S_ISLNK(mount_leaf.st_mode),
             "mount argument must not be a symlink")
     mount = Path(mount).resolve(strict=True)
     # Preserve the reference leaf: resolve() would silently follow a symlink
@@ -404,6 +408,13 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_missing_mount_leaf_fails_closed(self):
+        # Missing mountpoint before canonicalization must be a controlled
+        # verification refusal, not an uncaught filesystem exception.
+        missing = self.mount.parent / "missing-mount"
+        with self.assertRaisesRegex(MountCheckError, "cannot inspect mount argument"):
+            verify_mount(missing, self.original, require_real_mount=False)
 
     def test_mount_path_swap_before_vfs_inspection_rejected(self):
         # The descriptor may still point to the old mount after its pathname
