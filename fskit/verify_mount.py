@@ -73,6 +73,12 @@ def darwin_statfs(mount):
     try:
         before = os.fstat(fd)
         require(stat.S_ISDIR(before.st_mode), "ASCF mount descriptor is not a directory")
+        # A mountpoint can be replaced between path validation and opening.
+        # Bind the VFS descriptor to the pathname before inspecting it.
+        path_before = os.stat(mount, follow_symlinks=False)
+        require(stat.S_ISDIR(path_before.st_mode) and
+                (path_before.st_dev, path_before.st_ino) == (before.st_dev, before.st_ino),
+                "ASCF mount path changed before VFS inspection")
         info = DarwinStatFS()
         libc = ctypes.CDLL(None, use_errno=True)
         # Darwin x86_64 exports the inode64 ABI separately from legacy
@@ -90,6 +96,10 @@ def darwin_statfs(mount):
         after = os.fstat(fd)
         require((before.st_dev, before.st_ino) == (after.st_dev, after.st_ino),
                 "ASCF mount descriptor changed during VFS inspection")
+        path_after = os.stat(mount, follow_symlinks=False)
+        require(stat.S_ISDIR(path_after.st_mode) and
+                (path_after.st_dev, path_after.st_ino) == (before.st_dev, before.st_ino),
+                "ASCF mount path changed during VFS inspection")
         return info
     finally:
         os.close(fd)
