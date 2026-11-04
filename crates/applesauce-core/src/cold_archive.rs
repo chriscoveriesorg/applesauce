@@ -508,6 +508,23 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 "read beyond archive EOF",
             ));
         }
+        if destination.is_empty() {
+            return Ok(());
+        }
+        // Most Finder and FSKit reads fit in one archive chunk. Decode and
+        // authenticate the complete chunk before copying the requested slice
+        // directly into caller memory. No intermediate 8 MiB read buffer is
+        // needed, and errors still leave the caller's bytes untouched.
+        let index = (offset / self.chunk_size as u64) as usize;
+        let within = (offset % self.chunk_size as u64) as usize;
+        if destination.len() <= self.entries[index].clear_len as usize - within {
+            let chunk = self.read_verified_chunk(index)?;
+            destination.copy_from_slice(&chunk[within..within + destination.len()]);
+            return Ok(());
+        }
+
+        // Cross-chunk reads retain the atomic staging contract: if any
+        // later chunk fails authentication, no partial prefix escapes.
         let mut staging = std::mem::take(&mut self.read_staging);
         let result = (|| {
             grow_buffer(&mut staging, destination.len())?;
@@ -690,12 +707,14 @@ mod tests {
             let mut observed = [0u8; 48];
             reader.read_exact_at(3, &mut observed).unwrap();
             assert_eq!(observed, [0x5a; 48]);
+            assert!(reader.read_staging.is_empty());
             assert_eq!(reader.verified_cache_hits, 0);
             let cached = reader.verified_encoded_chunk.unwrap();
             assert_eq!(cached.0, 0);
 
             reader.read_exact_at(17, &mut observed).unwrap();
             assert_eq!(observed, [0x5a; 48]);
+            assert!(reader.read_staging.is_empty());
             assert_eq!(reader.verified_cache_hits, 1);
             assert_eq!(reader.verified_encoded_chunk, Some(cached));
 
