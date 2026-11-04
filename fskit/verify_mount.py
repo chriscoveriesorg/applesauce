@@ -216,6 +216,9 @@ def verify_mount(mount, original, require_real_mount=True):
     # before digest() can enforce O_NOFOLLOW on its opened descriptor.
     original = Path(os.path.abspath(original))
     require(mount.is_dir(), "mount argument is not a directory")
+    mount_stat = os.stat(mount, follow_symlinks=False)
+    require(stat.S_ISDIR(mount_stat.st_mode), "mount path is not a directory")
+    mount_identity_pair = (mount_stat.st_dev, mount_stat.st_ino)
     mount_identity = {}
     if require_real_mount:
         require(os.path.ismount(mount), "path is not a filesystem mount point")
@@ -313,6 +316,18 @@ def verify_mount(mount, original, require_real_mount=True):
     require(len(final_entries) == 1 and final_entries[0].name == entry.name
             and final_entries[0].is_file(follow_symlinks=False),
             "ASCF mount entries changed after verification")
+
+    # The directory itself must still be the one authenticated at entry.
+    # Otherwise a same-name replacement mount could inherit the final checks.
+    final_mount_stat = os.stat(mount, follow_symlinks=False)
+    require(stat.S_ISDIR(final_mount_stat.st_mode) and
+            (final_mount_stat.st_dev, final_mount_stat.st_ino) == mount_identity_pair,
+            "ASCF mount directory changed during verification")
+    if require_real_mount:
+        require(os.path.ismount(mount), "ASCF mount disappeared during verification")
+        final_provenance = signed_mount_identity(mount)
+        require(final_provenance == mount_identity,
+                "ASCF mount provenance changed during verification")
 
     return {"result": "pass", "mount": str(mount), "restored_file": entry.name,
             "logical_bytes": original_size, "sha256": original_sha,
