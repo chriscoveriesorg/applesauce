@@ -56,6 +56,24 @@ install, extension enablement, mounted listing and SHA-256 comparison on
 an authorized disposable Mac remain required before claiming runtime
 compatibility. If the host lacks either entitlement, expect mount failure.
 
+## Signed negative control for corrupted archives
+
+The signed host exposes **Test corrupted archive mount refusal** alongside the
+normal mount button. Use it on the authorized disposable Mac after the
+extension has been installed and enabled. Select each generated
+`source.<codec>.corrupt.ascf` file from the portable acceptance bundle.
+The host calls the same real `FSClient.mountSingleVolume` API as the normal
+mount path and keeps the full rejection diagnostic visible and copyable.
+A returned mount is reported as `CORRUPT_REFUSAL_FAIL` and blocks acceptance;
+the host never silently unmounts an unexpected result.
+
+`CORRUPT_REFUSAL_OBSERVED` records a refused mount with no surviving ASCF
+volume. Inspect the attached error message: permission, entitlement, sandbox,
+extension activation and inaccessible-file errors are **inconclusive** for
+corruption refusal. Save diagnostics for **both** codecs. A successful unit
+test or independent CLI `archive verify` refusal does not prove that
+the signed FSKit path rejected a corrupt archive.
+
 ## Reproducible mounted-file acceptance
 
 The unsigned build and Swift typecheck cannot prove that macOS will register
