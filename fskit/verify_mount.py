@@ -316,6 +316,13 @@ def verify_mount(mount, original, require_real_mount=True):
     require(len(final_entries) == 1 and final_entries[0].name == entry.name
             and final_entries[0].is_file(follow_symlinks=False),
             "ASCF mount entries changed after verification")
+    # Directory enumeration can race with replacement of its sole file.
+    # Rebind the final pathname to the authenticated digest-time identity.
+    final_file_stat = os.stat(mounted, follow_symlinks=False)
+    require(stat.S_ISREG(final_file_stat.st_mode) and
+            (final_file_stat.st_dev, final_file_stat.st_ino, final_file_stat.st_size,
+             final_file_stat.st_mtime_ns, final_file_stat.st_ctime_ns) == mounted_identity,
+            "mounted path changed during final directory enumeration")
 
     # The directory itself must still be the one authenticated at entry.
     # Otherwise a same-name replacement mount could inherit the final checks.
@@ -417,6 +424,33 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 mock.patch("os.stat", side_effect=swap_at_final_stat):
             with self.assertRaisesRegex(
                     MountCheckError, "ASCF mount directory changed during verification"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(swapped)
+        self.assertEqual(scans, 2)
+
+    def test_file_swap_during_final_directory_scan_rejected(self):
+        # The first post-write pathname check can pass before scandir.
+        # Replacing the only entry during final enumeration must not pass.
+        real_scandir = os.scandir
+        scans = 0
+        swapped = False
+
+        def swap_on_final_scan(path):
+            nonlocal scans, swapped
+            if Path(path) == self.mount:
+                scans += 1
+                if scans == 2:
+                    replacement = self.mount / "replacement"
+                    replacement.write_bytes(self.restored.read_bytes())
+                    replacement.replace(self.restored)
+                    swapped = True
+            return real_scandir(path)
+
+        self.real_open = os.open
+        with mock.patch("os.open", side_effect=self.readonly_open), \
+                mock.patch("os.scandir", side_effect=swap_on_final_scan):
+            with self.assertRaisesRegex(
+                    MountCheckError, "mounted path changed during final directory enumeration"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped)
         self.assertEqual(scans, 2)
