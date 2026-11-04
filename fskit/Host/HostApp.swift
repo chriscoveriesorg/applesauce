@@ -286,11 +286,12 @@ private struct ASCFMountView: View {
             DispatchQueue.main.async {
                 isWorking = false
                 if let error {
-                    // Keep the mount visible for retry if the OS reports an
-                    // error. Finder may have completed an external unmount in
-                    // parallel, so reconcile the state against the VFS.
-                    status = "Unmount failed: \(error.localizedDescription)"
-                    reconcileMountedVolumes()
+                    // Reconcile a concurrent Finder unmount while retaining
+                    // the OS error for troubleshooting and acceptance.
+                    let remaining = mountedASCFVolumes()
+                    multipleASCFMounts = remaining.count > 1
+                    mountedURL = remaining.first
+                    status = "Unmount failed: \(error.localizedDescription). Remaining ASCF volumes: \(remaining.count)."
                 } else {
                     // An asynchronous success callback is not proof that the
                     // volume disappeared. Reinspect the live VFS before
