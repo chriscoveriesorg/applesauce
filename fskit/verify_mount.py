@@ -115,7 +115,7 @@ def digest(path, nofollow=False, include_identity=False):
     total = 0
     checksum = hashlib.sha256()
     if nofollow:
-        require(hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW unavailable for mounted read")
+        require(bool(getattr(os, "O_NOFOLLOW", 0)), "O_NOFOLLOW unavailable for mounted read")
     require(bool(getattr(os, "O_NONBLOCK", 0)), "O_NONBLOCK unavailable for safe descriptor open")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK
     if nofollow:
@@ -542,6 +542,12 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         with mock.patch.object(os, "O_NONBLOCK", 0, create=True):
             # A zero-valued flag is not useful protection either.
             with self.assertRaisesRegex(MountCheckError, "O_NONBLOCK unavailable"):
+                digest(self.original, nofollow=True)
+
+    def test_missing_nofollow_flag_fails_closed(self):
+        # A zero-valued flag must not silently disable symlink protection.
+        with mock.patch.object(os, "O_NOFOLLOW", 0, create=True):
+            with self.assertRaisesRegex(MountCheckError, "O_NOFOLLOW unavailable"):
                 digest(self.original, nofollow=True)
 
     def test_digest_rejects_nonregular_descriptor(self):
