@@ -339,7 +339,10 @@ class SyntheticAcceptanceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        base = Path(self.tmp.name)
+        # Resolve /var -> /private/var on macOS before injecting path-swap
+        # failures. verify_mount() canonicalizes its mount argument, and the
+        # mocked os.stat/os.scandir paths must use that same spelling.
+        base = Path(self.tmp.name).resolve(strict=True)
         self.mount = base / "mount"
         self.mount.mkdir()
         self.original = base / "original.bin"
