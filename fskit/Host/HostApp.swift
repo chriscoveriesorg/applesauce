@@ -228,7 +228,7 @@ private struct ASCFMountView: View {
                         if remaining.isEmpty {
                             status = "CORRUPT_REFUSAL_OBSERVED: FSClient rejected the generated corrupt fixture: \(error.localizedDescription). Save this diagnostic and check the error is a decoder/format refusal, not a permission failure."
                         } else {
-                            status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSClient returned an error but ASCF volumes remain mounted: \(remaining.map(\\.path).joined(separator: ", "))"
+                            status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSClient returned an error but ASCF volumes remain mounted: \(remaining.map(\.path).joined(separator: ", "))"
                         }
                     } else {
                         status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSClient returned neither mount nor error."
