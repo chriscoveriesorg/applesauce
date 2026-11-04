@@ -36,10 +36,16 @@ jobs:
         run: cargo test --locked -p applesauce-fskit-bridge
       - name: Build C ABI static library
         run: cargo build --locked --release -p applesauce-fskit-bridge
+      - name: Refuse archive replacements and edits after verification
+        run: |
+          xcrun swiftc -swift-version 5 -o "$RUNNER_TEMP/ascf-identity-tests" \
+            fskit/ASCFExtension/ArchiveIdentity.swift fskit/tests/ArchiveIdentityTests.swift
+          "$RUNNER_TEMP/ascf-identity-tests"
       - name: Check Swift FSKit framework conformances against current SDK
         run: |
           xcrun swiftc -swift-version 5 -parse-as-library -typecheck \
             -import-objc-header crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h \
+            fskit/ASCFExtension/ArchiveIdentity.swift \
             fskit/ASCFExtension/ASCFExtension.swift fskit/ASCFExtension/ASCFVolume.swift
       - name: Validate extension property list
         run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements fskit/Host/Host.entitlements

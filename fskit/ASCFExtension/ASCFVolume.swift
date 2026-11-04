@@ -32,9 +32,14 @@ final class ASCFVolume: FSVolume {
     private let handle: OpaquePointer
     private let root: ASCFItem
     private let file: ASCFItem
+    private let selectedArchiveURL: URL
+    private let sourceIdentity: ASCFArchiveIdentity
 
-    init(handle: OpaquePointer, info: AscfInfo, archiveName: String, identifier: UUID) {
+    init(handle: OpaquePointer, info: AscfInfo, archiveName: String, identifier: UUID,
+         selectedArchiveURL: URL, sourceIdentity: ASCFArchiveIdentity) {
         self.handle = handle
+        self.selectedArchiveURL = selectedArchiveURL
+        self.sourceIdentity = sourceIdentity
         let safeName = archiveName.isEmpty || archiveName == "." || archiveName == ".."
             ? "restored" : archiveName
         root = ASCFItem(name: FSFileName(string: "/"),
@@ -52,6 +57,9 @@ final class ASCFVolume: FSVolume {
     private func failure(_ code: Int32) -> Error { fs_errorForPOSIXError(code) }
     private func isRoot(_ item: FSItem) -> Bool { item === root }
     private func isFile(_ item: FSItem) -> Bool { item === file }
+    private func requireOriginalArchive() throws {
+        guard sourceIdentity.matchesPath(selectedArchiveURL) else { throw failure(ESTALE) }
+    }
 }
 
 extension ASCFVolume: FSVolume.PathConfOperations {
@@ -90,9 +98,12 @@ extension ASCFVolume: FSVolume.Operations {
         return stats
     }
 
-    func activate(options: FSTaskOptions) async throws -> FSItem { root }
+    func activate(options: FSTaskOptions) async throws -> FSItem {
+        try requireOriginalArchive()
+        return root
+    }
     func deactivate(options: FSDeactivateOptions = []) async throws {}
-    func mount(options: FSTaskOptions) async throws {}
+    func mount(options: FSTaskOptions) async throws { try requireOriginalArchive() }
     func unmount() async {}
     func synchronize(flags: FSSyncFlags) async throws {}
 
@@ -101,6 +112,7 @@ extension ASCFVolume: FSVolume.Operations {
         guard let entry = item as? ASCFItem, isRoot(item) || isFile(item) else {
             throw failure(ENOENT)
         }
+        try requireOriginalArchive()
         return entry.attributes
     }
 
@@ -112,6 +124,7 @@ extension ASCFVolume: FSVolume.Operations {
     func lookupItem(named name: FSFileName,
                     inDirectory directory: FSItem) async throws -> (FSItem, FSFileName) {
         guard isRoot(directory), name == file.name else { throw failure(ENOENT) }
+        try requireOriginalArchive()
         return (file, file.name)
     }
 
@@ -123,6 +136,7 @@ extension ASCFVolume: FSVolume.Operations {
                             attributes: FSItem.GetAttributesRequest?,
                             packer: FSDirectoryEntryPacker) async throws -> FSDirectoryVerifier {
         guard isRoot(directory) else { throw failure(ENOTDIR) }
+        try requireOriginalArchive()
         // FSKit requires "." and ".." when attributes are not requested,
         // while requests with attributes should enumerate ordinary items only.
         // Cookies identify a position in the canonical [., .., file] sequence.
@@ -201,6 +215,7 @@ extension ASCFVolume: FSVolume.OpenCloseOperations {
     func openItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {
         guard isRoot(item) || isFile(item) else { throw failure(ENOENT) }
         if modes.contains(.write) { throw failure(EROFS) }
+        try requireOriginalArchive()
     }
     func closeItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {}
 }
@@ -210,6 +225,7 @@ extension ASCFVolume: FSVolume.ReadWriteOperations {
               into buffer: FSMutableFileDataBuffer) async throws -> Int {
         guard isFile(item) else { throw failure(EISDIR) }
         guard offset >= 0, length >= 0 else { throw failure(EINVAL) }
+        try requireOriginalArchive()
         // A short read is valid. The bridge bounds each request to 8 MiB and
         // leaves the output unchanged on corrupt chunk or decoder failure.
         let count = min(length, buffer.length, 8 * 1024 * 1024)
@@ -220,6 +236,7 @@ extension ASCFVolume: FSVolume.ReadWriteOperations {
                        count, &actual)
         }
         guard status == 0 else { throw failure(status) }
+        try requireOriginalArchive()
         return actual
     }
 

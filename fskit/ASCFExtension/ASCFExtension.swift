@@ -22,12 +22,13 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
     // The bridge takes ownership only of its duplicate FD. The original
     // descriptor is opened O_RDONLY/O_NOFOLLOW and always closed here.
-    private static func openArchive(_ url: URL, verify: Bool) throws -> (OpaquePointer, AscfInfo) {
+    private static func openArchive(_ url: URL, verify: Bool) throws -> (OpaquePointer, AscfInfo, ASCFArchiveIdentity) {
         // Opening a FIFO named *.ascf must never block FSKit's probe or load.
         // The bridge rejects every nonregular descriptor before parsing it.
         let fd = Darwin.open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw error(errno) }
         defer { _ = Darwin.close(fd) }
+        let identity = try ASCFArchiveIdentity.capture(openDescriptor: fd)
         var handle: OpaquePointer?
         let openStatus = ascf_open_fd(fd, &handle)
         guard openStatus == 0, let handle else { throw error(openStatus == 0 ? EIO : openStatus) }
@@ -39,7 +40,8 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                 let checkStatus = ascf_verify_all(handle)
                 guard checkStatus == 0 else { throw error(checkStatus) }
             }
-            return (handle, info)
+            guard identity.matchesPath(url) else { throw error(ESTALE) }
+            return (handle, info, identity)
         } catch {
             ascf_close(handle)
             throw error
@@ -81,7 +83,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         do {
             // Do not advertise a malformed or corrupted archive as mountable.
             // The mount path independently verifies again before publication.
-            let (handle, info) = try Self.openArchive(url, verify: true)
+            let (handle, info, _) = try Self.openArchive(url, verify: true)
             defer { ascf_close(handle) }
             replyHandler(.usable(name: "Applesauce ASCF", containerID: FSContainerIdentifier(uuid: Self.identifier(for: info, archiveURL: url))), nil)
         } catch {
@@ -113,10 +115,11 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         do {
             // Full verification is a mandatory pre-publication gate.
-            let (handle, info) = try Self.openArchive(url, verify: true)
+            let (handle, info, identity) = try Self.openArchive(url, verify: true)
             let mounted = ASCFVolume(
                 handle: handle, info: info, archiveName: url.deletingPathExtension().lastPathComponent,
-                identifier: Self.identifier(for: info, archiveURL: url)
+                identifier: Self.identifier(for: info, archiveURL: url),
+                selectedArchiveURL: url, sourceIdentity: identity
             )
             volume = mounted
             scopedURL = url
