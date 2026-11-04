@@ -150,7 +150,7 @@ one payload-corrupted ASCF fixture per codec, and confirms both corrupted
 fixtures fail CLI verification. It writes an isolated directory with
 `ASCFHost.app`, `SHA256SUMS`, fixture generation/build logs,
 `NEXT-STEPS.txt`, the original test data and **copies of both acceptance scripts**.
-The manifest includes both scripts, the Finder AppleScript and every fixture,
+The manifest includes all acceptance scripts, the Finder AppleScript, the recorded macOS build, authenticated operator instructions and every fixture,
 plus the exact signed host and extension executables, their Info.plists,
 code-signing resource seals and embedded provisioning profiles. The bundle
 records the clean source HEAD in `source-provenance.txt`. Packaging refuses
@@ -271,15 +271,16 @@ matching damaged fixture. The portable bundle contains a final check:
 ```sh
 bash fskit/signed_acceptance.sh acceptance-check . lzmesh \
   /path/first/readback.json /path/unmount/unmounted.json \
-  /path/remount/readback.json /path/corrupt-refusal.txt
-# Repeat for lzraven with its own four evidence files.
+  /path/remount/readback.json /path/corrupt-refusal.txt \
+  /path/replacement/replacement.json
+# Repeat for lzraven with its own five evidence files.
 ```
 
 The command rechecks the SHA-256 manifest, signing identities, the archived
 source and both readback JSON reports, the intervening unmount, kernel-level
 read-only VFS flags, random/EOF evidence and the typed corruption-refusal
 diagnostic. It emits a JSON summary with hashes of all four evidence files.
-Its success establishes **internal consistency of operator-supplied evidence**;
+Its success establishes **internal consistency of operator-supplied evidence**, including the staged archive-replacement refusal;
 the captured host diagnostic is not a signed machine attestation. Independent
 review of the authorized Mac's actual installed extension and mounted
 readback remains mandatory before merging PR #86. The gate can be regression

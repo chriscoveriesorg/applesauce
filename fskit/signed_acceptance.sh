@@ -141,6 +141,8 @@ source.lzraven.ascf
 source.lzmesh.corrupt.ascf
 source.lzraven.corrupt.ascf
 source-provenance.txt
+macos.txt
+NEXT-STEPS.txt
 fskit/signed_acceptance.sh
 fskit/verify_mount.py
 fskit/acceptance_evidence.py
@@ -302,10 +304,6 @@ PY
     # signed binaries, app/extension provisioning and all test scripts.
     printf 'repository=chriscoveriesorg/applesauce\ncommit=%s\n' \
       "$(git rev-parse --verify HEAD)" > "$out/source-provenance.txt"
-    (cd "$out" && required_manifest_paths | while IFS= read -r path; do
-      /usr/bin/shasum -a 256 "$path"
-    done > SHA256SUMS)
-    verify_package_manifest "$out" "$out"
     /usr/bin/sw_vers > "$out/macos.txt"
     cat > "$out/NEXT-STEPS.txt" <<'STEPS'
 These files are synthetic. Preserve the originals and the signed app.
@@ -342,6 +340,12 @@ the clean source checkout commit. It does not need Rust on the receiving Mac.
 Keep the signed readback, unmount, mount, and rejection evidence.
 No data on the target Mac is automatically mounted or overwritten.
 STEPS
+    # Authenticate operator instructions and recorded build OS too. Hash
+    # after ALL mandatory members have been created, then verify in place.
+    (cd "$out" && required_manifest_paths | while IFS= read -r path; do
+      /usr/bin/shasum -a 256 "$path"
+    done > SHA256SUMS)
+    verify_package_manifest "$out" "$out"
     printf 'Signed acceptance bundle: %s\nSHA-256: %s/SHA256SUMS\n' "$out" "$out"
     ;;
   signed-build)

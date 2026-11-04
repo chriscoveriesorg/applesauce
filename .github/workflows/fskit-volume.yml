@@ -53,6 +53,7 @@ jobs:
               ["bash", str(script), "manifest-paths"], text=True
           ).splitlines()
           assert len(members) == len(set(members)) and len(members) >= 15
+          assert "NEXT-STEPS.txt" in members and "macos.txt" in members
           with tempfile.TemporaryDirectory() as directory:
               root = pathlib.Path(directory)
               for name in members:
@@ -74,6 +75,14 @@ jobs:
               signed_binary.write_bytes(b"modified")
               assert authenticate().returncode != 0, "altered signed binary accepted"
               signed_binary.write_bytes(b"synthetic:ASCFHost.app/Contents/MacOS/ASCFHost")
+              operator_steps = root / "NEXT-STEPS.txt"
+              operator_steps.write_bytes(b"tampered operator instructions")
+              assert authenticate().returncode != 0, "altered owner instructions accepted"
+              operator_steps.write_bytes(b"synthetic:NEXT-STEPS.txt")
+              host_os = root / "macos.txt"
+              host_os.write_bytes(b"tampered OS provenance")
+              assert authenticate().returncode != 0, "altered macOS provenance accepted"
+              host_os.write_bytes(b"synthetic:macos.txt")
               (root / "ASCFHost.app/Contents/embedded.provisionprofile").unlink()
               assert authenticate().returncode != 0, "missing provisioning profile accepted"
           PY
@@ -121,6 +130,7 @@ jobs:
               ["bash", str(script), "manifest-paths"], text=True
           ).splitlines()
           assert len(required) == len(set(required)) and len(required) >= 15
+          assert "NEXT-STEPS.txt" in required and "macos.txt" in required
           assert "ASCFHost.app/Contents/MacOS/ASCFHost" in required
           assert "ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/MacOS/ASCFExtension" in required
 
