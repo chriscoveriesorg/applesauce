@@ -165,6 +165,28 @@ verify_package_manifest() {
     > "$out/manifest-verified.log" 2>&1 \
     || die "bundle hash verification failed; see $out/manifest-verified.log"
 }
+# Stamp successful mounted readbacks with unique run identities. The
+# unmount verifier binds to that exact first readback; a reused JSON report
+# cannot masquerade as evidence of a second, independent remount.
+stamp_readback() {
+  /usr/bin/python3 - "$1" <<'PY'
+import datetime
+import json
+from pathlib import Path
+import sys
+import uuid
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+if report.get("result") != "pass":
+    sys.exit("cannot stamp a failed mounted-readback report")
+report["verification_id"] = str(uuid.uuid4())
+report["verified_at_utc"] = datetime.datetime.now(
+    datetime.timezone.utc).isoformat()
+path.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8")
+PY
+}
 if test "$#" -eq 0; then usage; exit 2; fi
 case "$1" in
   preflight)
@@ -355,6 +377,7 @@ PY
       --mount "$3" --original "$bundle/source.$codec.jsonl" \
       > "$out/readback.json" \
       || die "FSKit bundle readback failed; see $out"
+    stamp_readback "$out/readback.json"
     /usr/bin/python3 - "$out/readback.json" "$codec" <<'PY'
 import json
 import sys
@@ -393,6 +416,7 @@ PY
     /sbin/mount > "$out/mounts-before.txt"
     /usr/bin/python3 "$ROOT/fskit/verify_mount.py" --mount "$3" --original "$4" \
       > "$out/readback.json" || die "mounted readback failed; see $out"
+    stamp_readback "$out/readback.json"
     restored_name="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["restored_file"])' "$out/readback.json")"
     /bin/mkdir "$out/finder-copy"
     /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
@@ -446,12 +470,15 @@ with open(sys.argv[2], encoding="utf-8") as source:
     previous = json.load(source)
 if previous.get("result") != "pass" or previous.get("filesystem_type") != "ascf":
     sys.exit("unmounted: previous report did not pass the real ASCF mount gate")
+if not previous.get("verification_id"):
+    sys.exit("unmounted: previous readback is missing its verification ID")
 if os.path.abspath(os.path.normpath(previous.get("mount", ""))) != mount:
     sys.exit("unmounted: path differs from the verified ASCF mount")
 if os.path.ismount(mount):
     sys.exit("unmounted: FSKit volume is still mounted")
 print(json.dumps({"result": "pass", "mount": mount,
                   "previous_sha256": previous.get("sha256"),
+                  "previous_verification_id": previous["verification_id"],
                   "unmounted": True}, sort_keys=True, indent=2))
 PY
     cat "$out/unmounted.json"
