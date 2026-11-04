@@ -147,11 +147,14 @@ def signed_mount_identity(mount):
         require(bool(value), f"empty mount provenance from {command[0]}")
         return value
 
-    kind = darwin_filesystem_type(mount)
+    # Read type and flags from one statfs record: separate calls could
+    # observe different mounts if the path is remounted between checks.
+    filesystem = darwin_statfs(mount)
+    kind = filesystem.f_fstypename.decode("ascii")
     require(kind == "ascf", f"expected ASCF FSKit mount, found filesystem type {kind!r}")
     # VFS must acknowledge a kernel-level read-only mount. Handler-level
     # EROFS responses remain mandatory defense in depth.
-    flags = darwin_mount_flags(mount)
+    flags = int(filesystem.f_flags)
     require(flags & 0x1, "FSKit mount lacks Darwin MNT_RDONLY (kernel read-only flag)")
     return {"filesystem_type": kind, "mount_flags": flags, "kernel_readonly": True,
             "macos_version": output("/usr/bin/sw_vers", "-productVersion"),
