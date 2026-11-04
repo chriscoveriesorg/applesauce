@@ -230,8 +230,9 @@ These files are synthetic. Preserve the originals and the signed app.
 6. In ASCFHost choose "Test corrupted archive mount refusal" and select
    source.lzmesh.corrupt.ascf. Use "Copy mount diagnostic" to save the result.
    Repeat for source.lzraven.corrupt.ascf. A returned mount is a hard failure.
-   Only accept CORRUPT_REFUSAL_OBSERVED when its error confirms archive
-   corruption/format refusal; permission or entitlement errors are inconclusive.
+   Require CORRUPT_REFUSAL_CONFIRMED with FSKit resourceDamaged for
+   each fixture. CORRUPT_REFUSAL_INCONCLUSIVE means diagnose provisioning,
+   permissions, sandbox or activation before claiming corruption refusal.
    Keep the signed host diagnostic and the unchanged ASCF mount listing.
 The bundle hashes the signed host and extension binaries and provisioning
 profiles alongside every fixture and verifier; source-provenance.txt records

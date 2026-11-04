@@ -67,12 +67,13 @@ mount path and keeps the full rejection diagnostic visible and copyable.
 A returned mount is reported as `CORRUPT_REFUSAL_FAIL` and blocks acceptance;
 the host never silently unmounts an unexpected result.
 
-`CORRUPT_REFUSAL_OBSERVED` records a refused mount with no surviving ASCF
-volume. Inspect the attached error message: permission, entitlement, sandbox,
-extension activation and inaccessible-file errors are **inconclusive** for
-corruption refusal. Save diagnostics for **both** codecs. A successful unit
-test or independent CLI `archive verify` refusal does not prove that
-the signed FSKit path rejected a corrupt archive.
+`CORRUPT_REFUSAL_CONFIRMED` now requires the signed FSKit probe to return
+`FSKitErrorDomain` / `FSError.Code.resourceDamaged`, with no surviving ASCF
+volume. The extension emits this typed error only when a recognized ASCF
+header/index fails full codec or SHA-256 verification. Any other rejection,
+including permission, entitlement, sandbox or activation errors, produces
+`CORRUPT_REFUSAL_INCONCLUSIVE`. Capture diagnostics for **both** codecs.
+CLI verification alone does not prove mounted-path corruption refusal.
 
 ## Reproducible mounted-file acceptance
 

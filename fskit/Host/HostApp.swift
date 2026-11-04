@@ -226,7 +226,14 @@ private struct ASCFMountView: View {
                     } else if let error {
                         let remaining = mountedASCFVolumes()
                         if remaining.isEmpty {
-                            status = "CORRUPT_REFUSAL_OBSERVED: FSClient rejected the generated corrupt fixture: \(error.localizedDescription). Save this diagnostic and check the error is a decoder/format refusal, not a permission failure."
+                            let actualError = error as NSError
+                            let detail = "\(actualError.domain) code \(actualError.code): \(actualError.localizedDescription)"
+                            if actualError.domain == FSKitErrorDomain
+                                && actualError.code == FSError.Code.resourceDamaged.rawValue {
+                                status = "CORRUPT_REFUSAL_CONFIRMED: signed FSKit probe rejected the recognized ASCF payload: \(detail)"
+                            } else {
+                                status = "CORRUPT_REFUSAL_INCONCLUSIVE: mount failed without a verified ASCF damage error: \(detail). Check activation, entitlements and access."
+                            }
                         } else {
                             status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSClient returned an error but ASCF volumes remain mounted: \(remaining.map(\.path).joined(separator: ", "))"
                         }

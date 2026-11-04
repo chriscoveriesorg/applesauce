@@ -38,7 +38,20 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             guard infoStatus == 0 else { throw error(infoStatus) }
             if verify {
                 let checkStatus = ascf_verify_all(handle)
-                guard checkStatus == 0 else { throw error(checkStatus) }
+                guard checkStatus == 0 else {
+                    // The magic/header and chunk table parsed successfully.
+                    // A decode or SHA-256 failure means an ASCF resource was
+                    // recognized but is damaged. Report a distinct FSKit
+                    // error so a signed negative mount can distinguish a
+                    // corrupt archive from signing/extension failures.
+                    if checkStatus == EIO {
+                        throw NSError(domain: FSKitErrorDomain,
+                                      code: FSError.Code.resourceDamaged.rawValue,
+                                      userInfo: [NSLocalizedDescriptionKey:
+                                          "Recognized ASCF failed full codec/digest verification"])
+                    }
+                    throw error(checkStatus)
+                }
             }
             guard identity.matchesPath(url) else { throw error(ESTALE) }
             return (handle, info, identity)
@@ -87,7 +100,15 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             defer { ascf_close(handle) }
             replyHandler(.usable(name: "Applesauce ASCF", containerID: FSContainerIdentifier(uuid: Self.identifier(for: info, archiveURL: url))), nil)
         } catch {
-            replyHandler(.notRecognized, nil)
+            let nsError = error as NSError
+            if nsError.domain == FSKitErrorDomain
+                && nsError.code == FSError.Code.resourceDamaged.rawValue {
+                // A valid ASCF header that fails payload verification is a
+                // damaged resource, not an unrelated filesystem.
+                replyHandler(nil, error)
+            } else {
+                replyHandler(.notRecognized, nil)
+            }
         }
     }
 
