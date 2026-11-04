@@ -89,7 +89,13 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         let url = path.url
         guard url.startAccessingSecurityScopedResource() else {
-            replyHandler(nil, Self.error(EACCES))
+            // Report access failures for selected ASCF candidates, but do
+            // not claim errors while probing unrelated unreadable formats.
+            if url.pathExtension.lowercased() == "ascf" {
+                replyHandler(nil, Self.error(EACCES))
+            } else {
+                replyHandler(.notRecognized, nil)
+            }
             return
         }
         defer { url.stopAccessingSecurityScopedResource() }
