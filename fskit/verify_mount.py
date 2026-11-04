@@ -75,7 +75,10 @@ def darwin_statfs(mount):
         require(stat.S_ISDIR(before.st_mode), "ASCF mount descriptor is not a directory")
         # A mountpoint can be replaced between path validation and opening.
         # Bind the VFS descriptor to the pathname before inspecting it.
-        path_before = os.stat(mount, follow_symlinks=False)
+        try:
+            path_before = os.stat(mount, follow_symlinks=False)
+        except OSError as error:
+            raise MountCheckError(f"ASCF mount path unavailable before VFS inspection: {error}") from error
         require(stat.S_ISDIR(path_before.st_mode) and
                 (path_before.st_dev, path_before.st_ino) == (before.st_dev, before.st_ino),
                 "ASCF mount path changed before VFS inspection")
@@ -96,7 +99,10 @@ def darwin_statfs(mount):
         after = os.fstat(fd)
         require((before.st_dev, before.st_ino) == (after.st_dev, after.st_ino),
                 "ASCF mount descriptor changed during VFS inspection")
-        path_after = os.stat(mount, follow_symlinks=False)
+        try:
+            path_after = os.stat(mount, follow_symlinks=False)
+        except OSError as error:
+            raise MountCheckError(f"ASCF mount path unavailable during VFS inspection: {error}") from error
         require(stat.S_ISDIR(path_after.st_mode) and
                 (path_after.st_dev, path_after.st_ino) == (before.st_dev, before.st_ino),
                 "ASCF mount path changed during VFS inspection")
@@ -397,6 +403,31 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                                         "ASCF mount path changed before VFS inspection"):
                 darwin_statfs(self.mount)
         self.assertTrue(swapped)
+
+    def test_mount_path_disappearance_during_vfs_inspection_fails_closed(self):
+        # An unmount or rename can make the pathname disappear while its
+        # already-open descriptor still exists. Return a controlled refusal.
+        real_stat = os.stat
+        for missing_at in (1, 2):
+            with self.subTest(missing_at=missing_at):
+                observations = 0
+
+                def disappearing_stat(path, *args, **kwargs):
+                    nonlocal observations
+                    if Path(path) == self.mount:
+                        observations += 1
+                        if observations == missing_at:
+                            raise FileNotFoundError(errno.ENOENT, "mount disappeared")
+                    return real_stat(path, *args, **kwargs)
+
+                with mock.patch("os.stat", side_effect=disappearing_stat), \\
+                        mock.patch("ctypes.CDLL", return_value=mock.Mock(
+                            fstatfs=mock.Mock(return_value=0))), \\
+                        mock.patch("os.uname", return_value=mock.Mock(machine="arm64")):
+                    with self.assertRaisesRegex(MountCheckError,
+                                                "ASCF mount path unavailable"):
+                        darwin_statfs(self.mount)
+                self.assertEqual(observations, missing_at)
 
     def readonly_open(self, *args, **kwargs):
         if Path(args[0]).resolve() == self.restored.resolve() and args[1] & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
