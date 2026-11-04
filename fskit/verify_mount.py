@@ -296,6 +296,14 @@ def verify_mount(mount, original, require_real_mount=True):
                  current.st_mtime_ns, current.st_ctime_ns) == identity,
                 f"{label} path changed after verification")
 
+    # A second directory entry introduced during write probes invalidates the
+    # one-file volume contract, even when the authenticated file is unchanged.
+    with os.scandir(mount) as scanner:
+        final_entries = list(scanner)
+    require(len(final_entries) == 1 and final_entries[0].name == entry.name
+            and final_entries[0].is_file(follow_symlinks=False),
+            "ASCF mount entries changed after verification")
+
     return {"result": "pass", "mount": str(mount), "restored_file": entry.name,
             "logical_bytes": original_size, "sha256": original_sha,
             "random_read_offsets": offsets, "readonly_open_denied": True,
@@ -456,6 +464,30 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                                         "mounted path changed after verification"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(replaced)
+
+    def test_extra_mount_entry_during_write_probe_rejected(self):
+        # The authenticated inode can remain intact while an unexpected
+        # second entry appears; final acceptance must reject that volume.
+        real_open = os.open
+        injected = False
+
+        def inject_on_write_probe(path, flags, *args, **kwargs):
+            nonlocal injected
+            candidate = Path(path)
+            if (candidate.name == self.restored.name
+                    and candidate.parent.resolve(strict=True) == self.mount.resolve(strict=True)
+                    and flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)):
+                if not injected:
+                    (self.mount / "unexpected").write_bytes(b"unexpected")
+                    injected = True
+                raise OSError(errno.EROFS, "read-only filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=inject_on_write_probe):
+            with self.assertRaisesRegex(MountCheckError,
+                                        "ASCF mount entries changed after verification"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(injected)
 
     def test_write_open_is_nonblocking_if_mount_entry_becomes_fifo(self):
         # A mounted entry may change between digest and the negative write
