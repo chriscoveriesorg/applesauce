@@ -169,7 +169,8 @@ verify_package_manifest() {
 # unmount verifier binds to that exact first readback; a reused JSON report
 # cannot masquerade as evidence of a second, independent remount.
 stamp_readback() {
-  /usr/bin/python3 - "$1" <<'PY'
+  test "$#" -eq 2 || die "stamp_readback requires REPORT_JSON and FINDER_COPIED_FILE"
+  /usr/bin/python3 - "$1" "$2" <<'PY'
 import datetime
 import json
 from pathlib import Path
@@ -425,7 +426,8 @@ PY
     /sbin/mount > "$out/mounts-before.txt"
     /usr/bin/python3 "$ROOT/fskit/verify_mount.py" --mount "$3" --original "$4" \
       > "$out/readback.json" || die "mounted readback failed; see $out"
-    stamp_readback "$out/readback.json"
+    # The report stays provisional until Finder copies the restored file and
+    # cmp verifies every logical byte. Stamp exactly once after that check.
     restored_name="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["restored_file"])' "$out/readback.json")"
     /bin/mkdir "$out/finder-copy"
     /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
