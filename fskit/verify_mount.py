@@ -244,7 +244,10 @@ def verify_mount(mount, original, require_real_mount=True):
         raise MountCheckError(f"cannot inspect mount argument: {error}") from error
     require(not stat.S_ISLNK(mount_leaf.st_mode),
             "mount argument must not be a symlink")
-    mount = Path(mount).resolve(strict=True)
+    try:
+        mount = Path(mount).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise MountCheckError(f"cannot resolve mount argument: {error}") from error
     # Preserve the reference leaf: resolve() would silently follow a symlink
     # before digest() can enforce O_NOFOLLOW on its opened descriptor.
     original = Path(os.path.abspath(original))
@@ -438,6 +441,21 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                     with self.assertRaisesRegex(MountCheckError, expected):
                         verify_mount(self.mount, self.original, require_real_mount=False)
                 self.assertEqual(scans, failing_scan)
+
+    def test_mount_parent_disappears_during_resolution_fails_closed(self):
+        # lstat can succeed before a parent component disappears or an
+        # alias loop is detected by strict canonicalization.
+        original_resolve = Path.resolve
+
+        def fail_mount_resolution(path, *args, **kwargs):
+            if path == self.mount:
+                raise FileNotFoundError(errno.ENOENT, "synthetic parent removal")
+            return original_resolve(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "resolve", autospec=True,
+                               side_effect=fail_mount_resolution):
+            with self.assertRaisesRegex(MountCheckError, "cannot resolve mount argument"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
 
     def test_missing_mount_leaf_fails_closed(self):
         # Missing mountpoint before canonicalization must be a controlled
