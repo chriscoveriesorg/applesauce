@@ -83,20 +83,19 @@ verify_bundle() {
   test -f "$profile" || die "$name missing provisioning profile"
   /usr/bin/security cms -D -i "$profile" \
     > "$out/$name.provisioning.plist" || die "$name invalid provisioning profile"
-  /usr/bin/python3 - "$out/$name.entitlements.plist" \
-    "$out/$name.provisioning.plist" "$key" "$name" <<'PY'
-import plistlib
-import sys
-signed, provision, key, name = sys.argv[1:]
-with open(signed, "rb") as fd:
-    ent = plistlib.load(fd)
-with open(provision, "rb") as fd:
-    allowed = plistlib.load(fd).get("Entitlements", {})
-if ent.get(key) is not True or allowed.get(key) is not True:
-    sys.exit(f"{name}: {key} must be present in BOTH the code signature "
-             "and the developer provisioning profile")
-print(f"{name}: signing and restricted FSKit entitlement validated")
-PY
+  # codesign and CMS have already checked the cryptographic envelopes.
+  # Bind each provisioning profile to the actual code-signing team, bundle
+  # identifier, nonexpired grant and restricted FSKit entitlement.
+  /usr/bin/codesign -dv --verbose=4 "$bundle" > "$out/$name.identity.txt" 2>&1 \
+    || die "cannot inspect $name signing identity"
+  local signing_team bundle_id
+  signing_team="$(/usr/bin/sed -n 's/^TeamIdentifier=//p' "$out/$name.identity.txt" | /usr/bin/head -n 1)"
+  bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist")" \
+    || die "$name signed bundle identifier unavailable"
+  /usr/bin/python3 "$ROOT/fskit/signing_profile.py" \
+    "$out/$name.entitlements.plist" "$out/$name.provisioning.plist" \
+    "$key" "$name" "$signing_team" "$bundle_id" \
+    || die "$name code signature and provisioning profile disagree"
 }
 verify_host() {
   local host="$1" out="$2"
@@ -141,6 +140,7 @@ source-provenance.txt
 fskit/signed_acceptance.sh
 fskit/verify_mount.py
 fskit/acceptance_evidence.py
+fskit/signing_profile.py
 fskit/finder_readback.applescript
 ASCFHost.app/Contents/Info.plist
 ASCFHost.app/Contents/MacOS/ASCFHost
@@ -276,6 +276,7 @@ PY
     /bin/cp "$ROOT/fskit/signed_acceptance.sh" "$out/fskit/signed_acceptance.sh"
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
     /bin/cp "$ROOT/fskit/acceptance_evidence.py" "$out/fskit/acceptance_evidence.py"
+    /bin/cp "$ROOT/fskit/signing_profile.py" "$out/fskit/signing_profile.py"
     /bin/cp "$ROOT/fskit/finder_readback.applescript" "$out/fskit/finder_readback.applescript"
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
       > "$out/portable-verifier-tests.log" 2>&1 \
@@ -283,6 +284,9 @@ PY
     /usr/bin/python3 "$out/fskit/acceptance_evidence.py" --self-test \
       > "$out/portable-evidence-tests.log" 2>&1 \
       || die "packaged evidence self-tests failed; see $out/portable-evidence-tests.log"
+    /usr/bin/python3 "$out/fskit/signing_profile.py" --self-test \
+      > "$out/signing-profile-tests.log" 2>&1 \
+      || die "packaged signing-profile self-tests failed; see $out/signing-profile-tests.log"
     # Carry the exact clean source commit; the manifest authenticates the
     # signed binaries, app/extension provisioning and all test scripts.
     printf 'repository=chriscoveriesorg/applesauce\ncommit=%s\n' \

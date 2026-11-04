@@ -185,6 +185,11 @@ Repeat using `lzraven` after remounting its archive. The result includes the
 path to `readback.json` for subsequent `unmounted` verification. Neither
 `bundle-readback` nor `unmounted` installs, mounts or edits a volume.
 
+The owner-run signing check also binds each provisioning profile to the signed
+bundle identifier and code-signing team. It rejects expired profiles and
+profiles that grant FSKit to another app, before extension installation.
+These checks run on the packaged helper without requiring the original checkout.
+
 The script verifies the host and extension code signatures **and** checks
 that both signed entitlements are allowed in their embedded provisioning
 profiles. A development/ad-hoc signature without those capabilities fails.
