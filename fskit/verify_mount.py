@@ -267,7 +267,11 @@ def verify_mount(mount, original, require_real_mount=True):
         raise MountCheckError("cannot enumerate ASCF mount entries") from error
     require(len(entries) == 1, "ASCF mount must expose exactly one restored file")
     entry = entries[0]
-    require(entry.is_file(follow_symlinks=False), "mounted entry is not a regular file")
+    try:
+        entry_is_file = entry.is_file(follow_symlinks=False)
+    except OSError as error:
+        raise MountCheckError("cannot inspect mounted directory entry") from error
+    require(entry_is_file, "mounted entry is not a regular file")
     mounted = mount / entry.name
     require(not os.path.samefile(original, mounted), "source and mounted file are identical")
 
@@ -355,9 +359,13 @@ def verify_mount(mount, original, require_real_mount=True):
             final_entries = list(scanner)
     except OSError as error:
         raise MountCheckError("cannot enumerate final ASCF mount entries") from error
-    require(len(final_entries) == 1 and final_entries[0].name == entry.name
-            and final_entries[0].is_file(follow_symlinks=False),
+    require(len(final_entries) == 1 and final_entries[0].name == entry.name,
             "ASCF mount entries changed after verification")
+    try:
+        final_entry_is_file = final_entries[0].is_file(follow_symlinks=False)
+    except OSError as error:
+        raise MountCheckError("cannot inspect final mounted directory entry") from error
+    require(final_entry_is_file, "ASCF mount entries changed after verification")
     # Directory enumeration can race with replacement of its sole file.
     # Rebind the final pathname to the authenticated digest-time identity.
     try:
@@ -434,6 +442,52 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                         if scans == failing_scan:
                             raise OSError(errno.EIO, "synthetic directory read failure")
                     return real_scandir(path)
+
+                self.real_open = os.open
+                with mock.patch("os.open", side_effect=self.readonly_open), \
+                        mock.patch("os.scandir", side_effect=failing_scandir):
+                    with self.assertRaisesRegex(MountCheckError, expected):
+                        verify_mount(self.mount, self.original, require_real_mount=False)
+                self.assertEqual(scans, failing_scan)
+
+    def test_directory_entry_stat_failure_fails_closed(self):
+        # DirEntry.is_file() can fail after a successful directory scan.
+        real_scandir = os.scandir
+        for failing_scan, expected in ((1, "cannot inspect mounted directory entry"),
+                                       (2, "cannot inspect final mounted directory entry")):
+            with self.subTest(failing_scan=failing_scan):
+                scans = 0
+
+                class FailingEntry:
+                    def __init__(self, entry):
+                        self.name = entry.name
+
+                    def is_file(self, follow_symlinks=True):
+                        raise OSError(errno.EIO, "synthetic entry stat failure")
+
+                class WrappedScanner:
+                    def __init__(self, scanner, fail):
+                        self.scanner = scanner
+                        self.fail = fail
+
+                    def __enter__(self):
+                        self.scanner.__enter__()
+                        return self
+
+                    def __exit__(self, *args):
+                        return self.scanner.__exit__(*args)
+
+                    def __iter__(self):
+                        for item in self.scanner:
+                            yield FailingEntry(item) if self.fail else item
+
+                def failing_scandir(path):
+                    nonlocal scans
+                    scanner = real_scandir(path)
+                    if Path(path) == self.mount:
+                        scans += 1
+                        return WrappedScanner(scanner, scans == failing_scan)
+                    return scanner
 
                 self.real_open = os.open
                 with mock.patch("os.open", side_effect=self.readonly_open), \
