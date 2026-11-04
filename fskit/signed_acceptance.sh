@@ -14,6 +14,7 @@ Usage:
   bash fskit/signed_acceptance.sh fixture [lzraven|lzmesh]
   bash fskit/signed_acceptance.sh package
   bash fskit/signed_acceptance.sh manifest-check BUNDLE_DIR
+  bash fskit/signed_acceptance.sh cli-mount BUNDLE_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh bundle-readback BUNDLE_DIR MOUNT_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh acceptance-check BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT REPLACEMENT_JSON
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
@@ -32,6 +33,13 @@ package: builds signed host + BOTH codecs and prepares a portable acceptance
 bundle with SHA-256 manifest, its own verifier, and negative fixtures.
 manifest-check: independently verify all critical bundle bytes and coverage
 before installation; does not require signing or attempt to mount anything.
+cli-mount: on an authorized disposable Mac with the signed extension installed
+and enabled, ask macOS FSKit to mount one authenticated synthetic archive into
+a fresh, private /private/tmp mount directory using the system mount command.
+It then verifies actual read-only ascf VFS identity, SHA-256 and random reads.
+This alternate Terminal route never uses sudo, overwrites a path, or unmounts.
+If macOS rejects the filesystem or privileges, preserve diagnostics and use
+the host UI route. Finder acceptance remains a separate bundle-readback step.
 bundle-readback: verify the portable bundle manifest, signed host, restored
 filename, full logical SHA-256, random reads, Finder copy/readback and FSKit mount identity.
 readback: checks signed host + extension provisioned capabilities and runs
@@ -41,7 +49,9 @@ ASCF mount is gone using its successful readback JSON as evidence.
 acceptance-check: validate a complete two-mount and corruption-control evidence
 chain for one codec, with signed bundle and source hashes checked first.
 Each command uses a new temporary directory and preserves existing data.
-No installation, elevation, mounting, unmounting or APFS writes are automated.
+Only the explicit cli-mount command performs a real, synthetic-file FSKit
+mount into a fresh private directory. Other commands never initiate mounts.
+No installation, elevation, forced unmount or APFS writes are automated.
 replacement-stage creates private synthetic /tmp archive copies. replacement-check
 only atomically replaces the copy after real mounted readback.
 HELP
@@ -266,6 +276,47 @@ case "$1" in
     verify_package_manifest "$(cd "$2" && pwd -P)" "$out"
     printf 'Verified mandatory signed-handoff bundle bytes; evidence: %s\n' "$out"
     ;;
+  cli-mount)
+    test "$#" -eq 3 || die "cli-mount requires BUNDLE_DIR lzraven|lzmesh"
+    mac_only
+    test "${EUID:-$(id -u)}" -ne 0 \
+      || die "cli-mount refuses root; use a normal account on a disposable Mac"
+    codec="$3"
+    case "$codec" in lzraven|lzmesh) ;; *) die "invalid codec";; esac
+    for t in python3 shasum codesign security; do need "$t"; done
+    test -x /sbin/mount || die "system mount command unavailable"
+    test -d "$2" || die "missing bundle directory: $2"
+    bundle="$(cd "$2" && pwd -P)"
+    archive="$bundle/source.$codec.ascf"
+    original="$bundle/source.$codec.jsonl"
+    test -f "$archive" && test ! -L "$archive" \
+      && test -f "$original" && test ! -L "$original" \
+      || die "synthetic source or archive is absent or a symlink"
+    # Only the freshly created mount directory is ever passed to mount(8).
+    # There is no user-selected destination, sudo, forced unmount or APFS
+    # attribute operation. Keep the directory and logs if a real mount fails.
+    out="$(mktemp -d /private/tmp/ascf-cli-mount.XXXXXXXX)" \
+      || die "cannot allocate private CLI mount stage"
+    /bin/mkdir "$out/mount"
+    verify_package_manifest "$bundle" "$out"
+    verify_host "$bundle/ASCFHost.app" "$out"
+    /usr/bin/sw_vers > "$out/macos.txt"
+    /sbin/mount > "$out/mounts-before.txt"
+    if ! /sbin/mount -t ascf -o rdonly "$archive" "$out/mount" \
+        > "$out/mount-command.log" 2>&1; then
+      die "FSKit Terminal mount failed; see $out/mount-command.log. Check extension activation/permissions; the host UI remains available."
+    fi
+    /sbin/mount > "$out/mounts-after.txt"
+    if ! /usr/bin/python3 "$ROOT/fskit/verify_mount.py" \
+        --mount "$out/mount" --original "$original" > "$out/terminal-readback.json"; then
+      die "a mount exists but failed real ASCF read-only/SHA-256/random-read acceptance; inspect $out and unmount the private stage normally"
+    fi
+    cat "$out/terminal-readback.json"
+    printf 'CLI-mounted ASCF: %s\nEvidence: %s\n' "$out/mount" "$out"
+    printf 'Finder copy-out proof: bash fskit/signed_acceptance.sh bundle-readback %q %q %q\n' \
+      "$bundle" "$out/mount" "$codec"
+    printf 'After acceptance, unmount ONLY this private stage: /sbin/umount %q\n' "$out/mount"
+    ;;
   package)
     test "$#" -eq 1 || die "package takes no arguments"
     mac_only
@@ -351,6 +402,12 @@ These files are synthetic. Preserve the originals and the signed app.
 1. Copy this entire folder onto an authorized disposable macOS 27+ Mac.
 2. Install ASCFHost.app and enable its extension in System Settings >
    General > Login Items & Extensions > File System Extensions.
+   For a second Terminal-driven FSKit mount path, run:
+   bash fskit/signed_acceptance.sh cli-mount . lzmesh
+   It uses a NEW private /private/tmp mountpoint and proves actual ascf
+   read-only statfs, logical SHA-256, random reads and EOF. It prints the
+   exact Finder-check and normal unmount commands; never run with sudo.
+   If CLI dispatch is unavailable, retain its diagnostic and use the host UI.
 3. Launch the host and mount source.lzmesh.ascf, then from THIS folder run:
    bash fskit/signed_acceptance.sh bundle-readback . "/Volumes/Applesauce ASCF" lzmesh
 4. Unmount using host/Finder. Confirm it with the resulting readback.json:

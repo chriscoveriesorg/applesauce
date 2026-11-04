@@ -75,6 +75,34 @@ including permission, entitlement, sandbox or activation errors, produces
 `CORRUPT_REFUSAL_INCONCLUSIVE`. Capture diagnostics for **both** codecs.
 CLI verification alone does not prove mounted-path corruption refusal.
 
+## Terminal-driven FSKit mount on a provisioned disposable Mac
+
+Apple's FSKit passthrough sample documents dispatching a registered filesystem
+extension through `mount -t <filesystem>`. With the **signed** ASCF extension
+installed and enabled, the acceptance bundle now provides an explicit owner-run
+path using the registered `ascf` short name:
+
+```sh
+cd /path/to/ascf-acceptance.XXXXXXXX
+bash fskit/signed_acceptance.sh cli-mount . lzraven
+# Follow the printed Finder readback and normal unmount commands.
+```
+
+This invokes macOS `mount -t ascf -o rdonly` on a newly created private
+directory under `/private/tmp`. It authenticates the signed host and extension,
+their provisioning profiles, the handoff manifest and selected synthetic
+archive before mounting. Afterwards, an independent reader verifies the
+actual read-only ASCF filesystem identity, complete logical SHA-256,
+unaligned/random reads, EOF and denied write-opens. The command retains its
+diagnostics and never elevates privileges, overwrites an existing path,
+changes APFS metadata or forces unmount.
+
+The signed host UI remains the required path for the full mount/unmount/remount,
+source-replacement and corrupt-mount refusal evidence chain. Terminal mounting
+is a second integration path; a system mount failure establishes only that the
+specific host, permission or extension setup rejected it. Finder acceptance
+uses the separate `bundle-readback` command printed by `cli-mount`.
+
 ## Reproducible mounted-file acceptance
 
 The unsigned build and Swift typecheck cannot prove that macOS will register
