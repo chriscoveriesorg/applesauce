@@ -15,6 +15,7 @@ Usage:
   bash fskit/signed_acceptance.sh package
   bash fskit/signed_acceptance.sh manifest-check BUNDLE_DIR
   bash fskit/signed_acceptance.sh bundle-readback BUNDLE_DIR MOUNT_DIR lzraven|lzmesh
+  bash fskit/signed_acceptance.sh acceptance-check BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
 
@@ -35,6 +36,8 @@ readback: checks signed host + extension provisioned capabilities and runs
 actual statfs, SHA-256, unaligned reads, EOF, Finder-copied byte comparison and denied write-open acceptance.
 unmounted: after normal host/Finder unmount, prove a previously verified
 ASCF mount is gone using its successful readback JSON as evidence.
+acceptance-check: validate a complete two-mount and corruption-control evidence
+chain for one codec, with signed bundle and source hashes checked first.
 Each command uses a new temporary directory and preserves existing data.
 No installation, elevation, mounting, unmounting or APFS writes are automated.
 HELP
@@ -137,6 +140,7 @@ source.lzraven.corrupt.ascf
 source-provenance.txt
 fskit/signed_acceptance.sh
 fskit/verify_mount.py
+fskit/acceptance_evidence.py
 fskit/finder_readback.applescript
 ASCFHost.app/Contents/Info.plist
 ASCFHost.app/Contents/MacOS/ASCFHost
@@ -239,10 +243,14 @@ PY
     /bin/mkdir "$out/fskit"
     /bin/cp "$ROOT/fskit/signed_acceptance.sh" "$out/fskit/signed_acceptance.sh"
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
+    /bin/cp "$ROOT/fskit/acceptance_evidence.py" "$out/fskit/acceptance_evidence.py"
     /bin/cp "$ROOT/fskit/finder_readback.applescript" "$out/fskit/finder_readback.applescript"
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
       > "$out/portable-verifier-tests.log" 2>&1 \
       || die "packaged verifier self-tests failed; see $out/portable-verifier-tests.log"
+    /usr/bin/python3 "$out/fskit/acceptance_evidence.py" --self-test \
+      > "$out/portable-evidence-tests.log" 2>&1 \
+      || die "packaged evidence self-tests failed; see $out/portable-evidence-tests.log"
     # Carry the exact clean source commit; the manifest authenticates the
     # signed binaries, app/extension provisioning and all test scripts.
     printf 'repository=chriscoveriesorg/applesauce\ncommit=%s\n' \
@@ -270,6 +278,10 @@ These files are synthetic. Preserve the originals and the signed app.
    each fixture. CORRUPT_REFUSAL_INCONCLUSIVE means diagnose provisioning,
    permissions, sandbox or activation before claiming corruption refusal.
    Keep the signed host diagnostic and the unchanged ASCF mount listing.
+7. For each codec, run acceptance-check from this bundle with the first
+   readback.json, unmounted.json, remount readback.json, and captured
+   CORRUPT_REFUSAL_CONFIRMED diagnostic. Preserve the resulting JSON and
+   request independent signed-mount review before merging.
 The bundle hashes the signed host and extension binaries and provisioning
 profiles alongside every fixture and verifier; source-provenance.txt records
 the clean source checkout commit. It does not need Rust on the receiving Mac.
@@ -396,6 +408,23 @@ PY
     cat "$out/readback.json"
     cat "$out/finder-readback.txt"
     printf 'Readback evidence: %s\n' "$out"
+    ;;
+  acceptance-check)
+    test "$#" -eq 7 || die "acceptance-check requires BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT"
+    mac_only
+    bundle="$(cd "$2" && pwd -P)" || die "missing bundle: $2"
+    codec="$3"
+    case "$codec" in lzraven|lzmesh) ;; *) die "invalid codec";; esac
+    out="$(mktemp -d /tmp/ascf-evidence.XXXXXXXX)"
+    verify_package_manifest "$bundle" "$out"
+    verify_host "$bundle/ASCFHost.app" "$out"
+    /usr/bin/python3 "$ROOT/fskit/acceptance_evidence.py" \
+      --bundle "$bundle" --codec "$codec" --first "$4" \
+      --unmounted "$5" --remounted "$6" --refusal "$7" \
+      > "$out/acceptance.json" \
+      || die "acceptance chain failed; diagnostics: $out/acceptance.json"
+    cat "$out/acceptance.json"
+    printf 'Acceptance evidence chain: %s\\n' "$out"
     ;;
   unmounted)
     test "$#" -eq 3 || die "unmounted requires MOUNT_DIR READBACK_JSON"
