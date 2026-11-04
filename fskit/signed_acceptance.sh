@@ -180,6 +180,15 @@ path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 if report.get("result") != "pass":
     sys.exit("cannot stamp a failed mounted-readback report")
+copied = Path(sys.argv[2])
+if not copied.is_file():
+    sys.exit("Finder copy-out missing from completed mounted acceptance")
+import hashlib
+copy_sha256 = hashlib.sha256(copied.read_bytes()).hexdigest()
+if copy_sha256 != report.get("sha256"):
+    sys.exit("Finder copy-out digest does not match mounted logical digest")
+report["finder_copy_verified"] = True
+report["finder_copy_sha256"] = copy_sha256
 report["verification_id"] = str(uuid.uuid4())
 report["verified_at_utc"] = datetime.datetime.now(
     datetime.timezone.utc).isoformat()
@@ -377,7 +386,6 @@ PY
       --mount "$3" --original "$bundle/source.$codec.jsonl" \
       > "$out/readback.json" \
       || die "FSKit bundle readback failed; see $out"
-    stamp_readback "$out/readback.json"
     /usr/bin/python3 - "$out/readback.json" "$codec" <<'PY'
 import json
 import sys
@@ -400,6 +408,7 @@ PY
       || die "Finder-copied logical bytes differ from the original source"
     /usr/bin/shasum -a 256 "$out/finder-copy/source.$codec" \
       "$bundle/source.$codec.jsonl" > "$out/finder-copy.sha256"
+    stamp_readback "$out/readback.json" "$out/finder-copy/source.$codec"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
     cat "$out/finder-readback.txt"
@@ -428,6 +437,7 @@ PY
       || die "Finder-copied logical bytes differ from the original source"
     /usr/bin/shasum -a 256 "$out/finder-copy/$restored_name" "$4" \
       > "$out/finder-copy.sha256"
+    stamp_readback "$out/readback.json" "$out/finder-copy/$restored_name"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
     cat "$out/finder-readback.txt"
@@ -448,7 +458,7 @@ PY
       > "$out/acceptance.json" \
       || die "acceptance chain failed; diagnostics: $out/acceptance.json"
     cat "$out/acceptance.json"
-    printf 'Acceptance evidence chain: %s\\n' "$out"
+    printf 'Acceptance evidence chain: %s\n' "$out"
     ;;
   unmounted)
     test "$#" -eq 3 || die "unmounted requires MOUNT_DIR READBACK_JSON"
@@ -470,8 +480,8 @@ with open(sys.argv[2], encoding="utf-8") as source:
     previous = json.load(source)
 if previous.get("result") != "pass" or previous.get("filesystem_type") != "ascf":
     sys.exit("unmounted: previous report did not pass the real ASCF mount gate")
-if not previous.get("verification_id"):
-    sys.exit("unmounted: previous readback is missing its verification ID")
+if not previous.get("verification_id") or previous.get("finder_copy_verified") is not True:
+    sys.exit("unmounted: previous readback lacks independent Finder copy and verification ID")
 if os.path.abspath(os.path.normpath(previous.get("mount", ""))) != mount:
     sys.exit("unmounted: path differs from the verified ASCF mount")
 if os.path.ismount(mount):
