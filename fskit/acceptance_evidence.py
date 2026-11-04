@@ -66,6 +66,11 @@ def validate(bundle, codec, first, unmounted, remounted, refusal):
                 stage + ": random/EOF read evidence missing")
     require(reports[0]["macos_build"] == reports[1]["macos_build"],
             "first mount and remount have different macOS build provenance")
+    first_id, second_id = (report.get("verification_id") for report in reports)
+    require(isinstance(first_id, str) and bool(first_id)
+            and isinstance(second_id, str) and bool(second_id)
+            and first_id != second_id,
+            "two independent mounted-readback verification IDs required")
 
     off = load_json(unmounted)
     require(off.get("result") == "pass" and off.get("unmounted") is True,
@@ -74,6 +79,8 @@ def validate(bundle, codec, first, unmounted, remounted, refusal):
             "unmount report is for another mount")
     require(off.get("previous_sha256") == digest,
             "unmount report references a different cleartext")
+    require(off.get("previous_verification_id") == first_id,
+            "unmount report does not bind the first readback verification")
     text = Path(refusal).read_text(encoding="utf-8")
     require("CORRUPT_REFUSAL_CONFIRMED:" in text
             and "signed FSKit probe rejected the recognized ASCF payload" in text,
@@ -119,11 +126,12 @@ class EvidenceTests(unittest.TestCase):
             "mount": "/Volumes/Applesauce ASCF", "macos_version": "27.0",
             "macos_build": "fixture", "random_read_offsets": list(range(20)) + [100]
         }
-        for item in (self.items[0], self.items[2]):
-            item.write_text(json.dumps(report))
+        for label, item in zip(("first", "second"), (self.items[0], self.items[2])):
+            item.write_text(json.dumps({**report, "verification_id": label}))
         self.items[1].write_text(json.dumps({
             "result": "pass", "unmounted": True,
-            "mount": report["mount"], "previous_sha256": self.sha
+            "mount": report["mount"], "previous_sha256": self.sha,
+            "previous_verification_id": "first"
         }))
         self.items[3].write_text(
             "CORRUPT_REFUSAL_CONFIRMED: signed FSKit probe rejected the recognized ASCF payload")
@@ -150,6 +158,16 @@ class EvidenceTests(unittest.TestCase):
     def test_inconclusive_corruption(self):
         self.items[3].write_text("CORRUPT_REFUSAL_INCONCLUSIVE")
         with self.assertRaisesRegex(EvidenceError, "corruption refusal"):
+            self.check()
+    def test_reused_mount_report(self):
+        self.items[2].write_bytes(self.items[0].read_bytes())
+        with self.assertRaisesRegex(EvidenceError, "independent mounted-readback"):
+            self.check()
+    def test_unmount_report_from_other_verification(self):
+        off = load_json(self.items[1])
+        off["previous_verification_id"] = "unrelated"
+        self.items[1].write_text(json.dumps(off))
+        with self.assertRaisesRegex(EvidenceError, "bind the first"):
             self.check()
 
 
