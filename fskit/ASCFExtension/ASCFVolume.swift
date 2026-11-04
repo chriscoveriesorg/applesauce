@@ -153,9 +153,11 @@ extension ASCFVolume: FSVolume.Operations {
         case FSDirectoryCookie(3):
             return FSDirectoryVerifier(1)
         default:
-            // FSKit requires its specific invalid-cookie error here; EINVAL
-            // prevents callers from distinguishing a stale directory cursor.
-            throw NSError(domain: FSKitErrorDomain,
+            // FSKit specifies NSPOSIXErrorDomain with the dedicated
+            // invalid-directory-cookie code. The FSKitErrorDomain wrapper
+            // compiles but violates the readdir error contract on macOS 27,
+            // which can make Finder handle stale directory cursors incorrectly.
+            throw NSError(domain: NSPOSIXErrorDomain,
                           code: FSError.Code.invalidDirectoryCookie.rawValue)
         }
         for index in start..<3 {
