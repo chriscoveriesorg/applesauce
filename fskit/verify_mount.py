@@ -180,7 +180,10 @@ def signed_mount_identity(mount):
     # Read type and flags from one statfs record: separate calls could
     # observe different mounts if the path is remounted between checks.
     filesystem = darwin_statfs(mount)
-    kind = filesystem.f_fstypename.decode("ascii")
+    try:
+        kind = filesystem.f_fstypename.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise MountCheckError("invalid non-ASCII FSKit filesystem type") from error
     require(kind == "ascf", f"expected ASCF FSKit mount, found filesystem type {kind!r}")
     # VFS must acknowledge a kernel-level read-only mount. Handler-level
     # EROFS responses remain mandatory defense in depth.
@@ -1120,6 +1123,16 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         # and refuse a different read-only mount under the same path.
         with self.assertRaisesRegex(MountCheckError, "ASCF mount provenance changed"):
             self.check_signed_gate("ascf", final_mount_flags=0x5)
+
+    def test_real_mount_gate_rejects_nonascii_filesystem_type(self):
+        # Malformed kernel VFS identity must produce a controlled refusal.
+        filesystem = DarwinStatFS()
+        filesystem.f_fstypename = b"\\xffascf"
+        filesystem.f_flags = 1
+        with mock.patch("sys.platform", "darwin"), mock.patch.object(
+                sys.modules[__name__], "darwin_statfs", return_value=filesystem):
+            with self.assertRaisesRegex(MountCheckError, "non-ASCII"):
+                signed_mount_identity(self.mount)
 
     def test_real_mount_gate_rejects_unrelated_apfs_volume(self):
         with self.assertRaisesRegex(MountCheckError, "expected ASCF FSKit mount"):
