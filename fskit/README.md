@@ -216,3 +216,27 @@ team to provision `com.apple.developer.fskit.mount` and
 an extension, request privileges, mount or force-unmount it. Owner-run
 acceptance is **still pending** until a signed disposable Mac demonstrates
 the full lifecycle; synthetic CI remains only a prerequisite.
+
+### Machine-check the full signed lifecycle evidence
+
+For each codec, run `bundle-readback` on its first mount and again after
+a normal unmount confirmed with `unmounted`. Capture the host's
+`CORRUPT_REFUSAL_CONFIRMED` diagnostic as a text file after selecting the
+matching damaged fixture. The portable bundle contains a final check:
+
+```sh
+bash fskit/signed_acceptance.sh acceptance-check . lzmesh \
+  /path/first/readback.json /path/unmount/unmounted.json \
+  /path/remount/readback.json /path/corrupt-refusal.txt
+# Repeat for lzraven with its own four evidence files.
+```
+
+The command rechecks the SHA-256 manifest, signing identities, the archived
+source and both readback JSON reports, the intervening unmount, kernel-level
+read-only VFS flags, random/EOF evidence and the typed corruption-refusal
+diagnostic. It emits a JSON summary with hashes of all four evidence files.
+Its success establishes **internal consistency of operator-supplied evidence**;
+the captured host diagnostic is not a signed machine attestation. Independent
+review of the authorized Mac's actual installed extension and mounted
+readback remains mandatory before merging PR #86. The gate can be regression
+tested separately with `python3 fskit/acceptance_evidence.py --self-test`.
