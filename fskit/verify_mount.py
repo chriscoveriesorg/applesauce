@@ -462,6 +462,19 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.assertIn(65535, report["random_read_offsets"])
         self.assertIn(self.original.stat().st_size, report["random_read_offsets"])
 
+    def test_tiny_and_empty_files_preserve_exact_readback(self):
+        # Boundary sizes exercise EOF at offset zero and the first byte.
+        # The mounted copy must still be independently authenticated.
+        for payload in (b"", b"\\x00", b"\\xff"):
+            with self.subTest(payload=payload):
+                self.original.write_bytes(payload)
+                self.restored.write_bytes(payload)
+                report = self.check()
+                self.assertEqual(report["logical_bytes"], len(payload))
+                self.assertEqual(report["sha256"], hashlib.sha256(payload).hexdigest())
+                self.assertIn(0, report["random_read_offsets"])
+                self.assertIn(len(payload), report["random_read_offsets"])
+
     def test_random_read_rejects_nonregular_reopened_descriptor(self):
         # A path can be replaced after digest authentication. Even if a
         # synthetic descriptor reports the authenticated inode, its type
