@@ -17,6 +17,7 @@ struct ApplesauceASCFHost: App {
 
 private struct ASCFMountView: View {
     @State private var selectingArchive = false
+    @State private var selectingCorruptArchive = false
     @State private var status = "Select a verified ASCF archive to mount separately."
     @State private var mountedURL: URL?
     @State private var isWorking = false
@@ -31,6 +32,17 @@ private struct ASCFMountView: View {
                 selectingArchive = true
             }
             .disabled(isWorking || mountedURL != nil || multipleASCFMounts)
+            // This is an explicit user-driven negative control on the signed
+            // host. It runs the actual FSClient mount path against a generated
+            // corrupted copy, rather than substituting a decoder unit test.
+            Button("Test corrupted archive mount refusal") {
+                selectingCorruptArchive = true
+            }
+            .disabled(isWorking || mountedURL != nil || multipleASCFMounts)
+            Button("Copy mount diagnostic") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(status, forType: .string)
+            }
             Button("Open File System Extensions settings") {
                 if !FSClient.shared.openFileSystemExtensionsSettings() {
                     status = "macOS could not open File System Extensions settings."
@@ -77,9 +89,26 @@ private struct ASCFMountView: View {
                     status = "Select a .ascf archive."
                     return
                 }
-                mount(url)
+                mount(url, expectCorruptRefusal: false)
             case .failure(let error):
                 status = "Archive selection failed: \(error.localizedDescription)"
+            }
+        }
+        .fileImporter(
+            isPresented: $selectingCorruptArchive,
+            allowedContentTypes: [UTType(filenameExtension: "ascf") ?? .data],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                guard url.lastPathComponent.hasSuffix(".corrupt.ascf") else {
+                    status = "Select the generated source.<codec>.corrupt.ascf negative-control fixture."
+                    return
+                }
+                mount(url, expectCorruptRefusal: true)
+            case .failure(let error):
+                status = "Corruption-control selection failed: \(error.localizedDescription)"
             }
         }
     }
@@ -134,10 +163,12 @@ private struct ASCFMountView: View {
         }
     }
 
-    private func mount(_ url: URL) {
+    private func mount(_ url: URL, expectCorruptRefusal: Bool) {
         guard !isWorking, mountedURL == nil else { return }
         isWorking = true
-        status = "Checking installed FSKit extension..."
+        status = expectCorruptRefusal
+            ? "Checking installed FSKit extension before corrupted mount attempt..."
+            : "Checking installed FSKit extension..."
         // A valid signed app may still have an extension that macOS has not
         // registered or that the user has disabled. Show the actionable cause
         // before opening the security-scoped archive or requesting a mount.
@@ -159,12 +190,12 @@ private struct ASCFMountView: View {
                     status = "ASCF extension is disabled. Enable it in File System Extensions settings."
                     return
                 }
-                beginMount(url)
+                beginMount(url, expectCorruptRefusal: expectCorruptRefusal)
             }
         }
     }
 
-    private func beginMount(_ url: URL) {
+    private func beginMount(_ url: URL, expectCorruptRefusal: Bool) {
         // The picker supplies a security-scoped URL. FSKit conveys the scope
         // to the extension; neither process needs write access to the archive.
         guard url.startAccessingSecurityScopedResource() else {
@@ -172,7 +203,9 @@ private struct ASCFMountView: View {
             status = "macOS did not grant read access to the selected archive."
             return
         }
-        status = "Verifying archive before read-only mount..."
+        status = expectCorruptRefusal
+            ? "Attempting generated corrupt archive through the signed FSKit mount path..."
+            : "Verifying archive before read-only mount..."
         let resource = FSPathURLResource(url: url, writable: false)
         FSClient.shared.mountSingleVolume(
             resource: resource,
@@ -182,6 +215,26 @@ private struct ASCFMountView: View {
             url.stopAccessingSecurityScopedResource()
             DispatchQueue.main.async {
                 isWorking = false
+                if expectCorruptRefusal {
+                    // An error is evidence of refusal only after successful
+                    // extension discovery and an actual FSClient callback.
+                    // The specific reason must be retained for the operator.
+                    // Denial from sandbox/provisioning alone is inconclusive.
+                    if let mounted {
+                        if isVerifiedReadOnlyASCFMount(mounted) { mountedURL = mounted }
+                        status = "CORRUPT_REFUSAL_FAIL: FSKit returned a mount at \(mounted.path). Unmount it and reject acceptance."
+                    } else if let error {
+                        let remaining = mountedASCFVolumes()
+                        if remaining.isEmpty {
+                            status = "CORRUPT_REFUSAL_OBSERVED: FSClient rejected the generated corrupt fixture: \(error.localizedDescription). Save this diagnostic and check the error is a decoder/format refusal, not a permission failure."
+                        } else {
+                            status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSClient returned an error but ASCF volumes remain mounted: \(remaining.map(\\.path).joined(separator: ", "))"
+                        }
+                    } else {
+                        status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSClient returned neither mount nor error."
+                    }
+                    return
+                }
                 if let error {
                     status = "Mount failed: \(error.localizedDescription)"
                 } else if let mounted {
