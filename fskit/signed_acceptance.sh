@@ -12,6 +12,7 @@ Usage:
   bash fskit/signed_acceptance.sh signed-build
   bash fskit/signed_acceptance.sh fixture [lzraven|lzmesh]
   bash fskit/signed_acceptance.sh package
+  bash fskit/signed_acceptance.sh manifest-check BUNDLE_DIR
   bash fskit/signed_acceptance.sh bundle-readback BUNDLE_DIR MOUNT_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
@@ -23,6 +24,8 @@ The script requires XcodeGen, Rust and the macOS 27 SDK.
 fixture: creates an independent, synthetic >8 MiB original and verified ASCF.
 package: builds signed host + BOTH codecs and prepares a portable acceptance
 bundle with SHA-256 manifest, its own verifier, and negative fixtures.
+manifest-check: independently verify all critical bundle bytes and coverage
+before installation; does not require signing or attempt to mount anything.
 bundle-readback: verify the portable bundle manifest, signed host, restored
 filename, full logical SHA-256, random reads, Finder enumeration and FSKit mount identity.
 readback: checks signed host + extension provisioned capabilities and runs
@@ -128,6 +131,19 @@ verify_package_manifest() {
 }
 if test "$#" -eq 0; then usage; exit 2; fi
 case "$1" in
+  manifest-paths)
+    # Stable machine-readable list for the handoff validator's CI regression.
+    test "$#" -eq 1 || die "manifest-paths takes no arguments"
+    required_manifest_paths
+    ;;
+  manifest-check)
+    test "$#" -eq 2 || die "manifest-check requires BUNDLE_DIR"
+    mac_only
+    test -d "$2" || die "missing bundle directory: $2"
+    out="$(mktemp -d /tmp/ascf-manifest-check.XXXXXXXX)"
+    verify_package_manifest "$(cd "$2" && pwd -P)" "$out"
+    printf 'Verified mandatory signed-handoff bundle bytes; evidence: %s\n' "$out"
+    ;;
   package)
     test "$#" -eq 1 || die "package takes no arguments"
     mac_only
