@@ -14,6 +14,7 @@ Usage:
   bash fskit/signed_acceptance.sh fixture [lzraven|lzmesh]
   bash fskit/signed_acceptance.sh package
   bash fskit/signed_acceptance.sh manifest-check BUNDLE_DIR
+  bash fskit/signed_acceptance.sh bundle-code-check BUNDLE_DIR
   bash fskit/signed_acceptance.sh cli-mount BUNDLE_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh bundle-readback BUNDLE_DIR MOUNT_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh acceptance-check BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT REPLACEMENT_JSON
@@ -34,6 +35,9 @@ package: builds signed host + BOTH codecs and prepares a portable acceptance
 bundle with SHA-256 manifest, its own verifier, and negative fixtures.
 manifest-check: independently verify all critical bundle bytes and coverage
 before installation; does not require signing or attempt to mount anything.
+bundle-code-check: authenticate the manifest and require that this invoked
+helper has EXACTLY the same bytes as the manifest-covered packaged helper.
+A mismatched repository checkout must not certify the signed package.
 cli-mount: on an authorized disposable Mac with the signed extension installed
 and enabled, ask macOS FSKit to mount one authenticated synthetic archive into
 a fresh, private /private/tmp mount directory using the system mount command.
@@ -305,6 +309,16 @@ case "$1" in
     out="$(mktemp -d /tmp/ascf-manifest-check.XXXXXXXX)"
     verify_package_manifest "$(cd "$2" && pwd -P)" "$out"
     printf 'Verified mandatory signed-handoff bundle bytes; evidence: %s\n' "$out"
+    ;;
+  bundle-code-check)
+    test "$#" -eq 2 || die "bundle-code-check requires BUNDLE_DIR"
+    need shasum
+    test -d "$2" || die "missing bundle directory: $2"
+    bundle="$(cd "$2" && pwd -P)"
+    out="$(mktemp -d /tmp/ascf-bundle-code.XXXXXXXX)"
+    verify_package_manifest "$bundle" "$out"
+    require_matching_bundle_helper "$bundle"
+    printf 'Verified manifest-covered bundle and matching executable acceptance helper; evidence: %s\n' "$out"
     ;;
   cli-mount)
     test "$#" -eq 3 || die "cli-mount requires BUNDLE_DIR lzraven|lzmesh"
