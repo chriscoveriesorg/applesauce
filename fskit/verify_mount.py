@@ -276,7 +276,11 @@ def verify_mount(mount, original, require_real_mount=True):
         raise MountCheckError("cannot inspect mounted directory entry") from error
     require(entry_is_file, "mounted entry is not a regular file")
     mounted = mount / entry.name
-    require(not os.path.samefile(original, mounted), "source and mounted file are identical")
+    try:
+        aliases_original = os.path.samefile(original, mounted)
+    except OSError as error:
+        raise MountCheckError(f"cannot compare mounted and original file identities: {error}") from error
+    require(not aliases_original, "source and mounted file are identical")
 
     original_size, original_sha, original_identity = digest(
         original, nofollow=True, include_identity=True)
@@ -524,6 +528,12 @@ class SyntheticAcceptanceTests(unittest.TestCase):
 
         with mock.patch("os.stat", side_effect=missing_mount_stat):
             with self.assertRaisesRegex(MountCheckError, "cannot inspect resolved mount path"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+
+    def test_mounted_entry_disappears_during_samefile_fails_closed(self):
+        # A successful directory scan does not pin the mounted file pathname.
+        with mock.patch("os.path.samefile", side_effect=FileNotFoundError(errno.ENOENT, "synthetic entry removal")):
+            with self.assertRaisesRegex(MountCheckError, "cannot compare mounted and original file identities"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
 
     def test_missing_mount_leaf_fails_closed(self):
