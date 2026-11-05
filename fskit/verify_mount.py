@@ -1498,7 +1498,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         # Simulate close failures only after digest() has completed. Verify
         # both descriptor cleanup paths and preserve a preceding read error.
         real_close = os.close
-        real_open = os.open
+        self.real_open = os.open
         for target, expected in (("mounted", "mounted random-read descriptor"),
                                  ("original", "original random-read descriptor")):
             opened = []
