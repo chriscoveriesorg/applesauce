@@ -339,8 +339,11 @@ def verify_mount(mount, original, require_real_mount=True):
             offsets = sampled_offsets(original_size)
             for offset in offsets:
                 length = min(READ_BYTES, original_size - offset + 1)
-                expected = os.pread(source_fd, length, offset)
-                observed = os.pread(mounted_fd, length, offset)
+                try:
+                    expected = os.pread(source_fd, length, offset)
+                    observed = os.pread(mounted_fd, length, offset)
+                except OSError as error:
+                    raise MountCheckError(f"random read failed at byte {offset}: {error}") from error
                 require(observed == expected, f"random read disagrees at byte {offset}")
             require(os.pread(mounted_fd, 32, original_size) == b"",
                     "mounted read did not return EOF")
@@ -459,6 +462,24 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_random_read_io_errors_fail_closed(self):
+        # A successful full digest does not guarantee subsequent pread works.
+        # Exercise both descriptors without requiring a real FSKit mount.
+        real_pread = os.pread
+        for failing_call in (1, 2):
+            with self.subTest(failing_call=failing_call):
+                calls = 0
+                def failing_pread(fd, length, offset):
+                    nonlocal calls
+                    calls += 1
+                    if calls == failing_call:
+                        raise OSError(errno.EIO, "synthetic pread failure")
+                    return real_pread(fd, length, offset)
+                with mock.patch("os.pread", side_effect=failing_pread):
+                    with self.assertRaisesRegex(MountCheckError, "random read failed"):
+                        verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertEqual(verify_mount(self.mount, self.original, require_real_mount=False)["result"], "pass")
 
     def test_digest_cleanup_does_not_mask_primary_error(self):
         # fdopen may fail before assuming ownership of the raw descriptor.
