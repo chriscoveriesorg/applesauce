@@ -20,6 +20,7 @@ import unittest
 # Share the executable verifier's deterministic read schedule with the
 # evidence validator. A partial/randomly invented offset list must not pass.
 from verify_mount import sampled_offsets
+from replacement_acceptance import replacement_offsets
 
 
 class EvidenceError(ValueError):
@@ -147,6 +148,18 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
                 "replaced-source refusal has wrong " + field)
     require(replaced.get("denied_errno") in (errno.ESTALE, errno.EIO, errno.ENODEV),
             "replaced-source fresh read did not fail with the permitted errno")
+    # Check the entire deterministic source-replacement probe schedule. A
+    # single refused offset-zero read cannot attest to cached chunk boundaries,
+    # nonzero offsets, EOF or newly opened paths.
+    offsets = replacement_offsets(len(reference))
+    require(replaced.get("denied_offsets") == offsets,
+            "replaced-source refusal offset schedule incomplete")
+    errnos = replaced.get("denied_errnos")
+    require(isinstance(errnos, list) and len(errnos) == len(offsets)
+            and all(type(code) is int and code in
+                    (errno.ESTALE, errno.EIO, errno.ENODEV) for code in errnos)
+            and errnos[0] == replaced["denied_errno"],
+            "replaced-source offset errno evidence incomplete")
     require(evidence_time(replaced, "source replacement") > remount_at,
             "source replacement must follow the verified remount")
 
@@ -272,6 +285,8 @@ class EvidenceTests(unittest.TestCase):
             "source_archive_sha256": hashlib.sha256(valid).hexdigest(),
             "replacement_sha256": hashlib.sha256(corrupt).hexdigest(),
             "denied_errno": errno.ESTALE,
+            "denied_offsets": replacement_offsets(100),
+            "denied_errnos": [errno.ESTALE] * len(replacement_offsets(100)),
             "verified_at_utc": "2026-11-04T00:00:20+00:00"
         }))
     def check(self):
@@ -349,6 +364,28 @@ class EvidenceTests(unittest.TestCase):
         report["replacement_sha256"] = "0" * 64
         self.items[4].write_text(json.dumps(report))
         with self.assertRaisesRegex(EvidenceError, "wrong replacement_sha256"):
+            self.check()
+
+    def test_incomplete_replacement_offsets_refused(self):
+        report = load_json(self.items[4])
+        report["denied_offsets"] = report["denied_offsets"][:1]
+        report["denied_errnos"] = report["denied_errnos"][:1]
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "offset schedule incomplete"):
+            self.check()
+
+    def test_replacement_offset_success_refused(self):
+        report = load_json(self.items[4])
+        report["denied_errnos"][1] = 0
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "offset errno evidence incomplete"):
+            self.check()
+
+    def test_replacement_offset_mismatch_refused(self):
+        report = load_json(self.items[4])
+        report["denied_errnos"].pop()
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "offset errno evidence incomplete"):
             self.check()
 
     def test_replaced_source_cached_read(self):
