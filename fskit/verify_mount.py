@@ -372,7 +372,12 @@ def verify_mount(mount, original, require_real_mount=True):
             # random-read acceptance. Reject observable concurrent mutations.
             for fd, before, label in ((source_fd, source_stat, "original"),
                                       (mounted_fd, mounted_stat, "mounted")):
-                after = os.fstat(fd)
+                try:
+                    after = os.fstat(fd)
+                except OSError as error:
+                    raise MountCheckError(
+                        f"cannot inspect final random-read {label} descriptor: {error}"
+                    ) from error
                 fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
                 require(all(getattr(before, field) == getattr(after, field)
                             for field in fields),
@@ -479,6 +484,35 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_random_read_final_fstat_errors_fail_closed(self):
+        # A descriptor can fail after all random reads have succeeded.
+        real_fstat = os.fstat
+        real_pread = os.pread
+        for target in (1, 2):
+            with self.subTest(target=target):
+                sampled = False
+                final_calls = 0
+
+                def recording_pread(fd, length, offset):
+                    nonlocal sampled
+                    sampled = True
+                    return real_pread(fd, length, offset)
+
+                def failing_fstat(fd):
+                    nonlocal final_calls
+                    if sampled:
+                        final_calls += 1
+                        if final_calls == target:
+                            raise OSError(errno.EIO, "synthetic final fstat failure")
+                    return real_fstat(fd)
+
+                with mock.patch("os.pread", side_effect=recording_pread):
+                    with mock.patch("os.fstat", side_effect=failing_fstat):
+                        with self.assertRaisesRegex(
+                                MountCheckError, "cannot inspect final random-read"):
+                            self.check()
+        self.assertEqual(self.check()["result"], "pass")
 
     def test_random_read_initial_fstat_errors_fail_closed(self):
         # A descriptor can become unavailable after a successful reopen.
