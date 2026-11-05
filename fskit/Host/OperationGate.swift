@@ -55,7 +55,9 @@ struct ASCFMountPostflight {
     // A callback pathname may pass fstatfs and disappear before getmntinfo.
     // Never resurrect that stale pathname as an active volume.
     var verifiedPaths: [String] {
-        Array(Set(observedVerifiedPaths)).sorted()
+        // Preserve duplicates: stacked VFS mounts can share a pathname.
+        // Deduplication would classify two live ASCF mounts as one.
+        observedVerifiedPaths.sorted()
     }
 
     var singleVerifiedPath: String? {
