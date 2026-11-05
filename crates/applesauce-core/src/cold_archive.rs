@@ -357,6 +357,18 @@ impl<R: Read + Seek> ArchiveReader<R> {
         self.codec
     }
 
+    /// Stored archive chunk size in logical bytes; metadata only.
+    #[must_use]
+    pub const fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
+
+    /// Number of authenticated chunks declared by the validated archive index.
+    #[must_use]
+    pub fn chunk_count(&self) -> usize {
+        self.entries.len()
+    }
+
     #[must_use]
     pub const fn logical_sha256(&self) -> [u8; 32] {
         self.logical_sha256
@@ -525,6 +537,8 @@ mod tests {
         let reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
         assert_eq!(reader.codec(), Codec::Lzraven);
         assert_eq!(reader.logical_size(), 1);
+        assert_eq!(reader.chunk_count(), 1);
+        assert_eq!(reader.chunk_size(), MIN_CHUNK_BYTES);
         let expected: [u8; 32] = Sha256::digest(b"x").into();
         assert_eq!(reader.logical_sha256(), expected);
         // Metadata inspection must not allocate platform-dependent scratch.
