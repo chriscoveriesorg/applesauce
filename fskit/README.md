@@ -197,8 +197,14 @@ fixtures fail CLI verification. It writes an isolated directory with
 The manifest includes all acceptance scripts, the Finder AppleScript, the recorded macOS build, authenticated operator instructions and every fixture,
 plus the exact signed host and extension executables, their Info.plists,
 code-signing resource seals and embedded provisioning profiles. The bundle
-records the clean source HEAD in `source-provenance.txt`. Packaging refuses
-tracked source modifications to keep that attribution reproducible. Run
+records the source commit in `source-provenance.txt`. Packaging now
+requires a clean checkout, including no untracked source inputs, before
+signing. It rechecks the same exact HEAD after the build and after manifest
+generation to prevent a concurrent source change from receiving a misleading
+signed-package provenance stamp. The XcodeGen-generated
+`fskit/ApplesauceASCF.xcodeproj` and Rust `target` are ignored build products.
+The generated `source-check-final.txt` and bundled
+`source-provenance-tests.log` provide separate audit evidence. Run
 `bash fskit/signed_acceptance.sh manifest-check /path/to/bundle` before
 installing to verify every mandatory member and its SHA-256 independently.
 Run `bash fskit/signed_acceptance.sh bundle-code-check /path/to/bundle`
@@ -207,7 +213,7 @@ identical to the manifest-covered script. Every signed-bundle action now runs
 its packaged Python verifier, including the signing-profile check. A checkout
 whose acceptance script differs from the package stops before mount or
 replacement operations; use the package's own `fskit/signed_acceptance.sh`.
-a copied folder can be verified without Rust or the original repository checkout. Test the two valid
+A copied folder can be verified without Rust or the original repository checkout. Test the two valid
 files for mounted readback, normal unmount and remount; then attempt to mount
 both damaged archives and retain macOS rejection evidence. CLI verification proves that
 damaged data fails the archive decoder; only a real FSKit mount refusal
