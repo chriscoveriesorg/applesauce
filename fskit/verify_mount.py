@@ -201,6 +201,25 @@ def digest(path, nofollow=False, include_identity=False):
                       identity.st_mtime_ns, identity.st_ctime_ns)) if include_identity else result
 
 
+def require_unique_ascf_mount(mount, active):
+    """Bind a signed readback to the only ASCF entry in Darwin's mount table.
+
+    A second or relocated ASCF volume makes ownership ambiguous. Reject it
+    before accepting even a byte-identical restored file. Mount snapshots
+    are rechecked after Finder's copy by the signed acceptance workflow.
+    """
+    require(isinstance(active, list) and bool(active),
+            "missing complete Darwin mount table for signed ASCF readback")
+    require(all(isinstance(entry, (tuple, list)) and len(entry) == 2 and
+                all(isinstance(value, str) and bool(value) for value in entry)
+                for entry in active), "malformed Darwin kernel mount table")
+    ascf = [path for kind, path in active if kind == "ascf"]
+    require(len(ascf) == 1,
+            f"expected exactly one active ASCF mount; found {len(ascf)}")
+    require(os.path.normpath(ascf[0]) == os.path.normpath(os.fspath(mount)),
+            "kernel ASCF mount table does not match selected mount path")
+
+
 def signed_mount_identity(mount):
     """Require the actual ASCF FSKit filesystem and record macOS provenance.
 
@@ -232,6 +251,15 @@ def signed_mount_identity(mount):
     # EROFS responses remain mandatory defense in depth.
     flags = int(filesystem.f_flags)
     require(flags & 0x1, "FSKit mount lacks Darwin MNT_RDONLY (kernel read-only flag)")
+    # statfs authenticates the opened directory, while getmntinfo detects
+    # extra or relocated ASCF volumes that a per-path query would miss.
+    # Import locally to reuse the verified Darwin mount-table ABI without a
+    # module-level cycle (unmount_acceptance also imports DarwinStatFS here).
+    from unmount_acceptance import read_mount_table
+    try:
+        require_unique_ascf_mount(mount, read_mount_table())
+    except ValueError as error:
+        raise MountCheckError(f"cannot establish unique ASCF mount: {error}") from error
     return {"filesystem_type": kind, "mount_flags": flags, "kernel_readonly": True,
             "mount_fsid": [int(filesystem.f_fsid[0]), int(filesystem.f_fsid[1])],
             "macos_version": output("/usr/bin/sw_vers", "-productVersion"),
@@ -1675,7 +1703,10 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             sys.modules[__name__], "darwin_statfs", side_effect=[filesystem, final_filesystem]
         ) as statfs_call, mock.patch(
             "subprocess.run", side_effect=command
-        ), mock.patch("os.open", side_effect=self.readonly_open):
+        ), mock.patch("os.open", side_effect=self.readonly_open), mock.patch(
+            "unmount_acceptance.read_mount_table",
+            return_value=[("apfs", "/"), ("ascf", str(self.mount))]
+        ):
             outcome = verify_mount(self.mount, self.original)
         expected_mount = self.mount.resolve(strict=True)
         self.assertEqual(statfs_call.call_args_list,
@@ -1751,6 +1782,25 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         ), mock.patch("os.uname", return_value=mock.Mock(machine="arm64")):
             with self.assertRaisesRegex(MountCheckError, "fstatfs failed"):
                 darwin_filesystem_type(self.mount)
+
+    def test_unique_ascf_mount_accepts_only_selected_path(self):
+        require_unique_ascf_mount(self.mount,
+                                  [("apfs", "/"), ("ascf", str(self.mount))])
+
+    def test_unique_ascf_mount_rejects_stacked_and_relocated_volumes(self):
+        for table, explanation in (
+            ([("apfs", "/")], "exactly one"),
+            ([("ascf", str(self.mount)), ("ascf", str(self.mount))], "exactly one"),
+            ([("ascf", "/Volumes/Other ASCF")], "does not match"),
+        ):
+            with self.subTest(table=table), self.assertRaisesRegex(
+                    MountCheckError, explanation):
+                require_unique_ascf_mount(self.mount, table)
+
+    def test_unique_ascf_mount_rejects_missing_or_malformed_table(self):
+        for table in ([], None, [("ascf", "")], [("ascf",)], ["ascf"]):
+            with self.subTest(table=table), self.assertRaises(MountCheckError):
+                require_unique_ascf_mount(self.mount, table)
 
     def test_real_mount_gate_records_fskit_identity_and_macos_build(self):
         report, seen = self.check_signed_gate("ascf")
