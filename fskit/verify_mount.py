@@ -406,7 +406,14 @@ def verify_mount(mount, original, require_real_mount=True):
         except OSError as error:
             require(error.errno in DENIED, f"unexpected write-open error: {error}")
         else:
-            os.close(writable_fd)
+            # A successful writable open is already a safety failure. Even if
+            # closing that descriptor fails, retain the primary refusal.
+            try:
+                os.close(writable_fd)
+            except OSError as error:
+                raise MountCheckError(
+                    f"mounted file permitted write access (close also failed: {error})"
+                ) from error
             raise MountCheckError("mounted file permitted write access")
 
     # Revalidate pathname bindings after negative write probes: a replacement
@@ -495,6 +502,31 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_writable_open_close_failure_preserves_refusal(self):
+        # Never actually open the mounted fixture writable: inject a harmless
+        # read-only descriptor and fail its cleanup after closing it.
+        real_open, real_close = os.open, os.close
+        injected = set()
+
+        def open_probe(path, flags, *args, **kwargs):
+            if Path(path) == self.restored and flags & os.O_ACCMODE:
+                fd = real_open(self.original, os.O_RDONLY)
+                injected.add(fd)
+                return fd
+            return real_open(path, flags, *args, **kwargs)
+
+        def close_probe(fd):
+            real_close(fd)
+            if fd in injected:
+                injected.remove(fd)
+                raise OSError(errno.EIO, "synthetic close failure")
+
+        with mock.patch.object(os, "open", side_effect=open_probe), \\
+             mock.patch.object(os, "close", side_effect=close_probe):
+            with self.assertRaisesRegex(MountCheckError, "permitted write access"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertFalse(injected)
 
     def test_random_read_final_fstat_errors_fail_closed(self):
         # A descriptor can fail after all random reads have succeeded.
