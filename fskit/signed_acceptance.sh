@@ -677,8 +677,29 @@ PY
   replacement-check)
     test "$#" -eq 4 || die "replacement-check requires STAGE_DIR MOUNT_DIR ORIGINAL_JSONL"
     mac_only
+    # The staged copy records the exact signed package that generated it.
+    # Authenticate that package before replacing even a synthetic archive.
+    # Running a different checkout's verifier would undermine the evidence.
+    bundle="$(/usr/bin/python3 - "$2" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+stage = Path(sys.argv[1])
+with (stage / "stage.json").open(encoding="utf-8") as stream:
+    data = json.load(stream)
+bundle = data.get("bundle")
+if not isinstance(bundle, str) or not bundle.startswith("/"):
+    sys.exit("stage metadata lacks an absolute signed-bundle path")
+print(bundle)
+PY
+)" || die "replacement stage lacks a valid original signed bundle"
+    test -d "$bundle" || die "original signed bundle no longer exists: $bundle"
     out="$(mktemp -d /tmp/ascf-replacement-evidence.XXXXXXXX)"
-    if ! /usr/bin/python3 "$ROOT/fskit/replacement_acceptance.py" check "$2" "$3" "$4" > "$out/replacement.json"; then
+    verify_package_manifest "$bundle" "$out"
+    require_matching_bundle_helper "$bundle"
+    verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    if ! /usr/bin/python3 "$bundle/fskit/replacement_acceptance.py" check "$2" "$3" "$4" > "$out/replacement.json"; then
       die "replacement refusal failed; staged archive may be replaced; see $out"
     fi
     cat "$out/replacement.json"
