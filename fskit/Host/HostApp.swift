@@ -321,8 +321,9 @@ private final class ASCFMountController: ObservableObject {
                 )
                 multipleASCFMounts = outcome.verifiedPaths.count > 1
                 if let path = outcome.singleVerifiedPath {
+                    // Only use a path in the live VFS snapshot; an FSClient
+                    // callback may refer to a volume that has already gone.
                     mountedURL = observed.first(where: { $0.path == path })
-                        ?? mounted.flatMap { verifiedReturned == path ? $0 : nil }
                 } else {
                     mountedURL = nil
                 }
@@ -349,6 +350,8 @@ private final class ASCFMountController: ObservableObject {
                     status = "Verified read-only ASCF mount at \(path)"
                 } else if outcome.hasOrphanedMount {
                     status = "MOUNT_INCONCLUSIVE: FSClient callback disagreed with the live VFS. Read-only ASCF mount(s) at \(outcome.verifiedPaths.joined(separator: ", ")). Unmount normally before retrying."
+                } else if verifiedReturned != nil && observed.isEmpty {
+                    status = "MOUNT_INCONCLUSIVE: FSClient returned a verified ASCF mount which disappeared before the kernel mount-table check. Inspect the mount lifecycle before retrying."
                 } else if let error {
                     status = "Mount failed: \(error.localizedDescription)"
                 } else if let mounted {
