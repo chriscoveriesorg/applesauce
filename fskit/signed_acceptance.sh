@@ -90,7 +90,7 @@ signing_preflight() {
   printf 'FSKit entitlement grants still require signed-build profile validation.\n'
 }
 verify_bundle() {
-  local bundle="$1" key="$2" name="$3" out="$4"
+  local bundle="$1" key="$2" name="$3" out="$4" helper_root="${5:-$ROOT}"
   test -d "$bundle" || die "missing bundle: $bundle"
   /usr/bin/codesign --verify --strict --verbose=2 "$bundle" \
     > "$out/$name.signature-check.log" 2>&1 || die "$name code signature invalid"
@@ -110,16 +110,16 @@ verify_bundle() {
   signing_team="$(/usr/bin/sed -n 's/^TeamIdentifier=//p' "$out/$name.identity.txt" | /usr/bin/head -n 1)"
   bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist")" \
     || die "$name signed bundle identifier unavailable"
-  /usr/bin/python3 "$ROOT/fskit/signing_profile.py" \
+  /usr/bin/python3 "$helper_root/fskit/signing_profile.py" \
     "$out/$name.entitlements.plist" "$out/$name.provisioning.plist" \
     "$key" "$name" "$signing_team" "$bundle_id" \
     || die "$name code signature and provisioning profile disagree"
 }
 verify_host() {
-  local host="$1" out="$2"
-  verify_bundle "$host" com.apple.developer.fskit.mount host "$out"
+  local host="$1" out="$2" helper_root="${3:-$ROOT}"
+  verify_bundle "$host" com.apple.developer.fskit.mount host "$out" "$helper_root"
   verify_bundle "$host/Contents/Extensions/ASCFExtension.appex" \
-    com.apple.developer.fskit.fsmodule extension "$out"
+    com.apple.developer.fskit.fsmodule extension "$out" "$helper_root"
   local extension="$host/Contents/Extensions/ASCFExtension.appex"
   /usr/bin/codesign -dv --verbose=4 "$host" > "$out/host.identity.txt" 2>&1
   /usr/bin/codesign -dv --verbose=4 "$extension" > "$out/extension.identity.txt" 2>&1
@@ -241,6 +241,18 @@ PY
     || die "bundle hash verification failed; see $out/manifest-verified.log"
   /bin/rm -f "$out/SHA256SUMS.checked"
 }
+# A bundle is self-contained, and its manifest authenticates the actual
+# verifier scripts. When invoked from a checkout with a different version of
+# the helper, fail before running acceptance so a report cannot be attributed
+# to signed packaged code while executing a different implementation.
+require_matching_bundle_helper() {
+  local bundle="$1"
+  test -f "$bundle/fskit/signed_acceptance.sh" \
+    && test ! -L "$bundle/fskit/signed_acceptance.sh" \
+    || die "bundled acceptance helper missing or symlinked"
+  /usr/bin/cmp -s "$ROOT/fskit/signed_acceptance.sh" "$bundle/fskit/signed_acceptance.sh" \
+    || die "acceptance helper differs from signed bundle; run the bundle's fskit/signed_acceptance.sh instead"
+}
 # Stamp successful mounted readbacks with unique run identities. The
 # unmount verifier binds to that exact first readback; a reused JSON report
 # cannot masquerade as evidence of a second, independent remount.
@@ -317,7 +329,8 @@ case "$1" in
       || die "cannot allocate private CLI mount stage"
     /bin/mkdir "$out/mount"
     verify_package_manifest "$bundle" "$out"
-    verify_host "$bundle/ASCFHost.app" "$out"
+    require_matching_bundle_helper "$bundle"
+    verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-before.txt"
     # -F selects the registered FSKit module, avoiding mount_ascf helper
@@ -331,7 +344,7 @@ case "$1" in
       die "FSKit Terminal mount failed; see $out/mount-command.txt and $out/mount-command.log. Check extension activation/permissions; the host UI remains available."
     fi
     /sbin/mount > "$out/mounts-after.txt"
-    if ! /usr/bin/python3 "$ROOT/fskit/verify_mount.py" \
+    if ! /usr/bin/python3 "$bundle/fskit/verify_mount.py" \
         --mount "$out/mount" --original "$original" > "$out/terminal-readback.json"; then
       die "a mount exists but failed real ASCF read-only/SHA-256/random-read acceptance; inspect $out and unmount the private stage normally"
     fi
@@ -534,10 +547,11 @@ PY
     test -f "$bundle/source.$codec.ascf" || die "bundle archive for $codec missing"
     out="$(mktemp -d /tmp/ascf-bundle-readback.XXXXXXXX)"
     verify_package_manifest "$bundle" "$out"
-    verify_host "$bundle/ASCFHost.app" "$out"
+    require_matching_bundle_helper "$bundle"
+    verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-before.txt"
-    /usr/bin/python3 "$ROOT/fskit/verify_mount.py" \
+    /usr/bin/python3 "$bundle/fskit/verify_mount.py" \
       --mount "$3" --original "$bundle/source.$codec.jsonl" \
       > "$out/readback.json" \
       || die "FSKit bundle readback failed; see $out"
@@ -607,8 +621,9 @@ PY
     case "$codec" in lzraven|lzmesh) ;; *) die "invalid codec";; esac
     out="$(mktemp -d /tmp/ascf-evidence.XXXXXXXX)"
     verify_package_manifest "$bundle" "$out"
-    verify_host "$bundle/ASCFHost.app" "$out"
-    /usr/bin/python3 "$ROOT/fskit/acceptance_evidence.py" \
+    require_matching_bundle_helper "$bundle"
+    verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    /usr/bin/python3 "$bundle/fskit/acceptance_evidence.py" \
       --bundle "$bundle" --codec "$codec" --first "$4" \
       --unmounted "$5" --remounted "$6" --refusal "$7" --replacement "$8" \
       > "$out/acceptance.json" \
@@ -622,8 +637,9 @@ PY
     bundle="$(cd "$2" && pwd -P)" || die "missing bundle: $2"
     out="$(mktemp -d /tmp/ascf-both-codecs.XXXXXXXX)"
     verify_package_manifest "$bundle" "$out"
-    verify_host "$bundle/ASCFHost.app" "$out"
-    /usr/bin/python3 "$ROOT/fskit/acceptance_evidence.py" --both \
+    require_matching_bundle_helper "$bundle"
+    verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    /usr/bin/python3 "$bundle/fskit/acceptance_evidence.py" --both \
       --bundle "$bundle" \
       --raven-first "$3" --raven-unmounted "$4" \
       --raven-remounted "$5" --raven-refusal "$6" --raven-replacement "$7" \
@@ -640,8 +656,9 @@ PY
     out="$(mktemp -d /tmp/ascf-replacement-preflight.XXXXXXXX)"
     bundle="$(cd "$2" && pwd -P)" || die "missing signed bundle"
     verify_package_manifest "$bundle" "$out"
-    verify_host "$bundle/ASCFHost.app" "$out"
-    /usr/bin/python3 "$ROOT/fskit/replacement_acceptance.py" stage "$bundle" "$3"
+    require_matching_bundle_helper "$bundle"
+    verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    /usr/bin/python3 "$bundle/fskit/replacement_acceptance.py" stage "$bundle" "$3"
     ;;
   replacement-check)
     test "$#" -eq 4 || die "replacement-check requires STAGE_DIR MOUNT_DIR ORIGINAL_JSONL"
