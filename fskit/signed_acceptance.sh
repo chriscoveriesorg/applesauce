@@ -17,6 +17,7 @@ Usage:
   bash fskit/signed_acceptance.sh cli-mount BUNDLE_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh bundle-readback BUNDLE_DIR MOUNT_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh acceptance-check BUNDLE_DIR CODEC FIRST_JSON UNMOUNT_JSON REMOUNT_JSON REFUSAL_TXT REPLACEMENT_JSON
+  bash fskit/signed_acceptance.sh acceptance-all BUNDLE_DIR RAVEN_5_EVIDENCE_PATHS MESH_5_EVIDENCE_PATHS
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
   bash fskit/signed_acceptance.sh replacement-stage BUNDLE_DIR lzraven|lzmesh
@@ -48,6 +49,8 @@ unmounted: after normal host/Finder unmount, prove a previously verified
 ASCF mount is gone using its successful readback JSON as evidence.
 acceptance-check: validate a complete two-mount and corruption-control evidence
 chain for one codec, with signed bundle and source hashes checked first.
+acceptance-all: require BOTH codec lifecycles, matching logical bytes and macOS
+build, and four independent readback IDs before claiming joint acceptance.
 Each command uses a new temporary directory and preserves existing data.
 Only the explicit cli-mount command performs a real, synthetic-file FSKit
 mount into a fresh private directory. Other commands never initiate mounts.
@@ -450,7 +453,9 @@ These files are synthetic. Preserve the originals and the signed app.
    Any cached read or unrelated permission failure blocks acceptance.
 8. For each codec, run acceptance-check with first readback.json,
    unmounted.json, remount readback.json, the CORRUPT_REFUSAL_CONFIRMED
-   diagnostic and replacement.json. Preserve the complete result for review.
+   diagnostic and replacement.json.
+   Run acceptance-all with both five-file evidence groups (Raven then Mesh).
+   Preserve the combined acceptance.json and the individual reports for review.
 The bundle hashes the signed host and extension binaries and provisioning
 profiles alongside every fixture and verifier; source-provenance.txt records
 the clean source checkout commit. It does not need Rust on the receiving Mac.
@@ -604,6 +609,24 @@ PY
       || die "acceptance chain failed; diagnostics: $out/acceptance.json"
     cat "$out/acceptance.json"
     printf 'Acceptance evidence chain: %s\n' "$out"
+    ;;
+  acceptance-all)
+    test "$#" -eq 12 || die "acceptance-all requires BUNDLE_DIR and five evidence files per codec (Raven first, Mesh second)"
+    mac_only
+    bundle="$(cd "$2" && pwd -P)" || die "missing bundle: $2"
+    out="$(mktemp -d /tmp/ascf-both-codecs.XXXXXXXX)"
+    verify_package_manifest "$bundle" "$out"
+    verify_host "$bundle/ASCFHost.app" "$out"
+    /usr/bin/python3 "$ROOT/fskit/acceptance_evidence.py" --both \
+      --bundle "$bundle" \
+      --raven-first "$3" --raven-unmounted "$4" \
+      --raven-remounted "$5" --raven-refusal "$6" --raven-replacement "$7" \
+      --mesh-first "$8" --mesh-unmounted "$9" \
+      --mesh-remounted "${10}" --mesh-refusal "${11}" --mesh-replacement "${12}" \
+      > "$out/acceptance.json" \
+      || die "both-codec acceptance chain failed; diagnostics: $out/acceptance.json"
+    cat "$out/acceptance.json"
+    printf 'Combined signed-mount evidence chain: %s\n' "$out"
     ;;
   replacement-stage)
     test "$#" -eq 3 || die "replacement-stage requires BUNDLE_DIR CODEC"
