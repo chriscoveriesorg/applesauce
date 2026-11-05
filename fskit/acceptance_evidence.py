@@ -79,6 +79,14 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
         require(report.get("finder_copy_verified") is True
                 and report.get("finder_copy_sha256") == digest,
                 stage + ": Finder copy-out whole-file verification missing")
+        require(report.get("post_finder_mount_verified") is True
+                and report.get("post_finder_mount_fsid") == report.get("mount_fsid")
+                and isinstance(report.get("mount_fsid"), list)
+                and len(report["mount_fsid"]) == 2
+                and type(report.get("mount_device")) is int
+                and type(report.get("mount_inode")) is int
+                and report["mount_inode"] > 0,
+                stage + ": post-Finder kernel mount identity witness missing")
         mount = report.get("mount")
         require(isinstance(mount, str) and mount.startswith("/Volumes/")
                 and "/../" not in mount and "/./" not in mount,
@@ -229,6 +237,9 @@ class EvidenceTests(unittest.TestCase):
             "kernel_readonly": True, "mount_flags": 1,
             "readonly_open_denied": True, "restored_file": "source.lzmesh",
             "finder_copy_verified": True, "finder_copy_sha256": self.sha,
+            "post_finder_mount_verified": True,
+            "mount_fsid": [42, 21], "post_finder_mount_fsid": [42, 21],
+            "mount_device": 12, "mount_inode": 34,
             "logical_bytes": 100, "sha256": self.sha,
             "mount": "/Volumes/Applesauce ASCF", "macos_version": "27.0",
             "macos_build": "fixture", "random_read_offsets": sampled_offsets(100)
@@ -473,6 +484,20 @@ class EvidenceTests(unittest.TestCase):
         self.items[2].write_text(json.dumps(report))
         with self.assertRaisesRegex(EvidenceError, "Finder copy-out"):
             self.check()
+    def test_reject_missing_post_finder_witness(self):
+        report = load_json(self.items[2])
+        report.pop("post_finder_mount_verified")
+        self.items[2].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "post-Finder kernel mount"):
+            self.check()
+
+    def test_reject_swapped_fsid_after_finder_copy(self):
+        report = load_json(self.items[0])
+        report["post_finder_mount_fsid"] = [42, 22]
+        self.items[0].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "post-Finder kernel mount"):
+            self.check()
+
     def test_direct_readback_stamps_only_after_finder_copy(self):
         # The owner-run direct-readback path used to call stamp_readback
         # before Finder copied a file. That dies on a missing second argv.
@@ -491,6 +516,10 @@ class EvidenceTests(unittest.TestCase):
                 self.assertLess(section.index("/usr/bin/cmp -s"),
                                 section.index('stamp_readback "$out/readback.json"'),
                                 "Finder copy must be compared before stamping")
+                self.assertIn("post-finder-readback.json", section)
+                self.assertLess(section.index("post-finder-readback.json"),
+                                section.index('stamp_readback "$out/readback.json"'),
+                                "post-Finder mount recheck must precede stamp")
     def test_reused_mount_report(self):
         self.items[2].write_bytes(self.items[0].read_bytes())
         with self.assertRaisesRegex(EvidenceError, "independent mounted-readback"):
