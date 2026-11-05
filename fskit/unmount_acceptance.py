@@ -70,6 +70,10 @@ def verify(mount, first_readback, *, bundle=None, mounts=None, is_mount=None):
             previous["mount_flags"] & 1,
             "previous readback lacks kernel-confirmed read-only ASCF identity")
     require(previous.get("mount") == mount, "unmount path differs from signed readback")
+    require(previous.get("unique_ascf_mount_verified") is True
+            and type(previous.get("active_ascf_mounts")) is int
+            and previous["active_ascf_mounts"] == 1,
+            "previous readback lacks unique kernel ASCF mount proof")
     require(previous.get("finder_copy_verified") is True and
             previous.get("finder_copy_sha256") == previous.get("sha256"),
             "previous readback lacks verified Finder copy-out")
@@ -143,6 +147,7 @@ class UnmountTests(unittest.TestCase):
         self.payload = {
             "result": "pass", "filesystem_type": "ascf",
             "kernel_readonly": True, "mount_flags": 1,
+            "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
             "mount": "/Volumes/Applesauce ASCF", "finder_copy_verified": True,
             "sha256": "a" * 64, "finder_copy_sha256": "a" * 64,
             "verification_id": "first", "macos_build": "27A001"
@@ -205,6 +210,12 @@ class UnmountTests(unittest.TestCase):
         self.save()
         with self.assertRaisesRegex(UnmountError, "differs from signed-bundle"):
             self.signed_bundle_check()
+
+    def test_unmount_rejects_ambiguous_prior_mount(self):
+        self.payload["active_ascf_mounts"] = 2
+        self.save()
+        with self.assertRaisesRegex(UnmountError, "unique kernel ASCF"):
+            self.check()
 
     def test_normal_unmount(self):
         result = self.check()

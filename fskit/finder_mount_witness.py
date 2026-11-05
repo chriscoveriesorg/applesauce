@@ -64,6 +64,10 @@ def validated_identity(report):
     require(report.get("filesystem_type") == "ascf" and
             report.get("kernel_readonly") is True,
             "Finder witness requires real kernel read-only ASCF")
+    require(report.get("unique_ascf_mount_verified") is True
+            and type(report.get("active_ascf_mounts")) is int
+            and report["active_ascf_mounts"] == 1,
+            "Finder witness lacks unique kernel ASCF mount proof")
     flags = report.get("mount_flags")
     require(type(flags) is int and flags & 1,
             "missing Darwin MNT_RDONLY evidence")
@@ -89,7 +93,8 @@ def validated_identity(report):
     return {key: report[key] for key in (
         "mount", "restored_file", "sha256", "logical_bytes", "mount_device",
         "mount_inode", "mount_fsid", "filesystem_type", "kernel_readonly",
-        "mount_flags", "macos_version", "macos_build", "readonly_open_denied",
+        "mount_flags", "unique_ascf_mount_verified", "active_ascf_mounts",
+        "macos_version", "macos_build", "readonly_open_denied",
         "random_read_offsets")}
 
 
@@ -143,6 +148,7 @@ class WitnessTests(unittest.TestCase):
         checksum = hashlib.sha256(self.copy.read_bytes()).hexdigest()
         self.first = {"result": "pass", "filesystem_type": "ascf",
                       "kernel_readonly": True, "mount_flags": 1,
+                      "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
                       "mount_device": 123, "mount_inode": 45, "mount_fsid": [123, 2],
                       "mount": "/Volumes/Applesauce ASCF", "restored_file": "source.lzraven",
                       "logical_bytes": self.copy.stat().st_size, "sha256": checksum,
@@ -177,6 +183,11 @@ class WitnessTests(unittest.TestCase):
                     stamp(self.before, self.after, self.copy)
                 self.assertNotIn("verification_id", self.before.read_text())
 
+    def test_rejects_second_active_ascf_mount(self):
+        self.after.write_text(json.dumps(dict(self.first, active_ascf_mounts=2)))
+        with self.assertRaisesRegex(WitnessError, "unique kernel ASCF"):
+            stamp(self.before, self.after, self.copy)
+
     def test_rejects_copy_tamper_and_symlinks(self):
         self.copy.write_bytes(b"changed")
         with self.assertRaisesRegex(WitnessError, "Finder copy-out differs"):
@@ -189,7 +200,8 @@ class WitnessTests(unittest.TestCase):
 
     def test_requires_actual_mounted_readback_fields(self):
         for key in ("mount_fsid", "mount_inode", "random_read_offsets",
-                    "kernel_readonly", "readonly_open_denied"):
+                    "kernel_readonly", "readonly_open_denied",
+                     "unique_ascf_mount_verified", "active_ascf_mounts"):
             with self.subTest(key=key):
                 altered = dict(self.first)
                 altered.pop(key)

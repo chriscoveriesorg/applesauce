@@ -67,6 +67,10 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
                 and isinstance(report.get("mount_flags"), int)
                 and report["mount_flags"] & 1,
                 stage + ": VFS read-only proof missing")
+        require(report.get("unique_ascf_mount_verified") is True
+                and type(report.get("active_ascf_mounts")) is int
+                and report["active_ascf_mounts"] == 1,
+                stage + ": unique kernel ASCF mount proof missing")
         require(report.get("readonly_open_denied") is True,
                 stage + ": denied write opens not established")
         # Check the mounted bytes against the reference before checking the
@@ -130,7 +134,10 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     require(replaced.get("result") == "pass" and replaced.get("codec") == codec,
             "codec-specific replaced-source refusal evidence missing")
     require(replaced.get("filesystem_type") == "ascf"
-            and replaced.get("kernel_readonly") is True,
+            and replaced.get("kernel_readonly") is True
+            and replaced.get("unique_ascf_mount_verified") is True
+            and type(replaced.get("active_ascf_mounts")) is int
+            and replaced["active_ascf_mounts"] == 1,
             "replaced-source refusal lacks read-only ASCF VFS proof")
     require(replaced.get("restored_file") == "source." + codec
             and replaced.get("mount") == reports[1]["mount"],
@@ -248,6 +255,7 @@ class EvidenceTests(unittest.TestCase):
         report = {
             "result": "pass", "filesystem_type": "ascf",
             "kernel_readonly": True, "mount_flags": 1,
+            "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
             "readonly_open_denied": True, "restored_file": "source.lzmesh",
             "finder_copy_verified": True, "finder_copy_sha256": self.sha,
             "post_finder_mount_verified": True,
@@ -280,6 +288,7 @@ class EvidenceTests(unittest.TestCase):
         self.items[4].write_text(json.dumps({
             "result": "pass", "codec": "lzmesh", "filesystem_type": "ascf",
             "kernel_readonly": True, "restored_file": "source.lzmesh",
+            "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
             "mount": "/Volumes/Applesauce ASCF", "macos_build": "fixture",
             "original_sha256": self.sha, "before_replacement_sha256": self.sha,
             "source_archive_sha256": hashlib.sha256(valid).hexdigest(),
@@ -499,6 +508,17 @@ class EvidenceTests(unittest.TestCase):
         self.items[2].write_text(json.dumps(report))
         with self.assertRaisesRegex(EvidenceError, "VFS read-only"):
             self.check()
+    def test_ambiguous_mounts_in_readbacks_or_replacement(self):
+        for index in (0, 2, 4):
+            with self.subTest(index=index):
+                report = load_json(self.items[index])
+                report["active_ascf_mounts"] = 2
+                self.items[index].write_text(json.dumps(report))
+                with self.assertRaisesRegex(EvidenceError, "ASCF"):
+                    self.check()
+                report["active_ascf_mounts"] = 1
+                self.items[index].write_text(json.dumps(report))
+
     def test_inconclusive_corruption(self):
         self.items[3].write_text("CORRUPT_REFUSAL_INCONCLUSIVE")
         with self.assertRaisesRegex(EvidenceError, "corruption refusal"):

@@ -261,6 +261,7 @@ def signed_mount_identity(mount):
     except ValueError as error:
         raise MountCheckError(f"cannot establish unique ASCF mount: {error}") from error
     return {"filesystem_type": kind, "mount_flags": flags, "kernel_readonly": True,
+            "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
             "mount_fsid": [int(filesystem.f_fsid[0]), int(filesystem.f_fsid[1])],
             "macos_version": output("/usr/bin/sw_vers", "-productVersion"),
             "macos_build": output("/usr/bin/sw_vers", "-buildVersion")}
@@ -1821,6 +1822,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.assertEqual(report["filesystem_type"], "ascf")
         self.assertEqual(report["mount_flags"], 1)
         self.assertTrue(report["kernel_readonly"])
+        self.assertTrue(report["unique_ascf_mount_verified"])
+        self.assertEqual(report["active_ascf_mounts"], 1)
         self.assertEqual(report["macos_version"], "27.2")
         self.assertEqual(report["macos_build"], "26B123")
         self.assertEqual(len(seen), 4)

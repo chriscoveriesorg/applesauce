@@ -159,6 +159,9 @@ def check(directory, mount, original, verifier=None, read_probe=probe_read):
     require(report.get("result") == "pass"
             and report.get("filesystem_type") == "ascf"
             and report.get("kernel_readonly") is True
+            and report.get("unique_ascf_mount_verified") is True
+            and type(report.get("active_ascf_mounts")) is int
+            and report["active_ascf_mounts"] == 1
             and report.get("restored_file") == expected.name
             and report.get("sha256") == metadata["original_sha256"]
             and bool(report.get("macos_build")),
@@ -191,6 +194,7 @@ def check(directory, mount, original, verifier=None, read_probe=probe_read):
                "before_replacement_sha256": report["sha256"],
                "filesystem_type": report["filesystem_type"],
                "kernel_readonly": report["kernel_readonly"],
+               "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
                "restored_file": report["restored_file"],
                "macos_build": report["macos_build"],
                "mount": str(mount), "denied_errno": denied_errnos[0],
@@ -254,7 +258,7 @@ class ReplacementTests(unittest.TestCase):
     def test_replaced_archive_read_must_fail_closed(self):
         meta, good, bad = self.prepare()
         def verified(*_args, **_kwargs):
-            return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
+            return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
                     "restored_file": "source.lzmesh", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
         def refused(_path, _offset):
             raise OSError(errno.ESTALE, "source identity changed")
@@ -269,10 +273,23 @@ class ReplacementTests(unittest.TestCase):
         self.assertFalse(bad.exists())
         self.assertEqual(sha256(good), meta["replacement_sha256"])
 
+    def test_ambiguous_mount_blocks_staged_replacement(self):
+        meta, good, bad = self.prepare()
+        def ambiguous(*_args, **_kwargs):
+            return {"result": "pass", "filesystem_type": "ascf",
+                    "kernel_readonly": True, "unique_ascf_mount_verified": True,
+                    "active_ascf_mounts": 2, "restored_file": "source.lzmesh",
+                    "sha256": meta["original_sha256"], "macos_build": "synthetic"}
+        with self.assertRaisesRegex(ValueError, "mounted ASCF readback prerequisite"):
+            check(self.stage_dir, "/Volumes/ASCF",
+                  self.bundle / "source.lzmesh.jsonl", ambiguous)
+        self.assertTrue(bad.exists())
+        self.assertEqual(good.read_bytes(), b"ASCF0001valid")
+
     def test_cached_success_is_rejected(self):
         meta, _, _ = self.prepare("lzraven")
         def verified(*_args, **_kwargs):
-            return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
+            return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
                     "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
         with self.assertRaisesRegex(ValueError, "served replaced-source bytes at offset 0"):
             check(self.stage_dir, "/Volumes/ASCF",
@@ -291,7 +308,7 @@ class ReplacementTests(unittest.TestCase):
         meta, _, _ = self.prepare()
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf",
-                    "kernel_readonly": True, "restored_file": "source.lzmesh",
+                    "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1, "restored_file": "source.lzmesh",
                     "sha256": meta["original_sha256"], "macos_build": "synthetic"}
         visited = []
         def probe(_path, offset):
@@ -307,7 +324,7 @@ class ReplacementTests(unittest.TestCase):
     def test_unrelated_errno_is_rejected(self):
         meta, _, _ = self.prepare("lzraven")
         def verified(*_args, **_kwargs):
-            return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
+            return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
                     "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
         def denied(_path, _offset):
             raise OSError(errno.EACCES, "permissions")
