@@ -180,6 +180,7 @@ fskit/finder_mount_witness.py
 fskit/unmount_acceptance.py
 fskit/acceptance_evidence.py
 fskit/signing_profile.py
+fskit/source_provenance.py
 fskit/replacement_acceptance.py
 fskit/finder_readback.applescript
 ASCFHost.app/Contents/Info.plist
@@ -352,8 +353,10 @@ case "$1" in
     test "$#" -eq 1 || die "package takes no arguments"
     mac_only
     for t in cargo shasum ditto python3 git; do need "$t"; done
-    git diff --quiet && git diff --cached --quiet \
-      || die "package requires a clean tracked source checkout for reproducible provenance"
+    # Snapshot the exact source revision before building. Untracked Swift/Rust
+    # inputs are as dangerous to provenance as modified tracked files.
+    source_sha="$(/usr/bin/python3 "$ROOT/fskit/source_provenance.py" --check "$ROOT")" \
+      || die "package requires a clean, fully tracked checkout"
     # Explicit single-command handoff. Every input is generated from synthetic
     # data. A signed app is copied intact, preserving its embedded extension.
     out="$(mktemp -d /tmp/ascf-acceptance.XXXXXXXX)"
@@ -411,6 +414,7 @@ PY
     /bin/cp "$ROOT/fskit/unmount_acceptance.py" "$out/fskit/unmount_acceptance.py"
     /bin/cp "$ROOT/fskit/acceptance_evidence.py" "$out/fskit/acceptance_evidence.py"
     /bin/cp "$ROOT/fskit/signing_profile.py" "$out/fskit/signing_profile.py"
+    /bin/cp "$ROOT/fskit/source_provenance.py" "$out/fskit/source_provenance.py"
     /bin/cp "$ROOT/fskit/replacement_acceptance.py" "$out/fskit/replacement_acceptance.py"
     /bin/cp "$ROOT/fskit/finder_readback.applescript" "$out/fskit/finder_readback.applescript"
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
@@ -428,13 +432,20 @@ PY
     /usr/bin/python3 "$out/fskit/signing_profile.py" --self-test \
       > "$out/signing-profile-tests.log" 2>&1 \
       || die "packaged signing-profile self-tests failed; see $out/signing-profile-tests.log"
+    /usr/bin/python3 "$out/fskit/source_provenance.py" --self-test \
+      > "$out/source-provenance-tests.log" 2>&1 \
+      || die "packaged source-provenance tests failed; see $out/source-provenance-tests.log"
     /usr/bin/python3 "$out/fskit/replacement_acceptance.py" --self-test \
       > "$out/replacement-tests.log" 2>&1 \
       || die "packaged replacement-control tests failed; see $out/replacement-tests.log"
     # Carry the exact clean source commit; the manifest authenticates the
     # signed binaries, app/extension provisioning and all test scripts.
+    # The build must still belong to the exact SHA observed before signing.
+    /usr/bin/python3 "$ROOT/fskit/source_provenance.py" --check "$ROOT" \
+      --expected-sha "$source_sha" > "$out/source-check-before-manifest.txt" \
+      || die "source tree or HEAD changed during signed build"
     printf 'repository=chriscoveriesorg/applesauce\ncommit=%s\n' \
-      "$(git rev-parse --verify HEAD)" > "$out/source-provenance.txt"
+      "$source_sha" > "$out/source-provenance.txt"
     /usr/bin/sw_vers > "$out/macos.txt"
     cat > "$out/NEXT-STEPS.txt" <<'STEPS'
 These files are synthetic. Preserve the originals and the signed app.
@@ -485,7 +496,11 @@ STEPS
       /usr/bin/shasum -a 256 "$path"
     done > SHA256SUMS)
     verify_package_manifest "$out" "$out"
-    printf 'Signed acceptance bundle: %s\nSHA-256: %s/SHA256SUMS\n' "$out" "$out"
+    /usr/bin/python3 "$ROOT/fskit/source_provenance.py" --check "$ROOT" \
+      --expected-sha "$source_sha" > "$out/source-check-final.txt" \
+      || die "source tree or HEAD changed while packaging signed evidence"
+    printf 'Signed acceptance bundle: %s\nSource SHA: %s\nSHA-256: %s/SHA256SUMS\n' \
+      "$out" "$source_sha" "$out"
     ;;
   signed-build)
     test "$#" -eq 1 || die "signed-build takes no arguments"
