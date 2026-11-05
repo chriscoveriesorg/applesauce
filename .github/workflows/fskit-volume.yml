@@ -46,6 +46,7 @@ jobs:
           assert attrs["FSShortName"] == "ascf"
           PY
           python3 fskit/verify_mount.py --self-test
+          python3 fskit/finder_mount_witness.py --self-test
           python3 fskit/unmount_acceptance.py --self-test
           python3 fskit/acceptance_evidence.py --self-test
           python3 fskit/signing_profile.py --self-test
@@ -57,6 +58,8 @@ jobs:
           script = Path("fskit/signed_acceptance.sh").read_text()
           reader = script.split("\n  bundle-readback)\n", 1)[1].split("\n  readback)\n", 1)[0]
           assert '"$bundle/fskit/finder_readback.applescript"' in reader
+          assert '"$bundle/fskit/finder_mount_witness.py"' in reader
+          assert 'post-finder-readback.json' in reader
           assert '"$ROOT/fskit/finder_readback.applescript"' not in reader
           unmount = script.split("\n  bundle-unmounted)\n", 1)[1].split("\n  unmounted)\n", 1)[0]
           for required in ('"$bundle/fskit/unmount_acceptance.py"',
@@ -191,6 +194,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Run portable mounted-readback acceptance tests
         run: python3 fskit/verify_mount.py --self-test
+      - name: Bind Finder copy-out to unchanged ASCF mount identity
+        run: python3 fskit/finder_mount_witness.py --self-test
       - name: Check kernel mount-table unmount witness regressions
         run: python3 fskit/unmount_acceptance.py --self-test
       - name: Exercise actual Darwin getmntinfo ABI
