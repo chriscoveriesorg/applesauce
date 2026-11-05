@@ -177,6 +177,7 @@ macos.txt
 NEXT-STEPS.txt
 fskit/signed_acceptance.sh
 fskit/verify_mount.py
+fskit/finder_mount_witness.py
 fskit/unmount_acceptance.py
 fskit/acceptance_evidence.py
 fskit/signing_profile.py
@@ -261,35 +262,14 @@ require_matching_bundle_helper() {
 # Stamp successful mounted readbacks with unique run identities. The
 # unmount verifier binds to that exact first readback; a reused JSON report
 # cannot masquerade as evidence of a second, independent remount.
+# A Finder copy can outlive the mount that produced the first POSIX readback.
+# Recheck real VFS identity after Finder returns before stamping the evidence.
 stamp_readback() {
-  test "$#" -eq 2 || die "stamp_readback requires REPORT_JSON and FINDER_COPIED_FILE"
-  /usr/bin/python3 - "$1" "$2" <<'PY'
-import datetime
-import json
-from pathlib import Path
-import sys
-import uuid
-
-path = Path(sys.argv[1])
-report = json.loads(path.read_text(encoding="utf-8"))
-if report.get("result") != "pass":
-    sys.exit("cannot stamp a failed mounted-readback report")
-copied = Path(sys.argv[2])
-if not copied.is_file():
-    sys.exit("Finder copy-out missing from completed mounted acceptance")
-import hashlib
-copy_sha256 = hashlib.sha256(copied.read_bytes()).hexdigest()
-if copy_sha256 != report.get("sha256"):
-    sys.exit("Finder copy-out digest does not match mounted logical digest")
-report["finder_copy_verified"] = True
-report["finder_copy_sha256"] = copy_sha256
-report["verification_id"] = str(uuid.uuid4())
-report["verified_at_utc"] = datetime.datetime.now(
-    datetime.timezone.utc).isoformat()
-path.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n",
-                encoding="utf-8")
-PY
+  test "$#" -eq 4 || die "stamp_readback needs FIRST_JSON SECOND_JSON FINDER_COPY HELPER"
+  /usr/bin/python3 "$4" --first "$1" --after "$2" --copy "$3" \
+    || die "Finder copy-out and signed FSKit mount identity could not be bound"
 }
+
 if test "$#" -eq 0; then usage; exit 2; fi
 case "$1" in
   preflight)
@@ -428,6 +408,7 @@ PY
     /bin/mkdir "$out/fskit"
     /bin/cp "$ROOT/fskit/signed_acceptance.sh" "$out/fskit/signed_acceptance.sh"
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
+    /bin/cp "$ROOT/fskit/finder_mount_witness.py" "$out/fskit/finder_mount_witness.py"
     /bin/cp "$ROOT/fskit/unmount_acceptance.py" "$out/fskit/unmount_acceptance.py"
     /bin/cp "$ROOT/fskit/acceptance_evidence.py" "$out/fskit/acceptance_evidence.py"
     /bin/cp "$ROOT/fskit/signing_profile.py" "$out/fskit/signing_profile.py"
@@ -436,6 +417,9 @@ PY
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
       > "$out/portable-verifier-tests.log" 2>&1 \
       || die "packaged verifier self-tests failed; see $out/portable-verifier-tests.log"
+    /usr/bin/python3 "$out/fskit/finder_mount_witness.py" --self-test \
+      > "$out/finder-witness-tests.log" 2>&1 \
+      || die "packaged Finder mount witness self-tests failed; see $out/finder-witness-tests.log"
     /usr/bin/python3 "$out/fskit/unmount_acceptance.py" --self-test \
       > "$out/portable-unmount-tests.log" 2>&1 \
       || die "packaged kernel unmount tests failed; see $out/portable-unmount-tests.log"
@@ -592,7 +576,12 @@ PY
       || die "Finder-copied logical bytes differ from the original source"
     /usr/bin/shasum -a 256 "$out/finder-copy/source.$codec" \
       "$bundle/source.$codec.jsonl" > "$out/finder-copy.sha256"
-    stamp_readback "$out/readback.json" "$out/finder-copy/source.$codec"
+    /usr/bin/python3 "$bundle/fskit/verify_mount.py" \
+      --mount "$3" --original "$bundle/source.$codec.jsonl" \
+      > "$out/post-finder-readback.json" \
+      || die "ASCF mount failed its full post-Finder recheck; see $out"
+    stamp_readback "$out/readback.json" "$out/post-finder-readback.json" \
+      "$out/finder-copy/source.$codec" "$bundle/fskit/finder_mount_witness.py"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
     cat "$out/finder-readback.txt"
@@ -622,7 +611,12 @@ PY
       || die "Finder-copied logical bytes differ from the original source"
     /usr/bin/shasum -a 256 "$out/finder-copy/$restored_name" "$4" \
       > "$out/finder-copy.sha256"
-    stamp_readback "$out/readback.json" "$out/finder-copy/$restored_name"
+    /usr/bin/python3 "$ROOT/fskit/verify_mount.py" \
+      --mount "$3" --original "$4" \
+      > "$out/post-finder-readback.json" \
+      || die "ASCF mount failed its full post-Finder recheck; see $out"
+    stamp_readback "$out/readback.json" "$out/post-finder-readback.json" \
+      "$out/finder-copy/$restored_name" "$ROOT/fskit/finder_mount_witness.py"
     /sbin/mount > "$out/mounts-after.txt"
     cat "$out/readback.json"
     cat "$out/finder-readback.txt"
