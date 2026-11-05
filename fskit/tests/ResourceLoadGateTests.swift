@@ -7,13 +7,16 @@ struct ASCFResourceLoadGateTests {
     static func main() {
         var gate = ASCFResourceLoadGate()
         let first = gate.begin()!
+        precondition(gate.isPending(first), "fresh load missing reservation")
         precondition(gate.begin() == nil, "concurrent load allowed")
         precondition(gate.publish(first))
+        precondition(!gate.isPending(first), "published ticket still pending")
         precondition(gate.loaded && gate.begin() == nil)
         precondition(!gate.publish(first), "duplicate publication accepted")
         gate.unload()
         precondition(!gate.loaded)
         let second = gate.begin()!
+        precondition(gate.isPending(second) && !gate.isPending(first))
         gate.cancel(first)
         precondition(!gate.publish(first), "stale load accepted")
         precondition(gate.publish(second), "cancelling stale ticket affected active load")
@@ -22,6 +25,8 @@ struct ASCFResourceLoadGateTests {
         let delayed = gate.begin()!
         gate.unload()
         let fresh = gate.begin()!
+        precondition(!gate.isPending(delayed), "unload did not cancel queued work")
+        precondition(gate.isPending(fresh), "new reservation missing")
         precondition(!gate.publish(delayed), "load published after unload")
         precondition(gate.publish(fresh), "current load rejected")
         gate.unload()
@@ -29,6 +34,7 @@ struct ASCFResourceLoadGateTests {
 
         let cancelled = gate.begin()!
         gate.cancel(cancelled)
+        precondition(!gate.isPending(cancelled), "cancelled verification remained runnable")
         precondition(gate.begin() != nil, "failed verification blocked retry")
         gate.unload()
 
