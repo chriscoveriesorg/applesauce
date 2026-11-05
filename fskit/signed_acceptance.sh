@@ -468,7 +468,9 @@ These files are synthetic. Preserve the originals and the signed app.
    source.lzmesh.corrupt.ascf. Use "Copy mount diagnostic" to save the result.
    Repeat for source.lzraven.corrupt.ascf. A returned mount is a hard failure.
    Require CORRUPT_REFUSAL_CONFIRMED with FSKit resourceDamaged for
-   each fixture. CORRUPT_REFUSAL_INCONCLUSIVE means diagnose provisioning,
+   each fixture. The copied diagnostic must include sha256=<digest> for
+   the exact manifest-covered corrupted archive. Any missing/mismatched hash
+   fails acceptance. CORRUPT_REFUSAL_INCONCLUSIVE means diagnose provisioning,
    permissions, sandbox or activation before claiming corruption refusal.
    Keep the signed host diagnostic and the unchanged ASCF mount listing.
 7. After normally unmounting, stage an independent archive-replacement test:
