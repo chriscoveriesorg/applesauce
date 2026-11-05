@@ -43,7 +43,7 @@ def source_commit(root, expected=None):
     # index shortcut is safe when attesting a signed package's source tree.
     # Use NUL records so unusual file names cannot hide a flagged entry.
     indexed = git(root, "ls-files", "-v", "-z")
-    for record in indexed.split("\\0"):
+    for record in indexed.split("\0"):
         if record and (len(record) < 3 or record[1] != " " or record[0] != "H"):
             raise SourceProvenanceError(
                 "tracked source has an untrusted index flag (assume-unchanged, "
@@ -100,7 +100,7 @@ class SourceProvenanceTests(unittest.TestCase):
 
     def test_assume_unchanged_cannot_hide_modified_source(self):
         self.gitcmd("update-index", "--assume-unchanged", "source.swift")
-        (self.root / "source.swift").write_text("untracked mutation\\n")
+        (self.root / "source.swift").write_text("untracked mutation\n")
         # Git status suppresses exactly this dangerous tracked-file change.
         self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
         with self.assertRaisesRegex(SourceProvenanceError, "untrusted index flag"):
@@ -108,13 +108,13 @@ class SourceProvenanceTests(unittest.TestCase):
 
     def test_skip_worktree_cannot_hide_modified_source(self):
         self.gitcmd("update-index", "--skip-worktree", "source.swift")
-        (self.root / "source.swift").write_text("untracked mutation\\n")
+        (self.root / "source.swift").write_text("untracked mutation\n")
         self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
         with self.assertRaisesRegex(SourceProvenanceError, "untrusted index flag"):
             source_commit(self.root, self.original)
 
     def test_unusual_tracked_filename_is_not_misparsed(self):
-        name = "name with space and\\nnewline.swift"
+        name = "name with space and\nnewline.swift"
         (self.root / name).write_text("fixture")
         self.gitcmd("add", name)
         self.gitcmd("-c", "user.name=Fixture", "-c",
