@@ -233,6 +233,7 @@ def signed_mount_identity(mount):
     flags = int(filesystem.f_flags)
     require(flags & 0x1, "FSKit mount lacks Darwin MNT_RDONLY (kernel read-only flag)")
     return {"filesystem_type": kind, "mount_flags": flags, "kernel_readonly": True,
+            "mount_fsid": [int(filesystem.f_fsid[0]), int(filesystem.f_fsid[1])],
             "macos_version": output("/usr/bin/sw_vers", "-productVersion"),
             "macos_build": output("/usr/bin/sw_vers", "-buildVersion")}
 
@@ -482,6 +483,8 @@ def verify_mount(mount, original, require_real_mount=True):
                 "ASCF mount provenance changed during verification")
 
     return {"result": "pass", "mount": str(mount), "restored_file": entry.name,
+            "mount_device": int(mount_identity_pair[0]),
+            "mount_inode": int(mount_identity_pair[1]),
             "logical_bytes": original_size, "sha256": original_sha,
             "random_read_offsets": offsets, "readonly_open_denied": True,
             **mount_identity}
