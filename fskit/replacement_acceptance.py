@@ -274,7 +274,7 @@ class ReplacementTests(unittest.TestCase):
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
                     "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
-        with self.assertRaisesRegex(ValueError, "served a newly opened"):
+        with self.assertRaisesRegex(ValueError, "served replaced-source bytes at offset 0"):
             check(self.stage_dir, "/Volumes/ASCF",
                   self.bundle / "source.lzraven.jsonl", verified, lambda _path, _offset: b"x")
 
