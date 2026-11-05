@@ -179,10 +179,10 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     expected_prefix = ("CORRUPT_REFUSAL_CONFIRMED: source." + codec
                        + ".corrupt.ascf: sha256=" + expected_sha
                        + ": signed FSKit probe rejected the recognized ASCF payload: "
-                       + "FSKitErrorDomain code ")
+                       + "FSKitErrorDomain resourceDamaged code ")
     text = Path(refusal).read_text(encoding="utf-8").strip()
     require(text.startswith(expected_prefix)
-            and re.fullmatch(r"[0-9]+: [^\r\n]+", text[len(expected_prefix):]) is not None,
+            and re.fullmatch(r"[1-9][0-9]*: [^\r\n]+", text[len(expected_prefix):]) is not None,
             "typed codec-specific signed-host corruption refusal is not bound to the bundled fixture SHA-256")
 
     paths = (first, unmounted, remounted, refusal, replacement)
@@ -296,7 +296,7 @@ class EvidenceTests(unittest.TestCase):
             "CORRUPT_REFUSAL_CONFIRMED: source.lzmesh.corrupt.ascf: sha256="
             + hashlib.sha256(corrupt).hexdigest()
             + ": signed FSKit probe rejected the recognized ASCF payload: "
-            + "FSKitErrorDomain code 17: fixture damage")
+            + "FSKitErrorDomain resourceDamaged code 17: fixture damage")
         self.items[4].write_text(json.dumps({
             "result": "pass", "codec": "lzmesh", "filesystem_type": "ascf",
             "kernel_readonly": True, "restored_file": "source.lzmesh",
@@ -336,7 +336,7 @@ class EvidenceTests(unittest.TestCase):
             "CORRUPT_REFUSAL_CONFIRMED: source.lzraven.corrupt.ascf: sha256="
             + hashlib.sha256(damaged).hexdigest()
             + ": signed FSKit probe rejected the recognized ASCF payload: "
-            + "FSKitErrorDomain code 17: fixture damage")
+            + "FSKitErrorDomain resourceDamaged code 17: fixture damage")
         replacement = load_json(self.items[4])
         replacement["codec"] = codec
         replacement["restored_file"] = "source.lzraven"
@@ -556,6 +556,30 @@ class EvidenceTests(unittest.TestCase):
             self.items[3].read_text().replace(
                 "FSKitErrorDomain", "NSPOSIXErrorDomain"))
         with self.assertRaisesRegex(EvidenceError, "SHA-256"):
+            self.check()
+
+    def test_corruption_refusal_requires_typed_resource_damage(self):
+        # A non-damage FSKit error (e.g. no entitlement or disabled
+        # extension) must not produce an accepted corruption-control proof.
+        self.items[3].write_text(
+            self.items[3].read_text().replace(
+                "FSKitErrorDomain resourceDamaged code ",
+                "FSKitErrorDomain code "))
+        with self.assertRaisesRegex(EvidenceError, "corruption refusal"):
+            self.check()
+
+    def test_corruption_refusal_rejects_other_named_error(self):
+        self.items[3].write_text(
+            self.items[3].read_text().replace(
+                "resourceDamaged", "operationFailed"))
+        with self.assertRaisesRegex(EvidenceError, "corruption refusal"):
+            self.check()
+
+    def test_corruption_refusal_rejects_zero_error_code(self):
+        self.items[3].write_text(
+            self.items[3].read_text().replace(
+                "resourceDamaged code 17:", "resourceDamaged code 0:"))
+        with self.assertRaisesRegex(EvidenceError, "corruption refusal"):
             self.check()
 
     def test_corruption_refusal_rejects_bundle_mutation(self):
