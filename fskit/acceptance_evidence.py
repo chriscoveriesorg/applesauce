@@ -63,9 +63,9 @@ def valid_acceptance_mount(mount):
     if not isinstance(mount, str):
         return False
     return bool(
-        re.fullmatch(r"/Volumes/[^/\\x00.][^/\\x00]*", mount)
+        re.fullmatch(r"/Volumes/[^/\x00.][^/\x00]*", mount)
         or re.fullmatch(
-            r"/private/tmp/ascf-cli-mount\\.[A-Za-z0-9]{8}/mount", mount)
+            r"/private/tmp/ascf-cli-mount\.[A-Za-z0-9]{8}/mount", mount)
     )
 
 
