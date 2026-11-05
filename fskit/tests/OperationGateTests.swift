@@ -73,10 +73,33 @@ struct OperationGateTests {
         let clean = ASCFMountPostflight(
             returnedMount: true, callbackError: false,
             verifiedReturnedPath: "/Volumes/Applesauce ASCF",
-            observedVerifiedPaths: []
+            observedVerifiedPaths: ["/Volumes/Applesauce ASCF"]
         )
         precondition(clean.cleanSuccess)
         precondition(!clean.hasOrphanedMount)
+
+        // A callback can name a real ASCF mount which disappears between its
+        // fstatfs check and the kernel mount-table snapshot. It is no longer
+        // mounted, even if its earlier descriptor passed verification.
+        let disappeared = ASCFMountPostflight(
+            returnedMount: true, callbackError: false,
+            verifiedReturnedPath: "/Volumes/Applesauce ASCF",
+            observedVerifiedPaths: []
+        )
+        precondition(!disappeared.cleanSuccess)
+        precondition(disappeared.singleVerifiedPath == nil)
+        precondition(!disappeared.hasOrphanedMount)
+        precondition(disappeared.verifiedPaths.isEmpty)
+
+        // A returned path must not hide a different live ASCF mount.
+        let mismatched = ASCFMountPostflight(
+            returnedMount: true, callbackError: false,
+            verifiedReturnedPath: "/Volumes/Applesauce ASCF",
+            observedVerifiedPaths: ["/Volumes/Other ASCF"]
+        )
+        precondition(!mismatched.cleanSuccess)
+        precondition(mismatched.hasOrphanedMount)
+        precondition(mismatched.singleVerifiedPath == "/Volumes/Other ASCF")
 
         let duplicate = ASCFMountPostflight(
             returnedMount: true, callbackError: false,
