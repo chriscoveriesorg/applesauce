@@ -304,11 +304,18 @@ Its stage metadata records the canonical original signed bundle path. Keep
 that bundle in place until replacement-check finishes: the check reauthenticates
 the bundle manifest, selected helper, signed host and original fixture hashes
 before changing the staged copy. The second authenticates the **real mounted ASCF VFS** and whole logical
-SHA-256 before atomically replacing only the staged copy. It requires a fresh
-open/read of the mounted file to fail with ESTALE, EIO or ENODEV. Readable
-cached data or an unrelated access error fails the test. Save its JSON,
-source hashes and signed-host diagnostics for independent review. This check
-never installs, mounts, unmounts, changes xattrs or touches the source bundle.
+SHA-256 before atomically replacing only the staged copy. It then requires
+**independent fresh opens** to reject reads at a deterministic series of
+offsets: the beginning, 4 KiB, 64 KiB and 8 MiB boundaries (with adjacent
+unaligned bytes), the midpoint, final byte, EOF and beyond EOF. Every
+probe must fail with ESTALE, EIO or ENODEV; readable cached data, even
+an empty successful EOF read, or an unrelated access error fails
+acceptance. Save the `denied_offsets` and matching `denied_errnos`
+arrays in the generated JSON alongside source hashes and signed-host
+diagnostics. The final evidence checker independently recomputes the
+required offset schedule from the authenticated reference file and rejects
+missing, reordered or successful probes. This check never installs, mounts,
+unmounts, changes xattrs or touches the source bundle.
 The operator must unmount normally after the negative-control attempt.
 
 The replacement-check command saves its verified report as
