@@ -305,6 +305,13 @@ jobs:
             -o "$RUNNER_TEMP/ascf-resource-load-tests" \
             fskit/ASCFExtension/ResourceLoadGate.swift fskit/tests/ResourceLoadGateTests.swift
           "$RUNNER_TEMP/ascf-resource-load-tests"
+      - name: Run signed-host lifecycle state-machine tests on macOS 27
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            fskit/Host/OperationGate.swift fskit/Host/CorruptFixtureProof.swift \
+            fskit/tests/OperationGateTests.swift \
+            -o "$RUNNER_TEMP/ascf-host-lifecycle-tests"
+          "$RUNNER_TEMP/ascf-host-lifecycle-tests"
       - name: Check Swift FSKit framework conformances against current SDK
         run: |
           xcrun swiftc -swift-version 5 -parse-as-library -typecheck \
