@@ -83,7 +83,10 @@ the host never silently unmounts an unexpected result.
 
 `CORRUPT_REFUSAL_CONFIRMED` now requires the signed FSKit probe to return
 `FSKitErrorDomain` / `FSError.Code.resourceDamaged`, with no surviving ASCF
-volume. The extension emits this typed error only when a recognized ASCF
+volume. The host records `FSKitErrorDomain resourceDamaged code N` with the
+SDK's observed nonzero code. The packaged evidence checker requires the
+symbolic `resourceDamaged` identity; another FSKit error code or a generic
+permission/activation failure cannot satisfy this negative control. The extension emits this typed error only when a recognized ASCF
 header/index fails full codec or SHA-256 verification. Any other rejection,
 including permission, entitlement, sandbox or activation errors, produces
 `CORRUPT_REFUSAL_INCONCLUSIVE`. Capture diagnostics for **both** codecs.
