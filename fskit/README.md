@@ -71,6 +71,11 @@ The signed host exposes **Test corrupted archive mount refusal** alongside the
 normal mount button. Use it on the authorized disposable Mac after the
 extension has been installed and enabled. Select each generated
 `source.<codec>.corrupt.ascf` file from the portable acceptance bundle.
+The host fingerprints the chosen regular file through a no-follow, read-only
+file descriptor before and after FSClient. Its diagnostic carries
+`sha256=<digest>` for the exact selected bytes; `acceptance-check` must match
+that fingerprint to the manifest-covered corrupted fixture. A different
+corrupt archive with the same filename cannot qualify as this control.
 The host calls the same real `FSClient.mountSingleVolume` API as the normal
 mount path and keeps the full rejection diagnostic visible and copyable.
 A returned mount is reported as `CORRUPT_REFUSAL_FAIL` and blocks acceptance;
