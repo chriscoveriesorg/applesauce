@@ -28,6 +28,15 @@ identity at probe and load, and remounting the same archive preserves its
 identity. Distinct Raven and Mesh archives remain distinguishable even when
 they restore identical logical bytes. Unload resets the container readiness.
 
+Probe and load run full archive verification on one dedicated serial worker
+rather than blocking FSKit's callback thread. This limits concurrent decoder
+scratch allocations. An unload invalidates a queued load ticket, allowing the
+worker to skip decoding that archive; a load already verifying is refused at
+publication if unload occurred. Each security-scoped source is released on
+failure and held by the published volume until unload. The SDK compiler and
+portable cancellation tests cover these paths; actual signed mounts remain a
+separate acceptance requirement.
+
 The module's built `Info.plist` includes the FSKit activation, check, and
 format **option syntax metadata** from Apple's extension template. Those
 dictionaries configure FSKit command parsing, rather than enabling format
