@@ -103,7 +103,7 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
             and off.get("remaining_ascf_mounts") == 0,
             "unmount lacks complete kernel mount-table proof")
     require(off.get("macos_build") == reports[0]["macos_build"],
-            "unmount ran on a different macOS build")
+            "unmount and first readback have different macOS builds")
     require(off.get("mount") == reports[0]["mount"],
             "unmount report is for another mount")
     require(off.get("previous_sha256") == digest,
