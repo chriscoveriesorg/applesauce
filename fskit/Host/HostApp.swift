@@ -104,7 +104,7 @@ private struct ASCFMountView: View {
             switch result {
             case .success(let urls):
                 guard let url = urls.first else { return }
-                guard url.lastPathComponent.hasSuffix(".corrupt.ascf") else {
+                guard ["source.lzraven.corrupt.ascf", "source.lzmesh.corrupt.ascf"].contains(url.lastPathComponent) else {
                     controller.showIdleStatus("Select the generated source.<codec>.corrupt.ascf negative-control fixture.")
                     return
                 }
@@ -289,6 +289,22 @@ private final class ASCFMountController: ObservableObject {
             status = "macOS did not grant read access to the selected archive."
             return
         }
+        // Fingerprint the selected synthetic archive while its security scope
+        // is open. The postflight rehash prevents a changed input from being
+        // reported as a successful typed FSKit corruption-control rejection.
+        let corruptFixtureDigest: String?
+        if expectCorruptRefusal {
+            do {
+                corruptFixtureDigest = try ASCFCorruptFixtureProof.sha256(url)
+            } catch {
+                url.stopAccessingSecurityScopedResource()
+                operations.finish(ticket)
+                status = "CORRUPT_REFUSAL_INCONCLUSIVE: selected fixture cannot be fingerprinted: \(error.localizedDescription)"
+                return
+            }
+        } else {
+            corruptFixtureDigest = nil
+        }
         status = expectCorruptRefusal
             ? "Attempting generated corrupt archive through the signed FSKit mount path..."
             : "Verifying archive before read-only mount..."
@@ -298,6 +314,8 @@ private final class ASCFMountController: ObservableObject {
             bundleID: "org.chriscoveries.applesauce.ascfhost.ascfextension",
             options: []
         ) { [self] mounted, error in
+            let corruptDigestAfter = expectCorruptRefusal
+                ? (try? ASCFCorruptFixtureProof.sha256(url)) : nil
             url.stopAccessingSecurityScopedResource()
             DispatchQueue.main.async { [self] in
                 guard operations.finish(ticket) else { return }
@@ -328,6 +346,11 @@ private final class ASCFMountController: ObservableObject {
                     mountedURL = nil
                 }
                 if expectCorruptRefusal {
+                    guard let digest = corruptFixtureDigest,
+                          corruptDigestAfter == digest else {
+                        status = "CORRUPT_REFUSAL_INCONCLUSIVE: selected corrupt fixture changed during FSKit verification."
+                        return
+                    }
                     if let mounted {
                         status = "CORRUPT_REFUSAL_FAIL: FSKit returned a mount at \(mounted.path). Unmount it and reject acceptance."
                     } else if outcome.hasOrphanedMount {
@@ -337,7 +360,7 @@ private final class ASCFMountController: ObservableObject {
                         let detail = "\(actualError.domain) code \(actualError.code): \(actualError.localizedDescription)"
                         if actualError.domain == FSKitErrorDomain
                             && actualError.code == FSError.Code.resourceDamaged.rawValue {
-                            status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): signed FSKit probe rejected the recognized ASCF payload: \(detail)"
+                            status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): sha256=\(digest): signed FSKit probe rejected the recognized ASCF payload: \(detail)"
                         } else {
                             status = "CORRUPT_REFUSAL_INCONCLUSIVE: mount failed without a verified ASCF damage error: \(detail). Check activation, entitlements and access."
                         }
