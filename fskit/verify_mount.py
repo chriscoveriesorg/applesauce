@@ -525,7 +525,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 injected.remove(fd)
                 raise OSError(errno.EIO, "synthetic close failure")
 
-        with mock.patch.object(os, "open", side_effect=open_probe), \\
+        with mock.patch.object(os, "open", side_effect=open_probe), \
              mock.patch.object(os, "close", side_effect=close_probe):
             with self.assertRaisesRegex(MountCheckError, "permitted write access"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
