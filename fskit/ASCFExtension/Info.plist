@@ -22,6 +22,27 @@
     <string>com.apple.fskit.fsmodule</string>
     <key>FSShortName</key>
     <string>ascf</string>
+    <!-- FSKit's mount/probe dispatcher requires an activate-option grammar,
+         even when this read-only module does not consume custom options.
+         Keep the standard FSKit template syntax for check/format commands;
+         neither operation is implemented by the module. -->
+    <key>FSActivateOptionSyntax</key>
+    <dict>
+      <key>shortOptions</key>
+      <string>g:m:o:u:</string>
+    </dict>
+    <key>FSCheckOptionSyntax</key>
+    <dict>
+      <key>shortOptions</key>
+      <string>nqy</string>
+    </dict>
+    <key>FSFormatOptionSyntax</key>
+    <dict>
+      <key>shortOptions</key>
+      <string>v</string>
+    </dict>
+    <key>FSSupportsServerURLs</key>
+    <false/>
     <key>FSSupportsPathURLs</key>
     <true/>
     <key>FSSupportsBlockResources</key>
