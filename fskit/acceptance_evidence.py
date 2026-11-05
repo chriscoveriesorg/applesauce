@@ -99,6 +99,11 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     off = load_json(unmounted)
     require(off.get("result") == "pass" and off.get("unmounted") is True,
             "unmount report did not pass")
+    require(off.get("kernel_mount_table_verified") is True
+            and off.get("remaining_ascf_mounts") == 0,
+            "unmount lacks complete kernel mount-table proof")
+    require(off.get("macos_build") == reports[0]["macos_build"],
+            "unmount ran on a different macOS build")
     require(off.get("mount") == reports[0]["mount"],
             "unmount report is for another mount")
     require(off.get("previous_sha256") == digest,
@@ -238,6 +243,8 @@ class EvidenceTests(unittest.TestCase):
             "result": "pass", "unmounted": True,
             "mount": report["mount"], "previous_sha256": self.sha,
             "previous_verification_id": "first",
+            "macos_build": "fixture",
+            "kernel_mount_table_verified": True, "remaining_ascf_mounts": 0,
             "verified_at_utc": "2026-11-04T00:00:05+00:00"
         }))
         self.items[3].write_text(
@@ -383,6 +390,27 @@ class EvidenceTests(unittest.TestCase):
         (self.base / "source.lzmesh.jsonl").write_bytes(b"altered")
         with self.assertRaisesRegex(EvidenceError, "logical bytes"):
             self.check()
+    def test_missing_kernel_unmount_witness(self):
+        off = load_json(self.items[1])
+        off["kernel_mount_table_verified"] = False
+        self.items[1].write_text(json.dumps(off))
+        with self.assertRaisesRegex(EvidenceError, "kernel mount-table"):
+            self.check()
+
+    def test_unmount_with_surviving_ascf_mount(self):
+        off = load_json(self.items[1])
+        off["remaining_ascf_mounts"] = 1
+        self.items[1].write_text(json.dumps(off))
+        with self.assertRaisesRegex(EvidenceError, "kernel mount-table"):
+            self.check()
+
+    def test_unmount_provenance_from_other_host(self):
+        off = load_json(self.items[1])
+        off["macos_build"] = "other"
+        self.items[1].write_text(json.dumps(off))
+        with self.assertRaisesRegex(EvidenceError, "different macOS build"):
+            self.check()
+
     def test_missing_unmount_timestamp(self):
         off = load_json(self.items[1])
         off.pop("verified_at_utc")
