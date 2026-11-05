@@ -383,9 +383,20 @@ def verify_mount(mount, original, require_real_mount=True):
                             for field in fields),
                         f"{label} changed during random-read verification")
         finally:
-            os.close(mounted_fd)
+            # Cleanup must not replace the original integrity refusal.
+            failing = sys.exc_info()[0] is not None
+            try:
+                os.close(mounted_fd)
+            except OSError as error:
+                if not failing:
+                    raise MountCheckError(f"cannot close mounted random-read descriptor: {error}") from error
     finally:
-        os.close(source_fd)
+        failing = sys.exc_info()[0] is not None
+        try:
+            os.close(source_fd)
+        except OSError as error:
+            if not failing:
+                raise MountCheckError(f"cannot close original random-read descriptor: {error}") from error
 
     # Both write-only and read-write opens must fail. Never send write(),
     # O_CREAT, unlink(), xattr changes, or renames to a mount.
@@ -1482,6 +1493,36 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.assertEqual(report["result"], "pass")
         self.assertEqual(len(probes), 2)
         self.assertEqual(self.original.stat().st_ino, original_inode)
+
+    def test_random_read_close_failures_are_controlled(self):
+        # Simulate close failures only after digest() has completed. Verify
+        # both descriptor cleanup paths and preserve a preceding read error.
+        real_close = os.close
+        real_open = os.open
+        for target, expected in (("mounted", "mounted random-read descriptor"),
+                                 ("original", "original random-read descriptor")):
+            opened = []
+
+            def tracking_open(path, flags, *args, **kwargs):
+                fd = self.readonly_open(path, flags, *args, **kwargs)
+                if flags & os.O_ACCMODE == os.O_RDONLY:
+                    opened.append((fd, Path(path)))
+                return fd
+
+            def failing_close(fd):
+                # os.close is called only for the two random-read descriptors
+                # in this path; digest() uses file-object cleanup instead.
+                matches = [item for item in opened if item[0] == fd]
+                if matches and ((target == "mounted" and matches[-1][1] == self.restored)
+                                or (target == "original" and matches[-1][1] == self.original)):
+                    real_close(fd)
+                    raise OSError(errno.EIO, "synthetic close failure")
+                return real_close(fd)
+
+            with self.subTest(target=target), mock.patch("os.open", side_effect=tracking_open), mock.patch(
+                    "os.close", side_effect=failing_close):
+                with self.assertRaisesRegex(MountCheckError, expected):
+                    verify_mount(self.mount, self.original, require_real_mount=False)
 
     def test_offsets_cover_distant_blocks_with_bounded_reads(self):
         size = 64 * 1024 * 1024
