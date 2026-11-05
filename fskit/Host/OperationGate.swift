@@ -68,3 +68,24 @@ struct ASCFMountPostflight {
         !verifiedPaths.isEmpty && !cleanSuccess
     }
 }
+
+// Only accept mount locations that the signed host or disposable Terminal
+ // acceptance path can create. An unrelated ASCF mount elsewhere must block
+ // another mount attempt instead of being treated as an ordinary host volume.
+enum ASCFMountLocation {
+    static func isAllowed(_ path: String) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        if parts.count == 3, parts[0].isEmpty, parts[1] == "Volumes" {
+            return !parts[2].isEmpty && parts[2] != "." && parts[2] != ".."
+        }
+        guard parts.count == 5, parts[0].isEmpty,
+              parts[1] == "private", parts[2] == "tmp",
+              parts[4] == "mount", parts[3].hasPrefix("ascf-cli-mount.") else {
+            return false
+        }
+        let suffix = parts[3].dropFirst("ascf-cli-mount.".count)
+        return suffix.utf8.count == 8 && suffix.utf8.allSatisfy { byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+        }
+    }
+}
