@@ -18,7 +18,8 @@ permissions:
 
 concurrency:
   group: ascf-host-lifecycle-${{ github.ref }}
-  cancel-in-progress: true
+  # Keep required host-gate evidence for each commit; newer pushes must not cancel it.
+  cancel-in-progress: false
 
 jobs:
   operation-gate:
