@@ -12,6 +12,7 @@ import datetime
 import errno
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -170,11 +171,19 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     require(evidence_time(replaced, "source replacement") > remount_at,
             "source replacement must follow the verified remount")
 
-    text = Path(refusal).read_text(encoding="utf-8")
-    require("CORRUPT_REFUSAL_CONFIRMED:" in text
-            and "source." + codec + ".corrupt.ascf" in text
-            and "signed FSKit probe rejected the recognized ASCF payload" in text,
-            "typed codec-specific signed-host corruption refusal evidence missing")
+    # Bind the host's typed negative-control result to the exact
+    # manifest-covered damaged fixture. Reject a copied confirmation line
+    # embedded in other diagnostics and a same-named unrelated corrupt file.
+    corrupt_fixture = Path(bundle) / ("source." + codec + ".corrupt.ascf")
+    expected_sha = hashlib.sha256(corrupt_fixture.read_bytes()).hexdigest()
+    expected_prefix = ("CORRUPT_REFUSAL_CONFIRMED: source." + codec
+                       + ".corrupt.ascf: sha256=" + expected_sha
+                       + ": signed FSKit probe rejected the recognized ASCF payload: "
+                       + "FSKitErrorDomain code ")
+    text = Path(refusal).read_text(encoding="utf-8").strip()
+    require(text.startswith(expected_prefix)
+            and re.fullmatch(r"[0-9]+: [^\r\n]+", text[len(expected_prefix):]) is not None,
+            "typed codec-specific signed-host corruption refusal is not bound to the bundled fixture SHA-256")
 
     paths = (first, unmounted, remounted, refusal, replacement)
     evidence_hashes = {
@@ -279,12 +288,15 @@ class EvidenceTests(unittest.TestCase):
             "kernel_mount_table_verified": True, "remaining_ascf_mounts": 0,
             "verified_at_utc": "2026-11-04T00:00:05+00:00"
         }))
-        self.items[3].write_text(
-            "CORRUPT_REFUSAL_CONFIRMED: source.lzmesh.corrupt.ascf: signed FSKit probe rejected the recognized ASCF payload")
         valid = b"ASCF0001-clean"
         corrupt = b"ASCF0001-damaged"
         (self.base / "source.lzmesh.ascf").write_bytes(valid)
         (self.base / "source.lzmesh.corrupt.ascf").write_bytes(corrupt)
+        self.items[3].write_text(
+            "CORRUPT_REFUSAL_CONFIRMED: source.lzmesh.corrupt.ascf: sha256="
+            + hashlib.sha256(corrupt).hexdigest()
+            + ": signed FSKit probe rejected the recognized ASCF payload: "
+            + "FSKitErrorDomain code 17: fixture damage")
         self.items[4].write_text(json.dumps({
             "result": "pass", "codec": "lzmesh", "filesystem_type": "ascf",
             "kernel_readonly": True, "restored_file": "source.lzmesh",
@@ -321,8 +333,10 @@ class EvidenceTests(unittest.TestCase):
         off["previous_verification_id"] = "raven-0"
         paths[1].write_text(json.dumps(off))
         paths[3].write_text(
-            "CORRUPT_REFUSAL_CONFIRMED: source.lzraven.corrupt.ascf: "
-            "signed FSKit probe rejected the recognized ASCF payload")
+            "CORRUPT_REFUSAL_CONFIRMED: source.lzraven.corrupt.ascf: sha256="
+            + hashlib.sha256(damaged).hexdigest()
+            + ": signed FSKit probe rejected the recognized ASCF payload: "
+            + "FSKitErrorDomain code 17: fixture damage")
         replacement = load_json(self.items[4])
         replacement["codec"] = codec
         replacement["restored_file"] = "source.lzraven"
@@ -518,6 +532,36 @@ class EvidenceTests(unittest.TestCase):
                     self.check()
                 report["active_ascf_mounts"] = 1
                 self.items[index].write_text(json.dumps(report))
+
+
+    def test_corruption_refusal_requires_bundle_fixture_digest(self):
+        self.items[3].write_text(
+            self.items[3].read_text().replace(
+                hashlib.sha256(b"ASCF0001-damaged").hexdigest(), "0" * 64))
+        with self.assertRaisesRegex(EvidenceError, "SHA-256"):
+            self.check()
+
+    def test_corruption_refusal_rejects_embedded_or_multiline_success(self):
+        authentic = self.items[3].read_text()
+        for value in ("CORRUPT_REFUSAL_FAIL:\n" + authentic,
+                      authentic + "\nCORRUPT_REFUSAL_INCONCLUSIVE",
+                      "unrelated " + authentic):
+            with self.subTest(value=value[:40]):
+                self.items[3].write_text(value)
+                with self.assertRaisesRegex(EvidenceError, "SHA-256"):
+                    self.check()
+
+    def test_corruption_refusal_requires_fskit_domain(self):
+        self.items[3].write_text(
+            self.items[3].read_text().replace(
+                "FSKitErrorDomain", "NSPOSIXErrorDomain"))
+        with self.assertRaisesRegex(EvidenceError, "SHA-256"):
+            self.check()
+
+    def test_corruption_refusal_rejects_bundle_mutation(self):
+        (self.base / "source.lzmesh.corrupt.ascf").write_bytes(b"changed")
+        with self.assertRaisesRegex(EvidenceError, "SHA-256"):
+            self.check()
 
     def test_inconclusive_corruption(self):
         self.items[3].write_text("CORRUPT_REFUSAL_INCONCLUSIVE")
