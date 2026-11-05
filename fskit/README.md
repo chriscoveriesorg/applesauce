@@ -136,6 +136,8 @@ including 4 KiB, 64 KiB and 8 MiB boundaries, and rejects reads that return
 bytes at or beyond EOF. Its negative read-only check tries both **O_WRONLY**
 and **O_RDWR** opens without issuing any writes. It never changes the mounted
 file, source, ASCF archive or APFS metadata.
+The signed Finder readback now runs the complete mounted verifier **again after Finder finishes copying**. A packaged `finder_mount_witness.py` checks that the pre/post Finder reports refer to the same kernel ASCF filesystem ID, mount directory device/inode, restored filename, logical SHA-256, read-only flags, and macOS build. It hashes the Finder copy independently and only then atomically stamps the first report with a verification ID. Missing post-Finder evidence, a swapped mount or a changed file blocks acceptance. The second report is retained as `post-finder-readback.json` for independent review. This is read-only acceptance instrumentation, not a signed physical-mount result by itself.
+
 Store the JSON report alongside the signed extension identity, macOS build,
 archive creation command, mount/unmount evidence and CLI verification output.
 A passing synthetic unit test does not qualify the FSKit runtime.
