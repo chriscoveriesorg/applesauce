@@ -21,6 +21,7 @@ Usage:
   bash fskit/signed_acceptance.sh acceptance-all BUNDLE_DIR RAVEN_5_EVIDENCE_PATHS MESH_5_EVIDENCE_PATHS
   bash fskit/signed_acceptance.sh readback SIGNED_HOST_APP MOUNT_DIR ORIGINAL
   bash fskit/signed_acceptance.sh unmounted MOUNT_DIR READBACK_JSON
+  bash fskit/signed_acceptance.sh bundle-unmounted BUNDLE_DIR MOUNT_DIR READBACK_JSON
   bash fskit/signed_acceptance.sh replacement-stage BUNDLE_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh replacement-check STAGE_DIR MOUNT_DIR ORIGINAL_JSONL
 
@@ -466,7 +467,7 @@ These files are synthetic. Preserve the originals and the signed app.
 3. Launch the host and mount source.lzmesh.ascf, then from THIS folder run:
    bash fskit/signed_acceptance.sh bundle-readback . "/Volumes/Applesauce ASCF" lzmesh
 4. Unmount using host/Finder. Confirm it with the resulting readback.json:
-   bash fskit/signed_acceptance.sh unmounted "/Volumes/Applesauce ASCF" /path/to/readback.json
+   bash fskit/signed_acceptance.sh bundle-unmounted . "/Volumes/Applesauce ASCF" /path/to/readback.json
    Then remount and repeat bundle-readback.
 5. Repeat steps 3-4 with source.lzraven.ascf and codec lzraven.
 6. In ASCFHost choose "Test corrupted archive mount refusal" and select
@@ -582,7 +583,7 @@ PY
     # POSIX readback also means ordinary GUI applications see the volume.
     # An Apple Events permission failure blocks mounted acceptance explicitly.
     /bin/mkdir "$out/finder-copy"
-    /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
+    /usr/bin/osascript "$bundle/fskit/finder_readback.applescript" "$3" \
       "source.$codec" "$(/usr/bin/stat -f %z "$bundle/source.$codec.jsonl")" \
       "$out/finder-copy" \
       > "$out/finder-readback.txt" 2> "$out/finder-error.txt" \
@@ -704,6 +705,24 @@ PY
     fi
     cat "$out/replacement.json"
     printf 'Replacement evidence: %s/replacement.json\n' "$out"
+    ;;
+  bundle-unmounted)
+    test "$#" -eq 4 || die "bundle-unmounted requires BUNDLE_DIR MOUNT_DIR READBACK_JSON"
+    mac_only
+    need python3
+    test -f "$4" && test ! -L "$4" || die "missing or symlinked prior readback: $4"
+    bundle="$(cd "$2" && pwd -P)" || die "missing signed bundle: $2"
+    out="$(mktemp -d /tmp/ascf-bundle-unmounted.XXXXXXXX)"
+    verify_package_manifest "$bundle" "$out"
+    require_matching_bundle_helper "$bundle"
+    verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    /usr/bin/sw_vers > "$out/macos.txt"
+    /sbin/mount > "$out/mounts-after-unmount.txt"
+    /usr/bin/python3 "$bundle/fskit/unmount_acceptance.py" \
+      --bundle "$bundle" --mount "$3" --first "$4" > "$out/unmounted.json" \
+      || die "signed-bundle kernel unmount witness failed; see $out"
+    cat "$out/unmounted.json"
+    printf 'Signed-bundle unmount evidence: %s\n' "$out"
     ;;
   unmounted)
     test "$#" -eq 3 || die "unmounted requires MOUNT_DIR READBACK_JSON"
