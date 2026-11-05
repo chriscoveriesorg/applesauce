@@ -129,11 +129,21 @@ identity, whole-file SHA-256, unaligned/random reads, EOF and denied write-opens
 The command never elevates privileges, overwrites an existing path, changes
 APFS metadata or forces unmount.
 
-The signed host UI remains the required path for the full mount/unmount/remount,
-source-replacement and corrupt-mount refusal evidence chain. Terminal mounting
+The signed host UI remains required for the corrupted-archive refusal control
+and the independently staged source-replacement control. Terminal mounting
 is a second integration path; a system mount failure establishes only that the
 specific host, permission or extension setup rejected it. Finder acceptance
 uses the separate `bundle-readback` command printed by `cli-mount`.
+
+The combined evidence checker also accepts real mounted Finder readback
+from the exact private `/private/tmp/ascf-cli-mount.XXXXXXXX/mount` directory
+created by `cli-mount`. Earlier it rejected these otherwise valid reports
+because it permitted only `/Volumes/` paths. It still requires the signed
+bundle, an actual unique read-only `ascf` VFS mount, complete hash and
+boundary-read proof, Finder copy-out, witnessed unmount/remount, typed
+corruption refusal and independent staged-replacement refusal. Arbitrary
+temporary paths and path traversal are rejected. Full physical acceptance
+and independent review remain outstanding.
 
 ## Reproducible mounted-file acceptance
 
