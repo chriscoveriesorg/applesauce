@@ -52,6 +52,10 @@ def stage(bundle, codec):
     shutil.copyfile(archive, good)
     shutil.copyfile(damaged, bad)
     metadata = {
+        # The signed portable package is the authority for the staged copy.
+        # Preserve its canonical location so replacement-check can run the
+        # manifest-authenticated helper rather than unrelated checkout code.
+        "bundle": str(bundle),
         "codec": codec,
         "archive": archive.name,
         "good_sha256": sha256(good),
@@ -85,12 +89,30 @@ def validate_stage(directory):
     codec = metadata.get("codec")
     require(codec in CODECS and metadata.get("archive") == f"source.{codec}.ascf",
             "stage archive identity invalid")
+    bundle_string = metadata.get("bundle")
+    require(isinstance(bundle_string, str) and bundle_string.startswith("/"),
+            "stage is missing absolute signed bundle provenance")
+    bundle = Path(bundle_string)
+    require(bundle.is_dir() and not bundle.is_symlink()
+            and bundle.resolve(strict=True) == bundle,
+            "stage signed bundle path is missing, symlinked or noncanonical")
     good = directory / metadata["archive"]
     bad = directory / "replacement.ascf"
     for name, path, digest in (("valid", good, metadata.get("good_sha256")),
                                ("replacement", bad, metadata.get("replacement_sha256"))):
         require(path.is_file() and not path.is_symlink() and isinstance(digest, str)
                 and sha256(path) == digest, f"{name} staged archive changed")
+    # A replaced or moved package must not supply apparently signed source
+    # bytes after staging. Check the original fixture identities before any
+    # destructive stage replacement. Bundled script and SHA256SUMS validation
+    # is separately enforced by signed_acceptance.sh.
+    for name, expected in ((f"source.{codec}.ascf", metadata["good_sha256"]),
+                           (f"source.{codec}.corrupt.ascf", metadata["replacement_sha256"]),
+                           (f"source.{codec}.jsonl", metadata["original_sha256"])):
+        original = bundle / name
+        require(original.is_file() and not original.is_symlink()
+                and sha256(original) == expected,
+                "signed bundle fixture differs from staged provenance: " + name)
     return metadata, good, bad
 
 
@@ -186,6 +208,23 @@ class ReplacementTests(unittest.TestCase):
         good.write_bytes(b"tamper")
         with self.assertRaisesRegex(ValueError, "valid staged archive changed"):
             check(self.stage_dir, "/Volumes/ASCF", self.bundle / "source.lzmesh.jsonl")
+
+    def test_bundle_fixture_change_blocks_replacement(self):
+        _, good, bad = self.prepare()
+        (self.bundle / "source.lzmesh.ascf").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "signed bundle fixture differs"):
+            check(self.stage_dir, "/Volumes/ASCF", self.bundle / "source.lzmesh.jsonl")
+        self.assertTrue(bad.exists(), "must refuse before replacing the staged good archive")
+        self.assertEqual(good.read_bytes(), b"ASCF0001valid")
+
+    def test_stage_bundle_provenance_is_required(self):
+        self.prepare()
+        metadata_path = self.stage_dir / "stage.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata.pop("bundle")
+        metadata_path.write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError, "signed bundle provenance"):
+            validate_stage(self.stage_dir)
 
     def test_replaced_archive_read_must_fail_closed(self):
         meta, good, bad = self.prepare()
