@@ -286,6 +286,15 @@ def sampled_offsets(size):
     return sorted(values)
 
 
+def require_mountpoint(mount, message):
+    """Treat mountpoint inspection failures as explicit acceptance refusals."""
+    try:
+        mounted = os.path.ismount(mount)
+    except OSError as error:
+        raise MountCheckError(f"cannot inspect ASCF mountpoint: {error}") from error
+    require(mounted, message)
+
+
 def verify_mount(mount, original, require_real_mount=True):
     # Resolve parent aliases (including macOS /var), but never silently
     # follow a symlink supplied as the mountpoint itself.
@@ -315,7 +324,7 @@ def verify_mount(mount, original, require_real_mount=True):
     mount_identity_pair = (mount_stat.st_dev, mount_stat.st_ino)
     mount_identity = {}
     if require_real_mount:
-        require(os.path.ismount(mount), "path is not a filesystem mount point")
+        require_mountpoint(mount, "path is not a filesystem mount point")
         mount_identity = signed_mount_identity(mount)
     try:
         original_is_file = original.is_file()
@@ -514,7 +523,7 @@ def verify_mount(mount, original, require_real_mount=True):
             (final_mount_stat.st_dev, final_mount_stat.st_ino) == mount_identity_pair,
             "ASCF mount directory changed during verification")
     if require_real_mount:
-        require(os.path.ismount(mount), "ASCF mount disappeared during verification")
+        require_mountpoint(mount, "ASCF mount disappeared during verification")
         final_provenance = signed_mount_identity(mount)
         require(final_provenance == mount_identity,
                 "ASCF mount provenance changed during verification")
@@ -542,6 +551,18 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_mountpoint_probe_io_error_fails_closed(self):
+        # Exercise the shared initial/final mountpoint check without a real mount.
+        with mock.patch("os.path.ismount", side_effect=OSError(errno.EIO, "synthetic mountpoint failure")):
+            with self.assertRaisesRegex(MountCheckError, "cannot inspect ASCF mountpoint"):
+                require_mountpoint(self.mount, "path is not a filesystem mount point")
+        with mock.patch("os.path.ismount", return_value=False):
+            with self.assertRaisesRegex(MountCheckError, "ASCF mount disappeared"):
+                require_mountpoint(self.mount, "ASCF mount disappeared during verification")
+        with mock.patch("os.path.ismount", return_value=True):
+            require_mountpoint(self.mount, "path is not a filesystem mount point")
+        self.assertEqual(self.check()["result"], "pass")
 
     def test_original_file_probe_io_error_fails_closed(self):
         # An I/O failure while probing the reference must reject acceptance.
