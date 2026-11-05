@@ -228,8 +228,9 @@ the SHA-256 evidence. macOS may ask the invoking Terminal for permission to
 control Finder; a denial fails acceptance and is logged to `finder-error.txt`.
 The test opens no user files in Finder and makes no write requests.
 Repeat using `lzraven` after remounting its archive. The result includes the
-path to `readback.json` for subsequent `unmounted` verification. Neither
-`bundle-readback` nor `unmounted` installs, mounts or edits a volume.
+path to `readback.json` for subsequent `bundle-unmounted` verification. Both signed-bundle commands
+execute manifest-covered packaged helpers, including the Finder AppleScript.
+They never install, mount or edit a volume.
 
 The owner-run signing check also binds each provisioning profile to the signed
 bundle identifier and code-signing team. It rejects expired profiles and
@@ -252,11 +253,17 @@ has disappeared. This command requires the successful `readback.json` from
 that same volume. It inspects Darwin's complete `getmntinfo` kernel mount table\nfor FSKit mounts, including private Terminal mountpoints, and rejects any\nsurviving ASCF volume, relocated mount or filesystem still using the prior\nmountpoint. A disappeared directory alone cannot qualify as a successful\nunmount. The witness binds the prior Finder-verified readback ID, SHA-256 and\nmacOS build to the observed zero-ASCF state:
 
 ```sh
-bash fskit/signed_acceptance.sh unmounted \
-  "/Volumes/Applesauce ASCF" "/tmp/ascf-readback.EXAMPLE/readback.json"
+bash fskit/signed_acceptance.sh bundle-unmounted . \
+  "/Volumes/Applesauce ASCF" "/tmp/ascf-bundle-readback.EXAMPLE/readback.json"
 ```
 
-Remount the original synthetic archive through the host UI and run `readback`
+The bundle-unmounted command authenticates the package, signed host and
+extension, then binds the earlier Finder readback to the exact source codec,
+logical byte count and SHA-256 before witnessing a complete kernel unmount.
+The standalone `unmounted` command remains available for development
+diagnostics.
+
+Remount the original synthetic archive through the host UI and run `bundle-readback`
 again, retaining both JSON reports and the unmount evidence. The host uses
 FileManager's asynchronous volume unmount API rather than device ejection,
 so busy volumes are reported without a forced unmount or device action.
