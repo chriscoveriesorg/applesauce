@@ -17,6 +17,10 @@ import sys
 import tempfile
 import unittest
 
+# Share the executable verifier's deterministic read schedule with the
+# evidence validator. A partial/randomly invented offset list must not pass.
+from verify_mount import sampled_offsets
+
 
 class EvidenceError(ValueError):
     pass
@@ -82,10 +86,8 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
         require(report.get("macos_version") and report.get("macos_build"),
                 stage + ": missing host OS provenance")
         offsets = report.get("random_read_offsets")
-        require(isinstance(offsets, list)
-                and len(offsets) >= 20 and 0 in offsets
-                and len(reference) in offsets,
-                stage + ": random/EOF read evidence missing")
+        require(offsets == sampled_offsets(len(reference)),
+                stage + ": complete deterministic random/EOF read evidence missing")
     require(reports[0]["macos_build"] == reports[1]["macos_build"],
             "first mount and remount have different macOS build provenance")
     first_id, second_id = (report.get("verification_id") for report in reports)
@@ -181,7 +183,7 @@ class EvidenceTests(unittest.TestCase):
             "finder_copy_verified": True, "finder_copy_sha256": self.sha,
             "logical_bytes": 100, "sha256": self.sha,
             "mount": "/Volumes/Applesauce ASCF", "macos_version": "27.0",
-            "macos_build": "fixture", "random_read_offsets": list(range(20)) + [100]
+            "macos_build": "fixture", "random_read_offsets": sampled_offsets(100)
         }
         for label, item, instant in zip(
             ("first", "second"), (self.items[0], self.items[2]),
@@ -241,6 +243,31 @@ class EvidenceTests(unittest.TestCase):
         report["verified_at_utc"] = "2026-11-04T00:00:07+00:00"
         self.items[4].write_text(json.dumps(report))
         with self.assertRaisesRegex(EvidenceError, "follow the verified remount"):
+            self.check()
+
+    def test_partial_random_read_report_is_not_complete_acceptance(self):
+        # An otherwise valid report can retain 20+ sampled positions, start
+        # and EOF, but omit boundary and middle-of-file read coverage.
+        report = load_json(self.items[0])
+        recorded = report["random_read_offsets"]
+        report["random_read_offsets"] = recorded[:20] + [100]
+        self.items[0].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "complete deterministic"):
+            self.check()
+
+    def test_random_read_report_rejects_duplicate_or_unsorted_offsets(self):
+        report = load_json(self.items[2])
+        recorded = report["random_read_offsets"]
+        report["random_read_offsets"] = list(reversed(recorded))
+        self.items[2].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "complete deterministic"):
+            self.check()
+
+    def test_random_read_report_rejects_out_of_bounds_position(self):
+        report = load_json(self.items[0])
+        report["random_read_offsets"][-1] = 101
+        self.items[0].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "complete deterministic"):
             self.check()
 
     def test_wrong_source(self):
