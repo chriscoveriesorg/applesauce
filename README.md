@@ -74,10 +74,22 @@ It leaves the original file unchanged and refuses to overwrite existing outputs.
 
 ```sh
 applesauce archive create chatlog.jsonl chatlog.ascf --codec lzraven
+applesauce archive info chatlog.ascf
 applesauce archive verify chatlog.ascf
 applesauce archive extract chatlog.ascf chatlog-restored.jsonl
+applesauce archive extract chatlog.ascf chatlog-slice.jsonl --range 65535:131073
 # Or choose --codec lzmesh for the create command.
 ```
+
+`archive info` reads the header and validated index without loading a
+codec or decompressing any chunk. It reports the archive's declared logical
+SHA-256, codec, chunk dimensions and file size, not a whole-file verification.
+This inspection also works on Linux. `extract --range OFFSET:LENGTH` uses
+decimal logical byte offsets, authenticates every touched chunk with SHA-256
+and writes a new no-clobber file through a verified temporary file. It skips
+unrelated chunks, so the range digest is evidence for the selected bytes.
+Run `archive verify` to authenticate the complete logical archive; that
+requires an available Raven/Mesh decoder on macOS 27+.
 
 The writer rereads and hashes the original, verifies every staged chunk and
 publishes a new file only after verification. Archives that cannot save space

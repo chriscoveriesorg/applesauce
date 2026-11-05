@@ -35,10 +35,18 @@ enum Action {
         #[arg(long)]
         allow_expansion: bool,
     },
+    /// Inspect ASCF metadata without decoding or modifying files
+    Info { archive: PathBuf },
     /// Verify every chunk and the whole-file digest without changing files
     Verify { archive: PathBuf },
-    /// Restore the logical bytes into a new file, keeping the archive intact
-    Extract { archive: PathBuf, output: PathBuf },
+    /// Restore logical bytes into a new file, keeping the archive intact
+    Extract {
+        archive: PathBuf,
+        output: PathBuf,
+        /// Decode only the verified logical byte range OFFSET:LENGTH
+        #[arg(long, value_parser = parse_logical_range)]
+        range: Option<(u64, u64)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -71,13 +79,37 @@ pub fn run(args: &Args) -> io::Result<()> {
             *chunk_bytes,
             *allow_expansion,
         ),
+        Action::Info { archive } => info(archive),
         Action::Verify { archive } => verify(archive),
-        Action::Extract { archive, output } => extract(archive, output),
+        Action::Extract {
+            archive,
+            output,
+            range,
+        } => match range {
+            Some(range) => extract_range(archive, output, *range),
+            None => extract(archive, output),
+        },
     }
 }
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn parse_logical_range(input: &str) -> Result<(u64, u64), String> {
+    let (offset, length) = input
+        .split_once(':')
+        .ok_or_else(|| "expected OFFSET:LENGTH in decimal bytes".to_string())?;
+    let offset = offset
+        .parse::<u64>()
+        .map_err(|_| "range OFFSET must be an unsigned decimal integer".to_string())?;
+    let length = length
+        .parse::<u64>()
+        .map_err(|_| "range LENGTH must be an unsigned decimal integer".to_string())?;
+    offset
+        .checked_add(length)
+        .ok_or_else(|| "logical range overflows u64".to_string())?;
+    Ok((offset, length))
 }
 
 fn open_regular(path: &Path) -> io::Result<File> {
@@ -207,6 +239,23 @@ fn create(
     Ok(())
 }
 
+fn info(path: &Path) -> io::Result<()> {
+    let source = open_regular(path)?;
+    let archive_bytes = source.metadata()?.len();
+    // Header/index validation is portable and does not initialize decoder scratch.
+    let reader = ArchiveReader::open(source)?;
+    println!(
+        "ASCF {}: {} logical bytes, {} archive bytes, {} chunks of {} bytes, SHA-256 {} (metadata only)",
+        reader.codec().name(),
+        reader.logical_size(),
+        archive_bytes,
+        reader.chunk_count(),
+        reader.chunk_size(),
+        hex_digest(reader.logical_sha256())
+    );
+    Ok(())
+}
+
 fn verify(path: &Path) -> io::Result<()> {
     let source = open_regular(path)?;
     let mut reader = ArchiveReader::open(source)?;
@@ -274,6 +323,63 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Restore a slice without decoding unrelated chunks. The header/index
+/// is validated on open, and each touched chunk gets its own SHA-256 check.
+/// Publication is atomic and the output is verified through a second read.
+/// This does not claim whole-file verification of untouched logical chunks.
+fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::Result<()> {
+    unused_output(output)?;
+    let mut source = open_regular(archive_path)?;
+    let before = source.metadata()?;
+    let mut reader = ArchiveReader::open(&mut source)?;
+    let (start, length) = range;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| invalid("logical range overflows u64"))?;
+    if start > reader.logical_size() || end > reader.logical_size() {
+        return Err(invalid("logical range exceeds archive size"));
+    }
+    let mut temporary = staging(output)?;
+    let mut digest = Sha256::new();
+    let mut offset = start;
+    while offset < end {
+        let count = (end - offset).min(MAX_READ_BYTES as u64) as usize;
+        let bytes = reader.read_range(offset, count)?;
+        digest.update(&bytes);
+        temporary.write_all(&bytes)?;
+        offset += bytes.len() as u64;
+    }
+    drop(reader);
+    let after = source.metadata()?;
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive source changed during range extraction",
+        ));
+    }
+    temporary.as_file_mut().flush()?;
+    temporary.as_file().sync_all()?;
+    temporary.as_file_mut().rewind()?;
+    let output_digest = hash_reader(temporary.as_file_mut())?;
+    let range_digest: [u8; 32] = digest.finalize().into();
+    if output_digest != range_digest {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged logical range failed read-back verification",
+        ));
+    }
+    temporary
+        .persist_noclobber(output)
+        .map_err(|error| error.error)?;
+    println!(
+        "Restored verified logical range {}:{} into a new file; range SHA-256 {}",
+        start,
+        length,
+        hex_digest(range_digest)
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +417,51 @@ mod tests {
             "lzvn",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn range_parser_enforces_unsigned_bounds_and_explicit_syntax() {
+        for bad in [
+            "",
+            "1",
+            "-1:2",
+            "1:-2",
+            "1:2:3",
+            "1:",
+            ":2",
+            "1.0:2",
+            "18446744073709551615:1",
+        ] {
+            assert!(parse_logical_range(bad).is_err(), "accepted {bad:?}");
+            assert!(crate::Cli::try_parse_from([
+                "applesauce",
+                "archive",
+                "extract",
+                "src.ascf",
+                "slice",
+                "--range",
+                bad
+            ])
+            .is_err());
+        }
+        assert_eq!(parse_logical_range("0:0").unwrap(), (0, 0));
+        assert_eq!(
+            parse_logical_range("65535:131073").unwrap(),
+            (65535, 131073)
+        );
+        assert!(
+            crate::Cli::try_parse_from(["applesauce", "archive", "info", "source.ascf"]).is_ok()
+        );
+        assert!(crate::Cli::try_parse_from([
+            "applesauce",
+            "archive",
+            "extract",
+            "source.ascf",
+            "slice",
+            "--range",
+            "65535:131073"
+        ])
+        .is_ok());
     }
 
     #[test]
@@ -353,13 +504,28 @@ mod tests {
             extract(&archive, &restored).unwrap();
             assert_eq!(fs::read(&source).unwrap(), payload);
             assert_eq!(fs::read(&restored).unwrap(), payload);
+            info(&archive).unwrap();
+            let part = dir.path().join("partial.jsonl");
+            extract_range(&archive, &part, (65_535, 131_073)).unwrap();
+            assert_eq!(fs::read(&part).unwrap(), payload[65_535..196_608]);
+            let empty = dir.path().join("empty-range");
+            extract_range(&archive, &empty, (payload.len() as u64, 0)).unwrap();
+            assert_eq!(fs::read(&empty).unwrap(), b"");
+            let past_end = dir.path().join("outside-range");
+            assert!(extract_range(&archive, &past_end, (payload.len() as u64, 1)).is_err());
+            assert!(!past_end.exists());
             // A broken tail chunk must not produce any output.
             let mut corrupt = fs::read(&archive).unwrap();
             *corrupt.last_mut().unwrap() ^= 1;
             fs::write(&archive, corrupt).unwrap();
+            // Header/index remains parseable although payload authentication fails.
+            info(&archive).unwrap();
             let refused = dir.path().join("refused.jsonl");
             assert!(extract(&archive, &refused).is_err());
             assert!(!refused.exists());
+            let bad_slice = dir.path().join("corrupt-range");
+            assert!(extract_range(&archive, &bad_slice, (payload.len() as u64 - 5, 5)).is_err());
+            assert!(!bad_slice.exists());
         }
     }
 
@@ -372,6 +538,10 @@ mod tests {
             verify(&text).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+        assert_eq!(info(&text).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let no_output = dir.path().join("bad-range");
+        assert!(extract_range(&text, &no_output, (0, 1)).is_err());
+        assert!(!no_output.exists());
         // A magic-correct but truncated prefix is also refused.
         let short = dir.path().join("short.ascf");
         fs::write(&short, b"ASCF0001").unwrap();
