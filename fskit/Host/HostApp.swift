@@ -146,7 +146,7 @@ private final class ASCFMountController: ObservableObject {
     // callback alone does not establish that the expected extension mounted.
     // Reuse this gate when recovering mounts after a host relaunch.
     private func isVerifiedReadOnlyASCFMount(_ volume: URL) -> Bool {
-        guard volume.path.hasPrefix("/Volumes/") else { return false }
+        guard ASCFMountLocation.isAllowed(volume.path) else { return false }
         // Swift imports Darwin's statfs structure with the same name as its
         // C function. fstatfs binds the check to the directory we opened.
         let fd = volume.withUnsafeFileSystemRepresentation { path -> Int32 in
@@ -179,18 +179,42 @@ private final class ASCFMountController: ObservableObject {
         return type == "ascf" && (info.f_flags & UInt32(MNT_RDONLY)) != 0
     }
 
-    // A host restart must not strand an already mounted archive. Recover
-    // only kernel-confirmed read-only ASCF volumes, never a matching label.
-    private func mountedASCFVolumes() -> [URL] {
-        let mounted = FileManager.default.mountedVolumeURLs(
-            includingResourceValuesForKeys: nil, options: []
-        ) ?? []
-        return mounted.filter { isVerifiedReadOnlyASCFMount($0) }
+    // Read the kernel's complete mount table, including the private /private/tmp
+    // location used by signed_acceptance.sh cli-mount. FileManager's visible
+    // volume list can omit that mount. Never treat discovery failure as zero
+    // mounts, or another host window could launch a conflicting FSClient call.
+    private func mountedASCFVolumes() -> [URL]? {
+        var table: UnsafeMutablePointer<statfs>?
+        let count = Darwin.getmntinfo(&table, Int32(MNT_NOWAIT))
+        guard count > 0, let table else { return nil }
+        var verified: [URL] = []
+        for index in 0..<Int(count) {
+            let entry = table[index]
+            let kind = withUnsafeBytes(of: entry.f_fstypename) { bytes in
+                String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
+            }
+            guard kind == "ascf" else { continue }
+            let path = withUnsafeBytes(of: entry.f_mntonname) { bytes in
+                String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
+            }
+            // If ANY ASCF mount is unknown, inaccessible or writable,
+            // block additional mounts instead of silently losing track of it.
+            guard ASCFMountLocation.isAllowed(path) else { return nil }
+            let url = URL(fileURLWithPath: path, isDirectory: true)
+            guard isVerifiedReadOnlyASCFMount(url) else { return nil }
+            verified.append(url)
+        }
+        return verified
     }
 
     func reconcileMountedVolumes() {
         guard !isWorking else { return }
-        let volumes = mountedASCFVolumes()
+        guard let volumes = mountedASCFVolumes() else {
+            multipleASCFMounts = true
+            mountedURL = nil
+            status = "Cannot verify the kernel ASCF mount table. Further mounting is blocked; inspect mounted volumes in Terminal."
+            return
+        }
         multipleASCFMounts = volumes.count > 1
         if volumes.count > 1 {
             mountedURL = nil
@@ -246,7 +270,14 @@ private final class ASCFMountController: ObservableObject {
                             ticket: ASCFOperationGate.Ticket) {
         guard operations.isCurrent(ticket) else { return }
         // Discovery is asynchronous. Recheck external mounts before FSClient.
-        guard mountedASCFVolumes().isEmpty else {
+        guard let existing = mountedASCFVolumes() else {
+            operations.finish(ticket)
+            multipleASCFMounts = true
+            mountedURL = nil
+            status = "Cannot verify the ASCF mount table after extension discovery. Mounting is blocked."
+            return
+        }
+        guard existing.isEmpty else {
             operations.finish(ticket)
             reconcileMountedVolumes()
             return
@@ -274,7 +305,12 @@ private final class ASCFMountController: ObservableObject {
                 // Reconcile both observations before reporting failure or
                 // allowing a second mount. The callback path is never trusted
                 // without its independent read-only ASCF statfs check.
-                let observed = mountedASCFVolumes()
+                guard let observed = mountedASCFVolumes() else {
+                    multipleASCFMounts = true
+                    mountedURL = nil
+                    status = "MOUNT_INCONCLUSIVE: kernel ASCF mount discovery failed after FSClient. Inspect all mounts before retrying."
+                    return
+                }
                 let verifiedReturned = mounted.flatMap {
                     isVerifiedReadOnlyASCFMount($0) ? $0.path : nil
                 }
@@ -339,7 +375,12 @@ private final class ASCFMountController: ObservableObject {
                 if let error {
                     // Reconcile a concurrent Finder unmount while retaining
                     // the OS error for troubleshooting and acceptance.
-                    let remaining = mountedASCFVolumes()
+                    guard let remaining = mountedASCFVolumes() else {
+                        multipleASCFMounts = true
+                        mountedURL = nil
+                        status = "UNMOUNT_INCONCLUSIVE: \(error.localizedDescription); kernel mount discovery also failed."
+                        return
+                    }
                     multipleASCFMounts = remaining.count > 1
                     mountedURL = remaining.first
                     status = "Unmount failed: \(error.localizedDescription). Remaining ASCF volumes: \(remaining.count)."
@@ -347,7 +388,12 @@ private final class ASCFMountController: ObservableObject {
                     // An asynchronous success callback is not proof that the
                     // volume disappeared. Reinspect the live VFS before
                     // telling the operator that unmount acceptance passed.
-                    let remaining = mountedASCFVolumes()
+                    guard let remaining = mountedASCFVolumes() else {
+                        multipleASCFMounts = true
+                        mountedURL = nil
+                        status = "UNMOUNT_INCONCLUSIVE: macOS reported success but the ASCF mount table cannot be verified."
+                        return
+                    }
                     if isVerifiedReadOnlyASCFMount(url) || !remaining.isEmpty {
                         multipleASCFMounts = remaining.count > 1
                         mountedURL = remaining.first ?? url
