@@ -410,6 +410,17 @@ class EvidenceTests(unittest.TestCase):
             self.items[index].write_text(json.dumps(report))
         self.assertEqual(self.check()["result"], "pass")
 
+    def test_private_mount_policy_matches_executable_cli_mount(self):
+        # Keep the validator's accepted private location aligned with the
+        # actual mount stage produced by the shipped executable handoff.
+        script = (Path(__file__).parent / "signed_acceptance.sh").read_text(
+            encoding="utf-8")
+        self.assertIn('mktemp -d /private/tmp/ascf-cli-mount.XXXXXXXX', script)
+        self.assertIn('/bin/mkdir "$out/mount"', script)
+        self.assertTrue(valid_acceptance_mount(
+            "/private/tmp/ascf-cli-mount.AbC123xY/mount"))
+        self.assertTrue(valid_acceptance_mount("/Volumes/Applesauce ASCF"))
+
     def test_rejects_untrusted_terminal_mount_paths(self):
         cases = [
             "/tmp/ascf-cli-mount.AbC123xY/mount",
