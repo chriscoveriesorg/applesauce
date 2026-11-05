@@ -1675,7 +1675,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 verify_mount(self.mount, self.original, require_real_mount=False)
 
     def check_signed_gate(self, filesystem_type, mount_flags=1,
-                          final_filesystem_type=None, final_mount_flags=None):
+                          final_filesystem_type=None, final_mount_flags=None,
+                          active_mounts=None):
         # The signed acceptance path must use macOS statfs, rather than
         # accepting an unrelated mounted disk with one matching file.
         self.real_open = os.open
@@ -1705,7 +1706,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             "subprocess.run", side_effect=command
         ), mock.patch("os.open", side_effect=self.readonly_open), mock.patch(
             "unmount_acceptance.read_mount_table",
-            return_value=[("apfs", "/"), ("ascf", str(self.mount))]
+            return_value=([("apfs", "/"), ("ascf", str(self.mount))]
+                          if active_mounts is None else active_mounts)
         ):
             outcome = verify_mount(self.mount, self.original)
         expected_mount = self.mount.resolve(strict=True)
@@ -1801,6 +1803,18 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         for table in ([], None, [("ascf", "")], [("ascf",)], ["ascf"]):
             with self.subTest(table=table), self.assertRaises(MountCheckError):
                 require_unique_ascf_mount(self.mount, table)
+
+    def test_real_mount_gate_rejects_stacked_and_relocated_mounts(self):
+        for active, message in (
+            ([("apfs", "/"), ("ascf", str(self.mount)),
+              ("ascf", "/Volumes/Other ASCF")], "exactly one"),
+            ([("apfs", "/"), ("ascf", "/Volumes/Other ASCF")],
+             "does not match"),
+            ([("apfs", "/")], "exactly one"),
+        ):
+            with self.subTest(active=active), self.assertRaisesRegex(
+                    MountCheckError, message):
+                self.check_signed_gate("ascf", active_mounts=active)
 
     def test_real_mount_gate_records_fskit_identity_and_macos_build(self):
         report, seen = self.check_signed_gate("ascf")
