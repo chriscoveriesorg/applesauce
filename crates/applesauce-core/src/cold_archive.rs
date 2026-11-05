@@ -560,7 +560,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
         &mut self,
         mut cancelled: impl FnMut() -> bool,
     ) -> io::Result<()> {
-        let interrupted = || io::Error::new(io::ErrorKind::Interrupted, "ASCF verification cancelled");
+        let interrupted =
+            || io::Error::new(io::ErrorKind::Interrupted, "ASCF verification cancelled");
         let mut hash = Sha256::new();
         for index in 0..self.entries.len() {
             if cancelled() {
