@@ -104,6 +104,7 @@ fn cancelled_full_verification_returns_ecanceled_without_decoding() {
     let handle = open_from(&temp);
     // SAFETY: retain the handle until all operations complete.
     unsafe { ascf_cancel_verification(handle) };
+    // SAFETY: handle is valid and remains alive for the entire call.
     assert_eq!(unsafe { ascf_verify_all(handle) }, libc::ECANCELED);
     let mut info = AscfInfo {
         logical_size: 0,
@@ -111,9 +112,12 @@ fn cancelled_full_verification_returns_ecanceled_without_decoding() {
         reserved: 0,
         logical_sha256: [0; 32],
     };
+    // SAFETY: the live handle and writable metadata storage are valid.
     assert_eq!(unsafe { ascf_info(handle, &mut info) }, 0);
     assert_eq!(info.logical_size, 1);
+    // SAFETY: all outstanding operations finished; close the handle once.
     unsafe { ascf_close(handle) };
+    // SAFETY: the C ABI explicitly permits null as a no-op cancellation.
     unsafe { ascf_cancel_verification(ptr::null_mut()) };
 }
 
