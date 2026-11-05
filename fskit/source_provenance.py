@@ -65,17 +65,18 @@ def source_commit(root, expected=None):
             raise SourceProvenanceError(
                 "tracked source is not a normal stage-0 regular file "
                 "(symlink, gitlink or unmerged index): " + repr(record[:160]))
-    # XcodeGen discovers Swift inputs by walking these directories. Ignore
-    # rules in .git/info/exclude or the user's global excludes file can hide
-    # additional compiled Swift files from ordinary git status. Build output
-    # directories are outside these source roots and remain allowed.
+    # XcodeGen discovers Host/extension inputs by walking source directories;
+    # Cargo likewise reads source under crates/. Git exclude rules can hide
+    # additional build inputs from normal status. Allow only harmless Finder
+    # metadata so Macs with .DS_Store files can still sign a clean checkout.
     ignored_sources = git(root, "ls-files", "--others", "--ignored",
                           "--exclude-standard", "-z", "--",
-                          "fskit/Host", "fskit/ASCFExtension")
-    if ignored_sources:
-        raise SourceProvenanceError(
-            "ignored FSKit source input may be compiled outside HEAD: "
-            + repr(ignored_sources.split("\0")[0][:160]))
+                          "fskit/Host", "fskit/ASCFExtension", "crates")
+    for name in ignored_sources.split("\0"):
+        if name and Path(name).name != ".DS_Store":
+            raise SourceProvenanceError(
+                "ignored build input may be compiled outside HEAD: "
+                + repr(name[:160]))
     # --porcelain includes staged, unstaged, copied and untracked inputs.
     # Excluding ignored generated products is Git's responsibility.
     dirty = git(root, "status", "--porcelain=v1", "--untracked-files=all")
@@ -91,7 +92,7 @@ class SourceProvenanceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.gitcmd("init", "-q")
-        (self.root / ".gitignore").write_text("/target/\nfskit/ApplesauceASCF.xcodeproj/\n")
+        (self.root / ".gitignore").write_text("/target/\n.DS_Store\nfskit/ApplesauceASCF.xcodeproj/\n")
         (self.root / "source.swift").write_text("original\n")
         self.gitcmd("add", ".")
         self.gitcmd("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -174,7 +175,7 @@ class SourceProvenanceTests(unittest.TestCase):
             "fskit/Host/Injected.swift\n")
         (source_dir / "Injected.swift").write_text("print(\"mutable ignored code\")\n")
         self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
-        with self.assertRaisesRegex(SourceProvenanceError, "ignored FSKit source"):
+        with self.assertRaisesRegex(SourceProvenanceError, "ignored build input"):
             source_commit(self.root, self.original)
 
     def test_git_ignored_extension_source_refused(self):
@@ -184,8 +185,25 @@ class SourceProvenanceTests(unittest.TestCase):
             "fskit/ASCFExtension/Injected.swift\n")
         (source_dir / "Injected.swift").write_text("// replacement code\n")
         self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
-        with self.assertRaisesRegex(SourceProvenanceError, "ignored FSKit source"):
+        with self.assertRaisesRegex(SourceProvenanceError, "ignored build input"):
             source_commit(self.root)
+
+    def test_git_ignored_rust_crate_source_refused(self):
+        source_dir = self.root / "crates" / "applesauce-fskit-bridge" / "src"
+        source_dir.mkdir(parents=True)
+        (self.root / ".git" / "info" / "exclude").write_text(
+            "crates/applesauce-fskit-bridge/src/Injected.rs\n")
+        (source_dir / "Injected.rs").write_text("// mutable Rust code\n")
+        self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+        with self.assertRaisesRegex(SourceProvenanceError, "ignored build input"):
+            source_commit(self.root)
+
+    def test_finder_metadata_ignored_without_weakening_source_gate(self):
+        for directory in ("fskit/Host", "fskit/ASCFExtension", "crates"):
+            path = self.root / directory
+            path.mkdir(parents=True, exist_ok=True)
+            (path / ".DS_Store").write_bytes(b"Finder view metadata")
+        self.assertEqual(source_commit(self.root, self.original), self.original)
 
     def test_head_change_refused_even_when_tree_clean(self):
         self.gitcmd("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
