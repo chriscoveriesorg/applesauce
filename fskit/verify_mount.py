@@ -166,7 +166,11 @@ def digest(path, nofollow=False, include_identity=False):
         except OSError as error:
             raise MountCheckError(f"cannot inspect digest descriptor: {error}") from error
         require(stat.S_ISREG(identity.st_mode), "digest input is not a regular file")
-        with os.fdopen(fd, "rb", buffering=0) as source:
+        try:
+            stream = os.fdopen(fd, "rb", buffering=0)
+        except OSError as error:
+            raise MountCheckError(f"cannot wrap digest descriptor: {error}") from error
+        with stream as source:
             fd = -1
             while True:
                 try:
@@ -728,7 +732,7 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         # A secondary close failure must not mask the primary exception.
         with mock.patch("os.fdopen", side_effect=OSError(errno.EIO, "fdopen failed")):
             with mock.patch("os.close", side_effect=OSError(errno.EBADF, "close failed")):
-                with self.assertRaisesRegex(OSError, "fdopen failed"):
+                with self.assertRaisesRegex(MountCheckError, "cannot wrap digest descriptor"):
                     digest(self.original)
         self.assertEqual(digest(self.original)[0], self.original.stat().st_size)
 
