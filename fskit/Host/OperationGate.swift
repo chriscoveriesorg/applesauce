@@ -40,3 +40,31 @@ struct ASCFOperationGate {
         return true
     }
 }
+ 
+// A mount callback can disagree with the live VFS (e.g. a partial mount
+// followed by an error). Preserve the discovered read-only ASCF volume in
+// that case so the host can offer a normal unmount instead of losing track
+// of a mounted filesystem. This classifier has no FSKit dependency.
+struct ASCFMountPostflight {
+    let returnedMount: Bool
+    let callbackError: Bool
+    let verifiedReturnedPath: String?
+    let observedVerifiedPaths: [String]
+
+    var verifiedPaths: [String] {
+        Array(Set(observedVerifiedPaths + (verifiedReturnedPath.map { [$0] } ?? []))).sorted()
+    }
+
+    var singleVerifiedPath: String? {
+        verifiedPaths.count == 1 ? verifiedPaths[0] : nil
+    }
+
+    var cleanSuccess: Bool {
+        !callbackError && returnedMount && verifiedReturnedPath != nil
+            && singleVerifiedPath == verifiedReturnedPath
+    }
+
+    var hasOrphanedMount: Bool {
+        !verifiedPaths.isEmpty && !cleanSuccess
+    }
+}
