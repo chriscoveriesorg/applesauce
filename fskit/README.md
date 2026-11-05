@@ -243,7 +243,7 @@ Never use private source files for this test.
 After successful `readback`, use **Unmount read-only volume** in the host or
 Finder's normal eject action, then prove that the previously verified mount
 has disappeared. This command requires the successful `readback.json` from
-that same volume; it will refuse an unrelated path or a still-mounted volume:
+that same volume. It inspects Darwin's complete `getmntinfo` kernel mount table\nfor FSKit mounts, including private Terminal mountpoints, and rejects any\nsurviving ASCF volume, relocated mount or filesystem still using the prior\nmountpoint. A disappeared directory alone cannot qualify as a successful\nunmount. The witness binds the prior Finder-verified readback ID, SHA-256 and\nmacOS build to the observed zero-ASCF state:
 
 ```sh
 bash fskit/signed_acceptance.sh unmounted \
@@ -254,6 +254,10 @@ Remount the original synthetic archive through the host UI and run `readback`
 again, retaining both JSON reports and the unmount evidence. The host uses
 FileManager's asynchronous volume unmount API rather than device ejection,
 so busy volumes are reported without a forced unmount or device action.
+The portable unmount checker has nine synthetic regressions and a macOS 27
+CI check that calls the real Darwin `getmntinfo` ABI. Those checks validate
+the witness code; only a signed, mounted physical lifecycle can satisfy
+PR #86 acceptance.
 Collect the Xcode build logs, signed entitlement/profile snapshots, and
 macOS build with the complete lifecycle evidence. Signing requires the Apple Developer
 team to provision `com.apple.developer.fskit.mount` and
