@@ -31,9 +31,12 @@ they restore identical logical bytes. Unload resets the container readiness.
 Probe and load run full archive verification on one dedicated serial worker
 rather than blocking FSKit's callback thread. This limits concurrent decoder
 scratch allocations. An unload invalidates a queued load ticket, allowing the
-worker to skip decoding that archive; a load already verifying is refused at
-publication if unload occurred. Each security-scoped source is released on
-failure and held by the published volume until unload. The SDK compiler and
+worker to skip decoding that archive. An unload also sets a Rust atomic
+cancellation flag for in-flight verification, stopping work at the next
+chunk boundary. A cancelled load returns ECANCELED and cannot publish the
+volume. The lifecycle lock prevents freeing a verification handle during
+cancellation. Each security-scoped source is released on failure and held
+by the published volume until unload. The SDK compiler and
 portable cancellation tests cover these paths; actual signed mounts remain a
 separate acceptance requirement.
 

@@ -548,12 +548,28 @@ impl<R: Read + Seek> ArchiveReader<R> {
         result
     }
 
-    /// Validate every logical chunk plus the whole-file digest. This is the
-    /// publication gate for a staged archive, independent of APFS allocation.
+    /// Validate every chunk and the whole-file SHA-256 before publication.
     pub fn verify_all(&mut self) -> io::Result<()> {
+        self.verify_all_cancellable(|| false)
+    }
+
+    /// FSKit unload can interrupt lengthy verification between chunks.
+    /// Check once before decoding and again before reporting success.
+    /// Successful calls retain the identical whole-file SHA-256 guarantee.
+    pub fn verify_all_cancellable(
+        &mut self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> io::Result<()> {
+        let interrupted = || io::Error::new(io::ErrorKind::Interrupted, "ASCF verification cancelled");
         let mut hash = Sha256::new();
         for index in 0..self.entries.len() {
+            if cancelled() {
+                return Err(interrupted());
+            }
             hash.update(self.decode_chunk(index)?);
+        }
+        if cancelled() {
+            return Err(interrupted());
         }
         let digest: [u8; 32] = hash.finalize().into();
         if digest != self.logical_sha256 {
@@ -585,6 +601,21 @@ mod tests {
         result[80..112].copy_from_slice(&Sha256::digest(b"x"));
         result.extend_from_slice(data);
         result
+    }
+
+    #[test]
+    fn cancelled_full_verification_stops_before_untrusted_decode() {
+        let mut reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
+        let mut checks = 0;
+        let failure = reader
+            .verify_all_cancellable(|| {
+                checks += 1;
+                true
+            })
+            .unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(checks, 1, "cancellation must precede chunk decoding");
+        assert!(reader.verify_all().is_err());
     }
 
     #[test]

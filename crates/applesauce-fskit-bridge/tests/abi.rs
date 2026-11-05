@@ -99,6 +99,25 @@ fn metadata_and_eof_work_without_decoder() {
 }
 
 #[test]
+fn cancelled_full_verification_returns_ecanceled_without_decoding() {
+    let temp = file_for(&synthetic_header());
+    let handle = open_from(&temp);
+    // SAFETY: retain the handle until all operations complete.
+    unsafe { ascf_cancel_verification(handle) };
+    assert_eq!(unsafe { ascf_verify_all(handle) }, libc::ECANCELED);
+    let mut info = AscfInfo {
+        logical_size: 0,
+        codec_selector: 0,
+        reserved: 0,
+        logical_sha256: [0; 32],
+    };
+    assert_eq!(unsafe { ascf_info(handle, &mut info) }, 0);
+    assert_eq!(info.logical_size, 1);
+    unsafe { ascf_close(handle) };
+    unsafe { ascf_cancel_verification(ptr::null_mut()) };
+}
+
+#[test]
 fn refuses_writable_and_nonregular_fd_and_bad_buffers() {
     let temp = file_for(&synthetic_header());
     let mut handle = ptr::NonNull::<AscfReader>::dangling().as_ptr();

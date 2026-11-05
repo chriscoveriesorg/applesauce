@@ -22,8 +22,12 @@ int32_t ascf_info(AscfReader *reader, AscfInfo *out);
  * EOF returns zero read bytes; capacity=0 permits null destination. */
 int32_t ascf_pread(AscfReader *reader, uint64_t offset,
                   uint8_t *destination, size_t capacity, size_t *out_read);
-/* Full SHA-256 verification is a separate pre-publication gate. */
+/* Full SHA-256 verification is a separate pre-publication gate.
+ * Unload may cancel at an authenticated chunk boundary (ECANCELED). */
 int32_t ascf_verify_all(AscfReader *reader);
+/* Nonblocking cancellation. The handle MUST stay alive until verification
+ * finishes. This call does not close, alter, or publish the source. */
+void ascf_cancel_verification(AscfReader *reader);
 /* Requires all outstanding operations to have completed; close only once. */
 void ascf_close(AscfReader *reader);
 

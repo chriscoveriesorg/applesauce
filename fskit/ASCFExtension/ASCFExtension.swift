@@ -22,6 +22,9 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     // state, including the in-flight verification ticket, is lock-protected.
     private let lifecycleLock = NSLock()
     private var loadGate = ASCFResourceLoadGate()
+    // Valid only while the worker owns an open C handle. All access is
+    // under lifecycleLock, including unregister-before-close.
+    private var verifyingHandle: OpaquePointer?
     private var volume: ASCFVolume?
     private var scopedURL: URL?
 
@@ -31,7 +34,10 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
     // The bridge takes ownership only of its duplicate FD. The original
     // descriptor is opened O_RDONLY/O_NOFOLLOW and always closed here.
-    private static func openArchive(_ url: URL, verify: Bool) throws -> (OpaquePointer, AscfInfo, ASCFArchiveIdentity) {
+    private static func openArchive(
+        _ url: URL, verify: Bool,
+        onVerificationHandle: ((OpaquePointer?) -> Void)? = nil
+    ) throws -> (OpaquePointer, AscfInfo, ASCFArchiveIdentity) {
         // Opening a FIFO named *.ascf must never block FSKit's probe or load.
         // The bridge rejects every nonregular descriptor before parsing it.
         let fd = Darwin.open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
@@ -41,6 +47,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         var handle: OpaquePointer?
         let openStatus = ascf_open_fd(fd, &handle)
         guard openStatus == 0, let handle else { throw error(openStatus == 0 ? EIO : openStatus) }
+        onVerificationHandle?(handle)
         do {
             var info = AscfInfo()
             let infoStatus = ascf_info(handle, &info)
@@ -63,8 +70,11 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                 }
             }
             guard identity.matchesPath(url) else { throw error(ESTALE) }
+            onVerificationHandle?(nil)
             return (handle, info, identity)
         } catch {
+            // Unregister under the lifecycle lock before freeing C memory.
+            onVerificationHandle?(nil)
             ascf_close(handle)
             throw error
         }
@@ -185,7 +195,21 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                 // The reservation remains held across full archive verification.
                 // A second load cannot replace the descriptor, and an unload
                 // invalidates the reservation even while verification is running.
-                let (handle, info, identity) = try Self.openArchive(url, verify: true)
+                let (handle, info, identity) = try Self.openArchive(
+                    url, verify: true, onVerificationHandle: { handle in
+                        lifecycleLock.lock()
+                        if let handle {
+                            if loadGate.isPending(ticket) {
+                                verifyingHandle = handle
+                            } else {
+                                // Unload raced the worker before registration.
+                                ascf_cancel_verification(handle)
+                            }
+                        } else {
+                            verifyingHandle = nil
+                        }
+                        lifecycleLock.unlock()
+                    })
                 let mounted = ASCFVolume(
                     handle: handle, info: info, archiveName: url.deletingPathExtension().lastPathComponent,
                     identifier: Self.identifier(for: info, archiveURL: url),
@@ -226,6 +250,8 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // FSKit finishes active volume operations before unloading it.
         lifecycleLock.lock()
         loadGate.unload()
+        // Stop decoding future chunks without waiting for the bridge mutex.
+        if let verifyingHandle { ascf_cancel_verification(verifyingHandle) }
         let oldScope = scopedURL
         let oldVolume = volume
         volume = nil
