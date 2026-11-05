@@ -360,7 +360,10 @@ private final class ASCFMountController: ObservableObject {
                         let detail = "\(actualError.domain) code \(actualError.code): \(actualError.localizedDescription)"
                         if actualError.domain == FSKitErrorDomain
                             && actualError.code == FSError.Code.resourceDamaged.rawValue {
-                            // Record the symbolic enum identity as well as the SDK-specific\n                            // raw code. The portable verifier must not accept a\n                            // different FSKit error merely because its domain matches.\n                            status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): sha256=\(fingerprint.sha256): signed FSKit probe rejected the recognized ASCF payload: FSKitErrorDomain resourceDamaged code \(actualError.code): \(actualError.localizedDescription)"
+                            // Record the symbolic enum identity as well as the SDK-specific
+                            // raw code. The portable verifier must not accept a
+                            // different FSKit error merely because its domain matches.
+                            status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): sha256=\(fingerprint.sha256): signed FSKit probe rejected the recognized ASCF payload: FSKitErrorDomain resourceDamaged code \(actualError.code): \(actualError.localizedDescription)"
                         } else {
                             status = "CORRUPT_REFUSAL_INCONCLUSIVE: mount failed without a verified ASCF damage error: \(detail). Check activation, entitlements and access."
                         }
