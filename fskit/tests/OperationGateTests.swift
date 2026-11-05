@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 @main
@@ -177,8 +178,15 @@ struct OperationGateTests {
         let originalFingerprint = try! ASCFCorruptFixtureProof.fingerprint(fixture)
         let twin = testDirectory.appendingPathComponent("identical-copy.ascf")
         try! large.write(to: twin)
-        try! FileManager.default.removeItem(at: fixture)
-        try! FileManager.default.moveItem(at: twin, to: fixture)
+        // Rename over the live pathname atomically, as a real archive swap
+        // would do. The two inodes contain exactly the same logical bytes.
+        let replaced: Int32 = twin.withUnsafeFileSystemRepresentation { source in
+            fixture.withUnsafeFileSystemRepresentation { destination in
+                guard let source, let destination else { return -1 }
+                return Darwin.rename(source, destination)
+            }
+        }
+        precondition(replaced == 0, "atomic same-byte fixture swap failed")
         let replacementFingerprint = try! ASCFCorruptFixtureProof.fingerprint(fixture)
         precondition(originalFingerprint.sha256 == replacementFingerprint.sha256)
         precondition(originalFingerprint.sourceIdentity != replacementFingerprint.sourceIdentity)
