@@ -582,6 +582,14 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, "corruption refusal"):
             self.check()
 
+    def test_signed_host_emits_symbolic_damage_identity(self):
+        # Keep the runtime enum check, emitted diagnostic and bundled verifier
+        # aligned. Compilation and physical acceptance remain separate gates.
+        host = (Path(__file__).parent / "Host" / "HostApp.swift").read_text(
+            encoding="utf-8")
+        self.assertIn("actualError.code == FSError.Code.resourceDamaged.rawValue", host)
+        self.assertIn("FSKitErrorDomain resourceDamaged code \\(actualError.code)", host)
+
     def test_corruption_refusal_rejects_bundle_mutation(self):
         # Keep the replacement-control evidence internally consistent so
         # this test reaches and isolates the separate signed-host SHA gate.
