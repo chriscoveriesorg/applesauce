@@ -110,6 +110,20 @@ struct OperationGateTests {
         precondition(duplicate.hasOrphanedMount)
         precondition(duplicate.singleVerifiedPath == nil)
 
+        // The kernel can report stacked mounts at the same pathname.
+        // Even if their paths compare equal, there are still two volumes.
+        let stacked = ASCFMountPostflight(
+            returnedMount: true, callbackError: false,
+            verifiedReturnedPath: "/Volumes/Applesauce ASCF",
+            observedVerifiedPaths: [
+                "/Volumes/Applesauce ASCF", "/Volumes/Applesauce ASCF"
+            ]
+        )
+        precondition(!stacked.cleanSuccess)
+        precondition(stacked.singleVerifiedPath == nil)
+        precondition(stacked.verifiedPaths.count == 2)
+        precondition(stacked.hasOrphanedMount)
+
         let unrelated = ASCFMountPostflight(
             returnedMount: true, callbackError: false,
             verifiedReturnedPath: nil, observedVerifiedPaths: []
