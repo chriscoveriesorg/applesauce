@@ -48,6 +48,34 @@ def source_commit(root, expected=None):
             raise SourceProvenanceError(
                 "tracked source has an untrusted index flag (assume-unchanged, "
                 "skip-worktree or unmerged): " + repr(record[:160]))
+    # Git records symlinks by their link text, not the bytes of their targets.
+    # A tracked link to external Swift source can therefore change what Xcode
+    # builds while both git status and ls-files -v report a clean checkout.
+    # Reject gitlinks and unresolved index stages for the same provenance reason.
+    staged = git(root, "ls-files", "--stage", "-z")
+    for record in staged.split("\0"):
+        if not record:
+            continue
+        metadata, separator, filename = record.partition("\t")
+        parts = metadata.split(" ")
+        if (not separator or not filename or len(parts) != 3
+                or parts[0] not in ("100644", "100755")
+                or not re.fullmatch(r"[0-9a-f]{40}", parts[1])
+                or parts[2] != "0"):
+            raise SourceProvenanceError(
+                "tracked source is not a normal stage-0 regular file "
+                "(symlink, gitlink or unmerged index): " + repr(record[:160]))
+    # XcodeGen discovers Swift inputs by walking these directories. Ignore
+    # rules in .git/info/exclude or the user's global excludes file can hide
+    # additional compiled Swift files from ordinary git status. Build output
+    # directories are outside these source roots and remain allowed.
+    ignored_sources = git(root, "ls-files", "--others", "--ignored",
+                          "--exclude-standard", "-z", "--",
+                          "fskit/Host", "fskit/ASCFExtension")
+    if ignored_sources:
+        raise SourceProvenanceError(
+            "ignored FSKit source input may be compiled outside HEAD: "
+            + repr(ignored_sources.split("\0")[0][:160]))
     # --porcelain includes staged, unstaged, copied and untracked inputs.
     # Excluding ignored generated products is Git's responsibility.
     dirty = git(root, "status", "--porcelain=v1", "--untracked-files=all")
@@ -121,6 +149,43 @@ class SourceProvenanceTests(unittest.TestCase):
                     "user.email=fixture@example.invalid", "commit", "-qm", "unusual")
         self.assertEqual(source_commit(self.root),
                          self.gitcmd("rev-parse", "--verify", "HEAD"))
+
+    def test_tracked_symlink_to_mutable_external_source_refused(self):
+        external = Path(self.temp.name).parent / (Path(self.temp.name).name + "-external.swift")
+        try:
+            external.write_text("initial\n")
+            link = self.root / "fskit" / "Host" / "Injected.swift"
+            link.parent.mkdir(parents=True)
+            link.symlink_to(external)
+            self.gitcmd("add", "fskit/Host/Injected.swift")
+            self.gitcmd("-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.invalid", "commit", "-qm", "tracked symlink")
+            external.write_text("changed source outside checkout\n")
+            self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+            with self.assertRaisesRegex(SourceProvenanceError, "symlink"):
+                source_commit(self.root)
+        finally:
+            external.unlink(missing_ok=True)
+
+    def test_git_ignored_swift_compiled_by_xcodegen_refused(self):
+        source_dir = self.root / "fskit" / "Host"
+        source_dir.mkdir(parents=True)
+        (self.root / ".git" / "info" / "exclude").write_text(
+            "fskit/Host/Injected.swift\n")
+        (source_dir / "Injected.swift").write_text("print(\"mutable ignored code\")\n")
+        self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+        with self.assertRaisesRegex(SourceProvenanceError, "ignored FSKit source"):
+            source_commit(self.root, self.original)
+
+    def test_git_ignored_extension_source_refused(self):
+        source_dir = self.root / "fskit" / "ASCFExtension"
+        source_dir.mkdir(parents=True)
+        (self.root / ".git" / "info" / "exclude").write_text(
+            "fskit/ASCFExtension/Injected.swift\n")
+        (source_dir / "Injected.swift").write_text("// replacement code\n")
+        self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+        with self.assertRaisesRegex(SourceProvenanceError, "ignored FSKit source"):
+            source_commit(self.root)
 
     def test_head_change_refused_even_when_tree_clean(self):
         self.gitcmd("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
