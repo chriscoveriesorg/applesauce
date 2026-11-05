@@ -52,6 +52,23 @@ def evidence_time(report, stage):
     return timestamp
 
 
+def valid_acceptance_mount(mount):
+    """Allow only host-created /Volumes mounts or the cli-mount private stage.
+
+    cli-mount creates /private/tmp/ascf-cli-mount.XXXXXXXX/mount with mktemp,
+    then verifies that its VFS type is ascf and its kernel flags are read-only.
+    Reject generic /tmp paths, traversal and aliases rather than treating
+    every operator-selected directory as a signed FSKit mount.
+    """
+    if not isinstance(mount, str):
+        return False
+    return bool(
+        re.fullmatch(r"/Volumes/[^/\\x00.][^/\\x00]*", mount)
+        or re.fullmatch(
+            r"/private/tmp/ascf-cli-mount\\.[A-Za-z0-9]{8}/mount", mount)
+    )
+
+
 def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     require(codec in ("lzraven", "lzmesh"), "unsupported codec")
     source = Path(bundle) / ("source." + codec + ".jsonl")
@@ -94,8 +111,7 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
                 and report["mount_inode"] > 0,
                 stage + ": post-Finder kernel mount identity witness missing")
         mount = report.get("mount")
-        require(isinstance(mount, str) and mount.startswith("/Volumes/")
-                and "/../" not in mount and "/./" not in mount,
+        require(valid_acceptance_mount(mount),
                 stage + ": invalid mount location")
         require(report.get("macos_version") and report.get("macos_build"),
                 stage + ": missing host OS provenance")
@@ -382,6 +398,41 @@ class EvidenceTests(unittest.TestCase):
 
     def test_valid_chain(self):
         self.assertEqual(self.check()["result"], "pass")
+
+    def test_terminal_cli_mount_acceptance_chain(self):
+        # The executable cli-mount command uses a fresh, mode-0700 private
+        # /private/tmp stage, so its mounted Finder evidence must remain
+        # usable by the signed acceptance checker.
+        path = "/private/tmp/ascf-cli-mount.AbC123xY/mount"
+        for index in (0, 1, 2, 4):
+            report = load_json(self.items[index])
+            report["mount"] = path
+            self.items[index].write_text(json.dumps(report))
+        self.assertEqual(self.check()["result"], "pass")
+
+    def test_rejects_untrusted_terminal_mount_paths(self):
+        cases = [
+            "/tmp/ascf-cli-mount.AbC123xY/mount",
+            "/private/tmp/ascf-cli-mount.AbC123xY/../mount",
+            "/private/tmp/ascf-cli-mount.AbC123xY/other",
+            "/private/tmp/ascf-cli-mount.AbC123xY/mount/",
+            "/private/tmp/ascf-cli-mount.unsafe/mount",
+            "/private/tmp/other.AbC123xY/mount",
+            "/Volumes/../Other",
+            "/Volumes/Applesauce ASCF/child",
+            "/Volumes//Other",
+            "/Volumes/./Other",
+        ]
+        for path in cases:
+            with self.subTest(path=path):
+                self.assertFalse(valid_acceptance_mount(path), path)
+
+    def test_rejects_false_cli_mount_evidence(self):
+        report = load_json(self.items[0])
+        report["mount"] = "/tmp/ascf-cli-mount.AbC123xY/mount"
+        self.items[0].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "invalid mount location"):
+            self.check()
     def test_replaced_source_wrong_digest(self):
         report = load_json(self.items[4])
         report["replacement_sha256"] = "0" * 64
