@@ -51,8 +51,11 @@ struct ASCFMountPostflight {
     let verifiedReturnedPath: String?
     let observedVerifiedPaths: [String]
 
+    // Only the live kernel table is authoritative for mount ownership.
+    // A callback pathname may pass fstatfs and disappear before getmntinfo.
+    // Never resurrect that stale pathname as an active volume.
     var verifiedPaths: [String] {
-        Array(Set(observedVerifiedPaths + (verifiedReturnedPath.map { [$0] } ?? []))).sorted()
+        Array(Set(observedVerifiedPaths)).sorted()
     }
 
     var singleVerifiedPath: String? {
