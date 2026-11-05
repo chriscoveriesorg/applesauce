@@ -81,7 +81,11 @@ pub fn run(args: &Args) -> io::Result<()> {
         ),
         Action::Info { archive } => info(archive),
         Action::Verify { archive } => verify(archive),
-        Action::Extract { archive, output, range } => match range {
+        Action::Extract {
+            archive,
+            output,
+            range,
+        } => match range {
             Some(range) => extract_range(archive, output, *range),
             None => extract(archive, output),
         },
@@ -329,7 +333,9 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
     let before = source.metadata()?;
     let mut reader = ArchiveReader::open(&mut source)?;
     let (start, length) = range;
-    let end = start.checked_add(length).ok_or_else(|| invalid("logical range overflows u64"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| invalid("logical range overflows u64"))?;
     if start > reader.logical_size() || end > reader.logical_size() {
         return Err(invalid("logical range exceeds archive size"));
     }
@@ -362,10 +368,14 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
             "staged logical range failed read-back verification",
         ));
     }
-    temporary.persist_noclobber(output).map_err(|error| error.error)?;
+    temporary
+        .persist_noclobber(output)
+        .map_err(|error| error.error)?;
     println!(
         "Restored verified logical range {}:{} into a new file; range SHA-256 {}",
-        start, length, hex_digest(range_digest)
+        start,
+        length,
+        hex_digest(range_digest)
     );
     Ok(())
 }
@@ -411,18 +421,47 @@ mod tests {
 
     #[test]
     fn range_parser_enforces_unsigned_bounds_and_explicit_syntax() {
-        for bad in ["", "1", "-1:2", "1:-2", "1:2:3", "1:", ":2", "1.0:2", "18446744073709551615:1"] {
+        for bad in [
+            "",
+            "1",
+            "-1:2",
+            "1:-2",
+            "1:2:3",
+            "1:",
+            ":2",
+            "1.0:2",
+            "18446744073709551615:1",
+        ] {
             assert!(parse_logical_range(bad).is_err(), "accepted {bad:?}");
             assert!(crate::Cli::try_parse_from([
-                "applesauce", "archive", "extract", "src.ascf", "slice", "--range", bad
-            ]).is_err());
+                "applesauce",
+                "archive",
+                "extract",
+                "src.ascf",
+                "slice",
+                "--range",
+                bad
+            ])
+            .is_err());
         }
         assert_eq!(parse_logical_range("0:0").unwrap(), (0, 0));
-        assert_eq!(parse_logical_range("65535:131073").unwrap(), (65535, 131073));
-        assert!(crate::Cli::try_parse_from(["applesauce", "archive", "info", "source.ascf"]).is_ok());
+        assert_eq!(
+            parse_logical_range("65535:131073").unwrap(),
+            (65535, 131073)
+        );
+        assert!(
+            crate::Cli::try_parse_from(["applesauce", "archive", "info", "source.ascf"]).is_ok()
+        );
         assert!(crate::Cli::try_parse_from([
-            "applesauce", "archive", "extract", "source.ascf", "slice", "--range", "65535:131073"
-        ]).is_ok());
+            "applesauce",
+            "archive",
+            "extract",
+            "source.ascf",
+            "slice",
+            "--range",
+            "65535:131073"
+        ])
+        .is_ok());
     }
 
     #[test]
