@@ -15,6 +15,10 @@ struct ASCFResourceLoadGate {
         return ticket
     }
 
+    // A queued verification worker can skip decoding when unload has already
+    // invalidated its ticket. The caller holds the lifecycle lock.
+    func isPending(_ ticket: UUID) -> Bool { !loaded && pending == ticket }
+
     // Only the operation that reserved this generation can publish.
     mutating func publish(_ ticket: UUID) -> Bool {
         guard !loaded, pending == ticket else { return false }
