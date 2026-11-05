@@ -13,6 +13,11 @@ struct ASCFExtension: UnaryFileSystemExtension {
 }
 
 final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
+    // Full archive SHA-256 verification can be lengthy. Keep it off FSKit's
+    // callback thread and serialize probes/loads to bound scratch memory.
+    private static let verificationQueue = DispatchQueue(
+        label: "org.chriscoveries.applesauce.ascf.verification", qos: .userInitiated)
+
     // FSKit may issue overlapping load/unload callbacks. All lifecycle
     // state, including the in-flight verification ticket, is lock-protected.
     private let lifecycleLock = NSLock()
@@ -102,34 +107,36 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             }
             return
         }
-        defer { url.stopAccessingSecurityScopedResource() }
-        do {
-            // Do not advertise a malformed or corrupted archive as mountable.
-            // The mount path independently verifies again before publication.
-            let (handle, info, _) = try Self.openArchive(url, verify: true)
-            defer { ascf_close(handle) }
-            replyHandler(.usable(name: "Applesauce ASCF", containerID: FSContainerIdentifier(uuid: Self.identifier(for: info, archiveURL: url))), nil)
-        } catch {
-            let nsError = error as NSError
-            if nsError.domain == FSKitErrorDomain
-                && nsError.code == FSError.Code.resourceDamaged.rawValue {
-                // A recognized ASCF payload failed codec or SHA-256 verification.
-                // Preserve the typed failure for the host's negative control.
-                replyHandler(nil, error)
-            } else if url.pathExtension.lowercased() == "ascf"
-                && nsError.domain == NSPOSIXErrorDomain
-                && [Int(EACCES), Int(EPERM), Int(ESTALE), Int(EMFILE),
-                    Int(ENFILE), Int(ENOMEM)].contains(nsError.code) {
-                // Probe can run with a security-scoped resource that was
-                // revoked, moved or blocked by a sandbox/signing restriction.
-                // Report those operational failures to FSClient. Masking them
-                // as notRecognized makes a correctly selected .ascf archive
-                // indistinguishable from an unsupported file.
-                replyHandler(nil, error)
-            } else {
-                // Other formats and unparseable ASCF headers remain ordinary
-                // probe misses, avoiding claimed support for random files.
-                replyHandler(.notRecognized, nil)
+        Self.verificationQueue.async {
+            do {
+                defer { url.stopAccessingSecurityScopedResource() }
+                // Do not advertise a malformed or corrupted archive as mountable.
+                // The mount path independently verifies again before publication.
+                let (handle, info, _) = try Self.openArchive(url, verify: true)
+                defer { ascf_close(handle) }
+                replyHandler(.usable(name: "Applesauce ASCF", containerID: FSContainerIdentifier(uuid: Self.identifier(for: info, archiveURL: url))), nil)
+            } catch {
+                let nsError = error as NSError
+                if nsError.domain == FSKitErrorDomain
+                    && nsError.code == FSError.Code.resourceDamaged.rawValue {
+                    // A recognized ASCF payload failed codec or SHA-256 verification.
+                    // Preserve the typed failure for the host's negative control.
+                    replyHandler(nil, error)
+                } else if url.pathExtension.lowercased() == "ascf"
+                    && nsError.domain == NSPOSIXErrorDomain
+                    && [Int(EACCES), Int(EPERM), Int(ESTALE), Int(EMFILE),
+                        Int(ENFILE), Int(ENOMEM)].contains(nsError.code) {
+                    // Probe can run with a security-scoped resource that was
+                    // revoked, moved or blocked by a sandbox/signing restriction.
+                    // Report those operational failures to FSClient. Masking them
+                    // as notRecognized makes a correctly selected .ascf archive
+                    // indistinguishable from an unsupported file.
+                    replyHandler(nil, error)
+                } else {
+                    // Other formats and unparseable ASCF headers remain ordinary
+                    // probe misses, avoiding claimed support for random files.
+                    replyHandler(.notRecognized, nil)
+                }
             }
         }
     }
@@ -163,38 +170,40 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             replyHandler(nil, Self.error(EACCES))
             return
         }
-        do {
-            // The reservation remains held across full archive verification.
-            // A second load cannot replace the descriptor, and an unload
-            // invalidates the reservation even while verification is running.
-            let (handle, info, identity) = try Self.openArchive(url, verify: true)
-            let mounted = ASCFVolume(
-                handle: handle, info: info, archiveName: url.deletingPathExtension().lastPathComponent,
-                identifier: Self.identifier(for: info, archiveURL: url),
-                selectedArchiveURL: url, sourceIdentity: identity
-            )
-            lifecycleLock.lock()
-            let published = loadGate.publish(ticket)
-            if published {
-                volume = mounted
-                scopedURL = url
-                containerStatus = .ready
-            }
-            lifecycleLock.unlock()
-            guard published else {
-                // The local mounted object owns and closes the duplicate FD.
-                // Never publish a volume after unload has cancelled its load.
+        Self.verificationQueue.async { [self] in
+            do {
+                // The reservation remains held across full archive verification.
+                // A second load cannot replace the descriptor, and an unload
+                // invalidates the reservation even while verification is running.
+                let (handle, info, identity) = try Self.openArchive(url, verify: true)
+                let mounted = ASCFVolume(
+                    handle: handle, info: info, archiveName: url.deletingPathExtension().lastPathComponent,
+                    identifier: Self.identifier(for: info, archiveURL: url),
+                    selectedArchiveURL: url, sourceIdentity: identity
+                )
+                lifecycleLock.lock()
+                let published = loadGate.publish(ticket)
+                if published {
+                    volume = mounted
+                    scopedURL = url
+                    containerStatus = .ready
+                }
+                lifecycleLock.unlock()
+                guard published else {
+                    // The local mounted object owns and closes the duplicate FD.
+                    // Never publish a volume after unload has cancelled its load.
+                    url.stopAccessingSecurityScopedResource()
+                    replyHandler(nil, Self.error(ENODEV))
+                    return
+                }
+                replyHandler(mounted, nil)
+            } catch {
+                lifecycleLock.lock()
+                loadGate.cancel(ticket)
+                lifecycleLock.unlock()
                 url.stopAccessingSecurityScopedResource()
-                replyHandler(nil, Self.error(ENODEV))
-                return
+                replyHandler(nil, error)
             }
-            replyHandler(mounted, nil)
-        } catch {
-            lifecycleLock.lock()
-            loadGate.cancel(ticket)
-            lifecycleLock.unlock()
-            url.stopAccessingSecurityScopedResource()
-            replyHandler(nil, error)
         }
     }
 
