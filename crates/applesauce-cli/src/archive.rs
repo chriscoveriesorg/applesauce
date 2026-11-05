@@ -319,6 +319,57 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Restore a slice without decoding unrelated chunks. The header/index
+/// is validated on open, and each touched chunk gets its own SHA-256 check.
+/// Publication is atomic and the output is verified through a second read.
+/// This does not claim whole-file verification of untouched logical chunks.
+fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::Result<()> {
+    unused_output(output)?;
+    let mut source = open_regular(archive_path)?;
+    let before = source.metadata()?;
+    let mut reader = ArchiveReader::open(&mut source)?;
+    let (start, length) = range;
+    let end = start.checked_add(length).ok_or_else(|| invalid("logical range overflows u64"))?;
+    if start > reader.logical_size() || end > reader.logical_size() {
+        return Err(invalid("logical range exceeds archive size"));
+    }
+    let mut temporary = staging(output)?;
+    let mut digest = Sha256::new();
+    let mut offset = start;
+    while offset < end {
+        let count = (end - offset).min(MAX_READ_BYTES as u64) as usize;
+        let bytes = reader.read_range(offset, count)?;
+        digest.update(&bytes);
+        temporary.write_all(&bytes)?;
+        offset += bytes.len() as u64;
+    }
+    drop(reader);
+    let after = source.metadata()?;
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive source changed during range extraction",
+        ));
+    }
+    temporary.as_file_mut().flush()?;
+    temporary.as_file().sync_all()?;
+    temporary.as_file_mut().rewind()?;
+    let output_digest = hash_reader(temporary.as_file_mut())?;
+    let range_digest: [u8; 32] = digest.finalize().into();
+    if output_digest != range_digest {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged logical range failed read-back verification",
+        ));
+    }
+    temporary.persist_noclobber(output).map_err(|error| error.error)?;
+    println!(
+        "Restored verified logical range {}:{} into a new file; range SHA-256 {}",
+        start, length, hex_digest(range_digest)
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
