@@ -169,12 +169,18 @@ def digest(path, nofollow=False, include_identity=False):
         with os.fdopen(fd, "rb", buffering=0) as source:
             fd = -1
             while True:
-                data = source.read(READ_BYTES)
+                try:
+                    data = source.read(READ_BYTES)
+                except OSError as error:
+                    raise MountCheckError(f"cannot read digest input: {error}") from error
                 if not data:
                     break
                 total += len(data)
                 checksum.update(data)
-            after = os.fstat(source.fileno())
+            try:
+                after = os.fstat(source.fileno())
+            except OSError as error:
+                raise MountCheckError(f"cannot re-inspect digest descriptor: {error}") from error
             require((identity.st_dev, identity.st_ino, identity.st_size,
                      identity.st_mtime_ns, identity.st_ctime_ns) ==
                     (after.st_dev, after.st_ino, after.st_size,
@@ -442,6 +448,46 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_digest_read_and_final_fstat_fail_closed(self):
+        # A read error or late descriptor inspection error must never pass
+        # acceptance, even if the initial fstat succeeded.
+        real_fdopen = os.fdopen
+        class ReadFailure:
+            def __init__(self, stream):
+                self.stream = stream
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+            def read(self, size):
+                raise OSError(errno.EIO, "synthetic digest read failure")
+            def fileno(self):
+                return self.stream.fileno()
+
+        def failing_fdopen(*args, **kwargs):
+            return ReadFailure(real_fdopen(*args, **kwargs))
+
+        with mock.patch("os.fdopen", side_effect=failing_fdopen):
+            with self.assertRaisesRegex(MountCheckError, "cannot read digest input"):
+                digest(self.original)
+
+        real_fstat = os.fstat
+        calls = 0
+        def failing_final_fstat(fd):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError(errno.EIO, "synthetic late fstat failure")
+            return real_fstat(fd)
+
+        with mock.patch("os.fstat", side_effect=failing_final_fstat):
+            with self.assertRaisesRegex(MountCheckError, "cannot re-inspect digest descriptor"):
+                digest(self.original)
+        self.assertEqual(calls, 2)
+        self.assertEqual(digest(self.original)[1],
+                         hashlib.sha256(self.original.read_bytes()).hexdigest())
 
     def test_digest_open_and_fstat_fail_closed(self):
         # Synthetic failures must be controlled refusals, not raw OS errors.
