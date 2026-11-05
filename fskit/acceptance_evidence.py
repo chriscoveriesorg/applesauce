@@ -163,6 +163,49 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     }
 
 
+def validate_both(bundle, raven_paths, mesh_paths):
+    """Require two complete codec-specific lifecycles on the same macOS build.
+
+    This is an operator-evidence consistency gate. It cannot attest that the
+    physical Mac was signed, provisioned or mounted: review remains mandatory.
+    """
+    require(len(raven_paths) == 5 and len(mesh_paths) == 5,
+            "five evidence paths per codec are required")
+    results = {
+        "lzraven": validate(bundle, "lzraven", *raven_paths),
+        "lzmesh": validate(bundle, "lzmesh", *mesh_paths),
+    }
+    raven, mesh = results["lzraven"], results["lzmesh"]
+    require(raven["sha256"] == mesh["sha256"]
+            and raven["logical_bytes"] == mesh["logical_bytes"],
+            "Raven and Mesh did not restore the same synthetic logical bytes")
+    require(raven["macos_build"] == mesh["macos_build"],
+            "Raven and Mesh evidence comes from different macOS builds")
+    require(raven["source_commit"] == mesh["source_commit"],
+            "Raven and Mesh evidence refers to different source commits")
+
+    # The operator must provide four independent mounted-readback events.
+    # A duplicated verification ID shared across codecs invalidates the
+    # combined claim even when individual readback chains each appear valid.
+    identifiers = [
+        load_json(path).get("verification_id")
+        for path in (raven_paths[0], raven_paths[2],
+                     mesh_paths[0], mesh_paths[2])
+    ]
+    require(all(isinstance(value, str) and value for value in identifiers)
+            and len(set(identifiers)) == 4,
+            "four independent codec-specific mounted-readback IDs required")
+    return {
+        "result": "pass",
+        "scope": "both-codec operator-evidence consistency; independent signed-mount review required",
+        "source_commit": raven["source_commit"],
+        "macos_build": raven["macos_build"],
+        "logical_bytes": raven["logical_bytes"],
+        "sha256": raven["sha256"],
+        "codecs": results,
+    }
+
+
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -215,6 +258,72 @@ class EvidenceTests(unittest.TestCase):
         }))
     def check(self):
         return validate(self.base, "lzmesh", *self.items)
+    def other_codec(self):
+        # Reproduce the packaged same-cleartext/different-codec contract.
+        codec = "lzraven"
+        (self.base / f"source.{codec}.jsonl").write_bytes(
+            (self.base / "source.lzmesh.jsonl").read_bytes())
+        valid = b"ASCF0001-raven-clean"
+        damaged = b"ASCF0001-raven-damaged"
+        (self.base / f"source.{codec}.ascf").write_bytes(valid)
+        (self.base / f"source.{codec}.corrupt.ascf").write_bytes(damaged)
+        paths = [self.base / f"raven-{name}" for name in (
+            "first.json", "off.json", "remount.json",
+            "refusal.txt", "replacement.json")]
+        for index in (0, 2):
+            report = load_json(self.items[index])
+            report["restored_file"] = "source.lzraven"
+            report["verification_id"] = f"raven-{index}"
+            paths[index].write_text(json.dumps(report))
+        off = load_json(self.items[1])
+        off["previous_verification_id"] = "raven-0"
+        paths[1].write_text(json.dumps(off))
+        paths[3].write_text(
+            "CORRUPT_REFUSAL_CONFIRMED: source.lzraven.corrupt.ascf: "
+            "signed FSKit probe rejected the recognized ASCF payload")
+        replacement = load_json(self.items[4])
+        replacement["codec"] = codec
+        replacement["restored_file"] = "source.lzraven"
+        replacement["source_archive_sha256"] = hashlib.sha256(valid).hexdigest()
+        replacement["replacement_sha256"] = hashlib.sha256(damaged).hexdigest()
+        paths[4].write_text(json.dumps(replacement))
+        return paths
+
+    def test_both_codec_lifecycles_pass_together(self):
+        other = self.other_codec()
+        result = validate_both(self.base, other, self.items)
+        self.assertEqual(set(result["codecs"]), {"lzraven", "lzmesh"})
+        self.assertEqual(result["result"], "pass")
+
+    def test_both_codec_requires_four_distinct_readbacks(self):
+        other = self.other_codec()
+        first = load_json(other[0])
+        first["verification_id"] = "first"
+        other[0].write_text(json.dumps(first))
+        off = load_json(other[1])
+        off["previous_verification_id"] = "first"
+        other[1].write_text(json.dumps(off))
+        with self.assertRaisesRegex(EvidenceError, "four independent"):
+            validate_both(self.base, other, self.items)
+
+    def test_both_codec_rejects_mixed_macos_builds(self):
+        other = self.other_codec()
+        for index in (0, 2):
+            report = load_json(other[index])
+            report["macos_build"] = "another-host-build"
+            other[index].write_text(json.dumps(report))
+        replacement = load_json(other[4])
+        replacement["macos_build"] = "another-host-build"
+        other[4].write_text(json.dumps(replacement))
+        with self.assertRaisesRegex(EvidenceError, "different macOS builds"):
+            validate_both(self.base, other, self.items)
+
+    def test_both_codec_rejects_missing_one_codec(self):
+        other = self.other_codec()
+        other[4].unlink()
+        with self.assertRaises(OSError):
+            validate_both(self.base, other, self.items)
+
     def test_valid_chain(self):
         self.assertEqual(self.check()["result"], "pass")
     def test_replaced_source_wrong_digest(self):
@@ -369,6 +478,11 @@ class EvidenceTests(unittest.TestCase):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--both", action="store_true",
+                        help="require complete independent Raven and Mesh lifecycles")
+    for codec in ("raven", "mesh"):
+        for phase in ("first", "unmounted", "remounted", "refusal", "replacement"):
+            parser.add_argument("--" + codec + "-" + phase)
     parser.add_argument("--bundle")
     parser.add_argument("--codec", choices=("lzraven", "lzmesh"))
     parser.add_argument("--first")
@@ -380,6 +494,23 @@ def main():
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(EvidenceTests)
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+    if args.both:
+        if not args.bundle:
+            parser.error("--both requires --bundle")
+        evidence = []
+        for codec in ("raven", "mesh"):
+            paths = [getattr(args, codec + "_" + phase) for phase in (
+                "first", "unmounted", "remounted", "refusal", "replacement")]
+            if not all(paths):
+                parser.error("--both requires five evidence paths for each codec")
+            evidence.append(paths)
+        try:
+            report = validate_both(args.bundle, *evidence)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print("acceptance evidence failed: " + str(error), file=sys.stderr)
+            return 1
+        print(json.dumps(report, sort_keys=True, indent=2))
+        return 0
     if not all((args.bundle, args.codec, args.first, args.unmounted,
                 args.remounted, args.refusal, args.replacement)):
         parser.error("bundle, codec, first, unmounted, remounted, refusal and replacement are required")
