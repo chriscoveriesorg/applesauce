@@ -5,12 +5,14 @@ This only inspects the checkout. Generated project and build products must be
 ignored by Git; all other untracked source files refuse provenance.
 """
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 class SourceProvenanceError(ValueError):
@@ -91,6 +93,21 @@ class SourceProvenanceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        # Fixture repos must not inherit the developer's Git config: a global
+        # excludes file can hide every fixture file (seen on a Mac whose
+        # ~/.gitignore_global ignores new files), and signing or hooks can
+        # block the fixture commit.
+        env = mock.patch.dict(os.environ, {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "core.excludesFile",
+            "GIT_CONFIG_VALUE_0": os.devnull,
+            "GIT_CONFIG_KEY_1": "commit.gpgSign",
+            "GIT_CONFIG_VALUE_1": "false",
+        })
+        env.start()
+        self.addCleanup(env.stop)
         self.gitcmd("init", "-q")
         (self.root / ".gitignore").write_text("/target/\n.DS_Store\nfskit/ApplesauceASCF.xcodeproj/\n")
         (self.root / "source.swift").write_text("original\n")
