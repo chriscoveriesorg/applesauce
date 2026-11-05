@@ -138,7 +138,7 @@ jobs:
                   (bundle / "SHA256SUMS").write_text(
                       "".join(
                           hashlib.sha256((bundle / name).read_bytes()).hexdigest()
-                          + "  " + name + "\\n"
+                          + "  " + name + "\n"
                           for name in members
                       )
                   )
@@ -156,7 +156,7 @@ jobs:
               # checkout. Hash verification alone should pass; the invoked
               # helper must refuse to certify mismatched verification code.
               bundled_script = bundle / "fskit/signed_acceptance.sh"
-              bundled_script.write_bytes(bundled_script.read_bytes() + b"\\n# drift\\n")
+              bundled_script.write_bytes(bundled_script.read_bytes() + b"\n# drift\n")
               manifest()
               assert command("manifest-check").returncode == 0
               changed = command("bundle-code-check")
