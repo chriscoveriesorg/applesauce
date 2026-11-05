@@ -116,13 +116,29 @@ def validate_stage(directory):
     return metadata, good, bad
 
 
-def probe_read(path):
-    # Require a NEW open after source replacement. A cached successful open
-    # or readable cached page is a refusal failure, even if bytes are valid.
+def replacement_offsets(logical_size):
+    """Probe fresh opens across independent ASCF chunk and VFS boundaries.
+
+    Every listed offset must fail after replacement, including EOF. A single
+    failure at offset zero cannot certify the remaining mapped file.
+    """
+    require(type(logical_size) is int and logical_size >= 0,
+            "replacement check needs a nonnegative logical size")
+    positions = {0, logical_size, logical_size + 1}
+    for boundary in (1, 4096, 65536, 8 * 1024 * 1024,
+                     logical_size // 2, logical_size):
+        for delta in (-1, 0, 1):
+            positions.add(min(logical_size + 1, max(0, boundary + delta)))
+    return sorted(positions)
+
+
+def probe_read(path, offset):
+    # Reopen for EVERY sampled offset. A cached successful open or readable
+    # region after archive replacement is an acceptance failure.
     flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
     fd = os.open(path, flags)
     try:
-        return os.pread(fd, 1, 0)
+        return os.pread(fd, 1, offset)
     finally:
         os.close(fd)
 
@@ -154,28 +170,37 @@ def check(directory, mount, original, verifier=None, read_probe=probe_read):
             "archive pathname did not change inode after atomic replacement")
     require(sha256(good) == metadata["replacement_sha256"],
             "staged replacement content mismatch")
-    try:
-        data = read_probe(expected)
-    except OSError as error:
-        require(error.errno in EXPECTED_ERRORS,
-                f"mounted read failed for an unrelated reason: errno {error.errno}")
-        outcome = {"result": "pass", "codec": metadata["codec"],
-                   "stage": str(good.parent), "archive": str(good),
-                   "replacement_sha256": metadata["replacement_sha256"],
-                   "source_archive_sha256": metadata["good_sha256"],
-                   "original_sha256": metadata["original_sha256"],
-                   "before_replacement_sha256": report["sha256"],
-                   "filesystem_type": report["filesystem_type"],
-                   "kernel_readonly": report["kernel_readonly"],
-                   "restored_file": report["restored_file"],
-                   "macos_build": report["macos_build"],
-                   "mount": str(mount), "denied_errno": error.errno,
-                   "verified_at_utc": datetime.datetime.now(
-                       datetime.timezone.utc).isoformat(),
-                   "scope": "operator-observed replaced-source refusal; independent signed-host review required"}
-        print(json.dumps(outcome, sort_keys=True, indent=2))
-        return outcome
-    raise ValueError(f"FSKit served a newly opened replaced-source file ({len(data)} bytes)")
+    offsets = replacement_offsets(Path(original).stat().st_size)
+    denied_errnos = []
+    for offset in offsets:
+        try:
+            data = read_probe(expected, offset)
+        except OSError as error:
+            require(error.errno in EXPECTED_ERRORS,
+                    f"mounted read at byte {offset} failed for an unrelated reason: errno {error.errno}")
+            denied_errnos.append(error.errno)
+        else:
+            raise ValueError(
+                f"FSKit served replaced-source bytes at offset {offset} ({len(data)} bytes)"
+            )
+    outcome = {"result": "pass", "codec": metadata["codec"],
+               "stage": str(good.parent), "archive": str(good),
+               "replacement_sha256": metadata["replacement_sha256"],
+               "source_archive_sha256": metadata["good_sha256"],
+               "original_sha256": metadata["original_sha256"],
+               "before_replacement_sha256": report["sha256"],
+               "filesystem_type": report["filesystem_type"],
+               "kernel_readonly": report["kernel_readonly"],
+               "restored_file": report["restored_file"],
+               "macos_build": report["macos_build"],
+               "mount": str(mount), "denied_errno": denied_errnos[0],
+               "denied_offsets": offsets, "denied_errnos": denied_errnos,
+               "verified_at_utc": datetime.datetime.now(
+                   datetime.timezone.utc).isoformat(),
+               "scope": "operator-observed replaced-source refusal at fresh VFS opens; independent signed-host review required"}
+    print(json.dumps(outcome, sort_keys=True, indent=2))
+    return outcome
+
 
 
 class ReplacementTests(unittest.TestCase):
@@ -231,12 +256,14 @@ class ReplacementTests(unittest.TestCase):
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
                     "restored_file": "source.lzmesh", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
-        def refused(_path):
+        def refused(_path, _offset):
             raise OSError(errno.ESTALE, "source identity changed")
         with mock.patch("builtins.print"):
             result = check(self.stage_dir, "/Volumes/ASCF",
                            self.bundle / "source.lzmesh.jsonl", verified, refused)
         self.assertEqual(result["denied_errno"], errno.ESTALE)
+        self.assertEqual(result["denied_offsets"], replacement_offsets(len(b"synthetic cleartext")))
+        self.assertEqual(result["denied_errnos"], [errno.ESTALE] * len(result["denied_offsets"]))
         self.assertEqual(result["source_archive_sha256"], meta["good_sha256"])
         self.assertEqual(result["before_replacement_sha256"], meta["original_sha256"])
         self.assertFalse(bad.exists())
@@ -249,14 +276,40 @@ class ReplacementTests(unittest.TestCase):
                     "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
         with self.assertRaisesRegex(ValueError, "served a newly opened"):
             check(self.stage_dir, "/Volumes/ASCF",
-                  self.bundle / "source.lzraven.jsonl", verified, lambda _: b"x")
+                  self.bundle / "source.lzraven.jsonl", verified, lambda _path, _offset: b"x")
+
+    def test_replacement_offsets_cover_independent_chunk_boundaries(self):
+        size = 9 * 1024 * 1024 + 17
+        offsets = replacement_offsets(size)
+        self.assertEqual(offsets, sorted(set(offsets)))
+        for location in (0, 4095, 4096, 4097, 65535, 65536, 65537,
+                         8 * 1024 * 1024 - 1, 8 * 1024 * 1024,
+                         8 * 1024 * 1024 + 1, size - 1, size, size + 1):
+            self.assertIn(location, offsets)
+
+    def test_later_cached_read_refuses_acceptance(self):
+        meta, _, _ = self.prepare()
+        def verified(*_args, **_kwargs):
+            return {"result": "pass", "filesystem_type": "ascf",
+                    "kernel_readonly": True, "restored_file": "source.lzmesh",
+                    "sha256": meta["original_sha256"], "macos_build": "synthetic"}
+        visited = []
+        def probe(_path, offset):
+            visited.append(offset)
+            if offset == 1:
+                return b"cached"
+            raise OSError(errno.ESTALE, "source identity changed")
+        with self.assertRaisesRegex(ValueError, "offset 1"):
+            check(self.stage_dir, "/Volumes/ASCF",
+                  self.bundle / "source.lzmesh.jsonl", verified, probe)
+        self.assertEqual(visited[:2], [0, 1])
 
     def test_unrelated_errno_is_rejected(self):
         meta, _, _ = self.prepare("lzraven")
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True,
                     "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
-        def denied(_):
+        def denied(_path, _offset):
             raise OSError(errno.EACCES, "permissions")
         with self.assertRaisesRegex(ValueError, "unrelated reason"):
             check(self.stage_dir, "/Volumes/ASCF",
