@@ -155,6 +155,10 @@ def digest(path, nofollow=False, include_identity=False):
     try:
         fd = os.open(path, flags)
     except OSError as error:
+        if error.errno == errno.ELOOP and nofollow:
+            # Keep the no-follow security refusal recognizable to both
+            # operators and tests. Linux/macOS use different ELOOP numbers.
+            raise MountCheckError("digest input symlink refused by O_NOFOLLOW") from error
         raise MountCheckError(f"cannot open digest input: {error}") from error
     try:
         try:
@@ -1080,10 +1084,9 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             return real_open(path, flags, *args, **kwargs)
 
         with mock.patch("os.open", side_effect=swap_before_open):
-            with self.assertRaises(OSError) as raised:
+            with self.assertRaisesRegex(MountCheckError, "symlink refused by O_NOFOLLOW"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped, "symlink replacement must be exercised")
-        self.assertEqual(raised.exception.errno, errno.ELOOP)
 
     def test_mounted_regular_file_swap_rejected_after_digest(self):
         # A different regular file with matching sampled bytes must not
@@ -1146,9 +1149,8 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         target = self.original.with_suffix(".saved")
         self.original.replace(target)
         self.original.symlink_to(target)
-        with self.assertRaises(OSError) as raised:
+        with self.assertRaisesRegex(MountCheckError, "symlink refused by O_NOFOLLOW"):
             verify_mount(self.mount, self.original, require_real_mount=False)
-        self.assertEqual(raised.exception.errno, errno.ELOOP)
 
     def test_original_symlink_swap_rejected_before_digest(self):
         # A reference pathname replaced after resolve() must never be followed
@@ -1169,10 +1171,9 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             return real_open(path, flags, *args, **kwargs)
 
         with mock.patch("os.open", side_effect=swap_reference):
-            with self.assertRaises(OSError) as raised:
+            with self.assertRaisesRegex(MountCheckError, "symlink refused by O_NOFOLLOW"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped, "reference symlink swap must be exercised")
-        self.assertEqual(raised.exception.errno, errno.ELOOP)
 
     def test_original_regular_file_swap_rejected_after_digest(self):
         # The reference pread must use the same file whose digest was checked.
