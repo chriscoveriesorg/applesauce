@@ -197,6 +197,12 @@ records the clean source HEAD in `source-provenance.txt`. Packaging refuses
 tracked source modifications to keep that attribution reproducible. Run
 `bash fskit/signed_acceptance.sh manifest-check /path/to/bundle` before
 installing to verify every mandatory member and its SHA-256 independently.
+Run `bash fskit/signed_acceptance.sh bundle-code-check /path/to/bundle`
+from the selected package to also require that the running operator script is
+identical to the manifest-covered script. Every signed-bundle action now runs
+its packaged Python verifier, including the signing-profile check. A checkout
+whose acceptance script differs from the package stops before mount or
+replacement operations; use the package's own `fskit/signed_acceptance.sh`.
 a copied folder can be verified without Rust or the original repository checkout. Test the two valid
 files for mounted readback, normal unmount and remount; then attempt to mount
 both damaged archives and retain macOS rejection evidence. CLI verification proves that
@@ -285,7 +291,10 @@ bash fskit/signed_acceptance.sh replacement-check \
 
 The first command checks the signed bundle and copies its intact archive and
 independently damaged replacement into a private mode-0700 temporary directory.
-The second authenticates the **real mounted ASCF VFS** and whole logical
+Its stage metadata records the canonical original signed bundle path. Keep
+that bundle in place until replacement-check finishes: the check reauthenticates
+the bundle manifest, selected helper, signed host and original fixture hashes
+before changing the staged copy. The second authenticates the **real mounted ASCF VFS** and whole logical
 SHA-256 before atomically replacing only the staged copy. It requires a fresh
 open/read of the mounted file to fail with ESTALE, EIO or ENODEV. Readable
 cached data or an unrelated access error fails the test. Save its JSON,
