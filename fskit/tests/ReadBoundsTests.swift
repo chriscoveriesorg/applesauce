@@ -23,12 +23,18 @@ struct ASCFReadBoundsTests {
         expect(Int64.max, Int.max, Int.max, UInt64.max, 8 * 1024 * 1024)
         expect(Int64.max, 4, 4, UInt64(Int64.max), 0)
         expect(Int64.max - 1, 4, 4, UInt64(Int64.max), 1)
-        precondition(!ASCFReadBounds.isValidReadResult(0, capacity: 1))
-        precondition(!ASCFReadBounds.isValidReadResult(-1, capacity: 1))
-        precondition(!ASCFReadBounds.isValidReadResult(2, capacity: 1))
-        precondition(!ASCFReadBounds.isValidReadResult(0, capacity: 0))
-        precondition(ASCFReadBounds.isValidReadResult(1, capacity: 1))
-        precondition(ASCFReadBounds.isValidReadResult(1, capacity: 8 * 1024 * 1024))
-        print("ASCF FSKit read bounds: negative, EOF, zero, huge and partial reads passed")
+        // ascf_pread guarantees an exact-length read when successful, since
+        // ASCFReadBounds.count already clips every request at the true EOF.
+        // Positive short reads must not silently truncate Finder readback.
+        for expected in [1, 2, 4096, 8 * 1024 * 1024] {
+            precondition(ASCFReadBounds.isValidReadResult(expected, expected: expected))
+            for actual in [-1, 0, expected - 1, expected + 1, Int.max] where actual != expected {
+                precondition(!ASCFReadBounds.isValidReadResult(actual, expected: expected))
+            }
+        }
+        precondition(!ASCFReadBounds.isValidReadResult(0, expected: 0))
+        precondition(!ASCFReadBounds.isValidReadResult(1, expected: 0))
+        precondition(!ASCFReadBounds.isValidReadResult(1, expected: -1))
+        print("ASCF FSKit read bounds: negative, EOF, zero, huge, and exact bridge reads passed")
     }
 }

@@ -15,9 +15,11 @@ enum ASCFReadBounds {
         return Int(min(UInt64(bounded), logicalSize - start))
     }
 
-    // For a positive in-range request the bridge must make progress. It may
-    // report fewer bytes than requested but must never exceed buffer bounds.
-    static func isValidReadResult(_ actual: Int, capacity: Int) -> Bool {
-        capacity > 0 && actual > 0 && actual <= capacity
+    // The bridge's ascf_pread contract is exact on success. Unlike a generic
+    // POSIX read, it must return every requested byte after clipping at the
+    // logical EOF. A positive short read indicates a broken bridge contract
+    // and must fail closed rather than silently truncate Finder copy-out.
+    static func isValidReadResult(_ actual: Int, expected: Int) -> Bool {
+        expected > 0 && actual == expected
     }
 }

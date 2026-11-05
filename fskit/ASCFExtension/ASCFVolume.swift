@@ -242,10 +242,10 @@ extension ASCFVolume: FSVolume.ReadWriteOperations {
                        count, &actual)
         }
         guard status == 0 else { throw failure(status) }
-        // A successful zero-byte read before logical EOF can cause Finder or
-        // copy clients to silently truncate data. Reject it as a bridge bug.
-        // Short, positive reads remain valid FSKit behavior.
-        guard ASCFReadBounds.isValidReadResult(actual, capacity: count) else {
+        // The bridge promises an exact count on success. Since count already
+        // clips to logical EOF, any short positive read can silently truncate
+        // a Finder copy and must be surfaced as a broken bridge contract.
+        guard ASCFReadBounds.isValidReadResult(actual, expected: count) else {
             throw failure(EIO)
         }
         try requireOriginalArchive()
