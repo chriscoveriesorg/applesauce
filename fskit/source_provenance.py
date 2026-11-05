@@ -38,6 +38,16 @@ def source_commit(root, expected=None):
     if expected is not None and head != expected:
         raise SourceProvenanceError(
             f"source commit changed during signing: expected {expected}, found {head}")
+    # Git status deliberately omits tracked files marked assume-unchanged or
+    # skip-worktree, even when their on-disk bytes differ from HEAD. Neither
+    # index shortcut is safe when attesting a signed package's source tree.
+    # Use NUL records so unusual file names cannot hide a flagged entry.
+    indexed = git(root, "ls-files", "-v", "-z")
+    for record in indexed.split("\\0"):
+        if record and (len(record) < 3 or record[1] != " " or record[0] != "H"):
+            raise SourceProvenanceError(
+                "tracked source has an untrusted index flag (assume-unchanged, "
+                "skip-worktree or unmerged): " + repr(record[:160]))
     # --porcelain includes staged, unstaged, copied and untracked inputs.
     # Excluding ignored generated products is Git's responsibility.
     dirty = git(root, "status", "--porcelain=v1", "--untracked-files=all")
@@ -87,6 +97,30 @@ class SourceProvenanceTests(unittest.TestCase):
         self.gitcmd("add", "source.swift")
         with self.assertRaisesRegex(SourceProvenanceError, "changed"):
             source_commit(self.root)
+
+    def test_assume_unchanged_cannot_hide_modified_source(self):
+        self.gitcmd("update-index", "--assume-unchanged", "source.swift")
+        (self.root / "source.swift").write_text("untracked mutation\\n")
+        # Git status suppresses exactly this dangerous tracked-file change.
+        self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+        with self.assertRaisesRegex(SourceProvenanceError, "untrusted index flag"):
+            source_commit(self.root, self.original)
+
+    def test_skip_worktree_cannot_hide_modified_source(self):
+        self.gitcmd("update-index", "--skip-worktree", "source.swift")
+        (self.root / "source.swift").write_text("untracked mutation\\n")
+        self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+        with self.assertRaisesRegex(SourceProvenanceError, "untrusted index flag"):
+            source_commit(self.root, self.original)
+
+    def test_unusual_tracked_filename_is_not_misparsed(self):
+        name = "name with space and\\nnewline.swift"
+        (self.root / name).write_text("fixture")
+        self.gitcmd("add", name)
+        self.gitcmd("-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-qm", "unusual")
+        self.assertEqual(source_commit(self.root),
+                         self.gitcmd("rev-parse", "--verify", "HEAD"))
 
     def test_head_change_refused_even_when_tree_clean(self):
         self.gitcmd("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
