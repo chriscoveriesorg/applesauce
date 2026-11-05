@@ -45,8 +45,9 @@ bundle-readback: verify the portable bundle manifest, signed host, restored
 filename, full logical SHA-256, random reads, Finder copy/readback and FSKit mount identity.
 readback: checks signed host + extension provisioned capabilities and runs
 actual statfs, SHA-256, unaligned reads, EOF, Finder-copied byte comparison and denied write-open acceptance.
-unmounted: after normal host/Finder unmount, prove a previously verified
-ASCF mount is gone using its successful readback JSON as evidence.
+unmounted: after normal host/Finder unmount, independently inspect Darwin's
+complete kernel mount table. Refuse relocated/still-mounted ASCF volumes,
+reused mountpoints and untrusted first-readback evidence.
 acceptance-check: validate a complete two-mount and corruption-control evidence
 chain for one codec, with signed bundle and source hashes checked first.
 acceptance-all: require BOTH codec lifecycles, matching logical bytes and macOS
@@ -171,6 +172,7 @@ macos.txt
 NEXT-STEPS.txt
 fskit/signed_acceptance.sh
 fskit/verify_mount.py
+fskit/unmount_acceptance.py
 fskit/acceptance_evidence.py
 fskit/signing_profile.py
 fskit/replacement_acceptance.py
@@ -398,6 +400,7 @@ PY
     /bin/mkdir "$out/fskit"
     /bin/cp "$ROOT/fskit/signed_acceptance.sh" "$out/fskit/signed_acceptance.sh"
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
+    /bin/cp "$ROOT/fskit/unmount_acceptance.py" "$out/fskit/unmount_acceptance.py"
     /bin/cp "$ROOT/fskit/acceptance_evidence.py" "$out/fskit/acceptance_evidence.py"
     /bin/cp "$ROOT/fskit/signing_profile.py" "$out/fskit/signing_profile.py"
     /bin/cp "$ROOT/fskit/replacement_acceptance.py" "$out/fskit/replacement_acceptance.py"
@@ -405,6 +408,9 @@ PY
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
       > "$out/portable-verifier-tests.log" 2>&1 \
       || die "packaged verifier self-tests failed; see $out/portable-verifier-tests.log"
+    /usr/bin/python3 "$out/fskit/unmount_acceptance.py" --self-test \
+      > "$out/portable-unmount-tests.log" 2>&1 \
+      || die "packaged kernel unmount tests failed; see $out/portable-unmount-tests.log"
     /usr/bin/python3 "$out/fskit/acceptance_evidence.py" --self-test \
       > "$out/portable-evidence-tests.log" 2>&1 \
       || die "packaged evidence self-tests failed; see $out/portable-evidence-tests.log"
@@ -651,36 +657,16 @@ PY
     test "$#" -eq 3 || die "unmounted requires MOUNT_DIR READBACK_JSON"
     mac_only
     need python3
-    test -f "$3" || die "previous readback report missing: $3"
+    test -f "$3" && test ! -L "$3" || die "missing or symlinked previous readback: $3"
     out="$(mktemp -d /tmp/ascf-unmounted.XXXXXXXX)"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-after-unmount.txt"
-    /usr/bin/python3 - "$2" "$3" > "$out/unmounted.json" <<'PY'
-import datetime
-import json
-import os
-import sys
-
-mount = os.path.abspath(os.path.normpath(sys.argv[1]))
-if not mount.startswith("/Volumes/"):
-    sys.exit("unmounted: expected an FSKit mount path under /Volumes")
-with open(sys.argv[2], encoding="utf-8") as source:
-    previous = json.load(source)
-if previous.get("result") != "pass" or previous.get("filesystem_type") != "ascf":
-    sys.exit("unmounted: previous report did not pass the real ASCF mount gate")
-if not previous.get("verification_id") or previous.get("finder_copy_verified") is not True:
-    sys.exit("unmounted: previous readback lacks independent Finder copy and verification ID")
-if os.path.abspath(os.path.normpath(previous.get("mount", ""))) != mount:
-    sys.exit("unmounted: path differs from the verified ASCF mount")
-if os.path.ismount(mount):
-    sys.exit("unmounted: FSKit volume is still mounted")
-print(json.dumps({"result": "pass", "mount": mount,
-                  "previous_sha256": previous.get("sha256"),
-                  "previous_verification_id": previous["verification_id"],
-                  "verified_at_utc": datetime.datetime.now(
-                      datetime.timezone.utc).isoformat(),
-                  "unmounted": True}, sort_keys=True, indent=2))
-PY
+    # A missing original pathname does not establish a successful unmount:
+    # inspect Darwin's complete mount table and refuse relocated/other ASCF
+    # volumes, as well as a different filesystem using the same mountpoint.
+    /usr/bin/python3 "$ROOT/fskit/unmount_acceptance.py" \
+      --mount "$2" --first "$3" > "$out/unmounted.json" \
+      || die "kernel mount-table unmount witness failed; see $out"
     cat "$out/unmounted.json"
     printf 'Unmount evidence: %s\n' "$out"
     ;;
