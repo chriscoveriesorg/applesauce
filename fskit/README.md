@@ -28,6 +28,15 @@ identity at probe and load, and remounting the same archive preserves its
 identity. Distinct Raven and Mesh archives remain distinguishable even when
 they restore identical logical bytes. Unload resets the container readiness.
 
+The module's built `Info.plist` includes the FSKit activation, check, and
+format **option syntax metadata** from Apple's extension template. Those
+dictionaries configure FSKit command parsing, rather than enabling format
+operations; the module remains read-only and does not implement formatting.
+The CI build checks the *processed extension bundle* and the signed host
+preflight checks its actual activation syntax. This addresses a reported
+runtime probe failure when `FSActivateOptionSyntax.shortOptions` is missing.
+It does not establish successful signed mounting.
+
 Installing and mounting requires a valid developer signing identity,
 FSKit entitlement and explicit local extension enablement. The CI build
 type-checks the extension but does not install, approve, or mount it. End-to-end

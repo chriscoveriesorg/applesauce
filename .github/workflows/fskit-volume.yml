@@ -36,6 +36,15 @@ jobs:
       - name: Check executable owner handoff and signed evidence gates
         run: |
           bash -n fskit/signed_acceptance.sh
+          python3 - <<'PY'
+          import plistlib
+          with open("fskit/ASCFExtension/Info.plist", "rb") as stream:
+              attrs = plistlib.load(stream)["EXAppExtensionAttributes"]
+          assert attrs["FSActivateOptionSyntax"]["shortOptions"] == "g:m:o:u:"
+          assert attrs["FSCheckOptionSyntax"]["shortOptions"] == "nqy"
+          assert attrs["FSFormatOptionSyntax"]["shortOptions"] == "v"
+          assert attrs["FSShortName"] == "ascf"
+          PY
           python3 fskit/verify_mount.py --self-test
           python3 fskit/acceptance_evidence.py --self-test
           python3 fskit/signing_profile.py --self-test
@@ -228,5 +237,27 @@ jobs:
           test "$(value CFBundlePackageType "$ext")" = "XPC!"
           test "$(value EXAppExtensionAttributes.EXExtensionPointIdentifier "$ext")" = "com.apple.fskit.fsmodule"
           test "$(value EXAppExtensionAttributes.FSShortName "$ext")" = "ascf"
+          # An unsigned build can pass compilation while FSKit's runtime
+          # probe rejects incomplete option-syntax metadata.
+          python3 - "$ext" <<'PY'
+          import plistlib
+          import sys
+          with open(sys.argv[1], "rb") as stream:
+              attributes = plistlib.load(stream)["EXAppExtensionAttributes"]
+          expected = {
+              "FSActivateOptionSyntax": "g:m:o:u:",
+              "FSCheckOptionSyntax": "nqy",
+              "FSFormatOptionSyntax": "v",
+          }
+          for key, short_options in expected.items():
+              assert attributes.get(key, {}).get("shortOptions") == short_options, (
+                  f"built extension lacks valid {key}.shortOptions")
+          assert attributes.get("FSSupportsPathURLs") is True
+          assert attributes.get("FSRequiresSecurityScopedPathURLResources") is True
+          assert attributes.get("FSSupportsBlockResources") is False
+          assert attributes.get("FSSupportsGenericURLResources") is False
+          assert attributes.get("FSSupportsServerURLs") is False
+          print("Validated built FSKit module activation grammar and path-resource metadata")
+          PY
           test "$(value CFBundleShortVersionString "$host")" = "$(value CFBundleShortVersionString "$ext")"
           test "$(value CFBundleVersion "$host")" = "$(value CFBundleVersion "$ext")"

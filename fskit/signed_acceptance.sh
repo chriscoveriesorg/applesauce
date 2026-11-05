@@ -130,6 +130,19 @@ verify_host() {
     || die "unexpected signed host bundle ID: $host_id"
   test "$extension_id" = "$host_id.ascfextension" \
     || die "extension is not the ASCF module belonging to the signed host: $extension_id"
+  # macOS FSKit discovery can reject a correctly signed extension whose
+  # built Info.plist omits the activation-option grammar. Check the ACTUAL
+  # installed artifact, not just the source template.
+  local extension_plist actual_syntax
+  extension_plist="$extension/Contents/Info.plist"
+  actual_syntax="$(/usr/libexec/PlistBuddy -c \
+    'Print :EXAppExtensionAttributes:FSActivateOptionSyntax:shortOptions' "$extension_plist")" \
+    || die "signed FSKit extension missing FSActivateOptionSyntax.shortOptions"
+  test "$actual_syntax" = "g:m:o:u:" \
+    || die "signed FSKit extension has unexpected FSActivateOptionSyntax: $actual_syntax"
+  test "$(/usr/libexec/PlistBuddy -c \
+    'Print :EXAppExtensionAttributes:FSShortName' "$extension_plist")" = "ascf" \
+    || die "signed FSKit extension is not registered with short name ascf"
   host_team="$(/usr/bin/sed -n 's/^TeamIdentifier=//p' "$out/host.identity.txt" | /usr/bin/head -n 1)"
   extension_team="$(/usr/bin/sed -n 's/^TeamIdentifier=//p' "$out/extension.identity.txt" | /usr/bin/head -n 1)"
   test -n "$host_team" && test "$host_team" != "not set" \
