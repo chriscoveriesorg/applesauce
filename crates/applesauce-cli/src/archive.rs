@@ -35,10 +35,18 @@ enum Action {
         #[arg(long)]
         allow_expansion: bool,
     },
+    /// Inspect ASCF metadata without decoding or modifying files
+    Info { archive: PathBuf },
     /// Verify every chunk and the whole-file digest without changing files
     Verify { archive: PathBuf },
-    /// Restore the logical bytes into a new file, keeping the archive intact
-    Extract { archive: PathBuf, output: PathBuf },
+    /// Restore logical bytes into a new file, keeping the archive intact
+    Extract {
+        archive: PathBuf,
+        output: PathBuf,
+        /// Decode only the verified logical byte range OFFSET:LENGTH
+        #[arg(long, value_parser = parse_logical_range)]
+        range: Option<(u64, u64)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -71,13 +79,33 @@ pub fn run(args: &Args) -> io::Result<()> {
             *chunk_bytes,
             *allow_expansion,
         ),
+        Action::Info { archive } => info(archive),
         Action::Verify { archive } => verify(archive),
-        Action::Extract { archive, output } => extract(archive, output),
+        Action::Extract { archive, output, range } => match range {
+            Some(range) => extract_range(archive, output, *range),
+            None => extract(archive, output),
+        },
     }
 }
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn parse_logical_range(input: &str) -> Result<(u64, u64), String> {
+    let (offset, length) = input
+        .split_once(':')
+        .ok_or_else(|| "expected OFFSET:LENGTH in decimal bytes".to_string())?;
+    let offset = offset
+        .parse::<u64>()
+        .map_err(|_| "range OFFSET must be an unsigned decimal integer".to_string())?;
+    let length = length
+        .parse::<u64>()
+        .map_err(|_| "range LENGTH must be an unsigned decimal integer".to_string())?;
+    offset
+        .checked_add(length)
+        .ok_or_else(|| "logical range overflows u64".to_string())?;
+    Ok((offset, length))
 }
 
 fn open_regular(path: &Path) -> io::Result<File> {
@@ -203,6 +231,23 @@ fn create(
         stats.logical_size,
         stats.archive_bytes,
         100.0 * (1.0 - stats.archive_bytes as f64 / stats.logical_size as f64)
+    );
+    Ok(())
+}
+
+fn info(path: &Path) -> io::Result<()> {
+    let source = open_regular(path)?;
+    let archive_bytes = source.metadata()?.len();
+    // Header/index validation is portable and does not initialize decoder scratch.
+    let reader = ArchiveReader::open(source)?;
+    println!(
+        "ASCF {}: {} logical bytes, {} archive bytes, {} chunks of {} bytes, SHA-256 {} (metadata only)",
+        reader.codec().name(),
+        reader.logical_size(),
+        archive_bytes,
+        reader.chunk_count(),
+        reader.chunk_size(),
+        hex_digest(reader.logical_sha256())
     );
     Ok(())
 }
