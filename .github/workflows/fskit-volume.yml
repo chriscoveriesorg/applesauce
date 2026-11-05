@@ -50,6 +50,21 @@ jobs:
           python3 fskit/acceptance_evidence.py --self-test
           python3 fskit/signing_profile.py --self-test
           python3 fskit/replacement_acceptance.py --self-test
+      - name: Guard signed bundle Finder and unmount helper provenance
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          script = Path("fskit/signed_acceptance.sh").read_text()
+          reader = script.split("\n  bundle-readback)\n", 1)[1].split("\n  readback)\n", 1)[0]
+          assert '"$bundle/fskit/finder_readback.applescript"' in reader
+          assert '"$ROOT/fskit/finder_readback.applescript"' not in reader
+          unmount = script.split("\n  bundle-unmounted)\n", 1)[1].split("\n  unmounted)\n", 1)[0]
+          for required in ('"$bundle/fskit/unmount_acceptance.py"',
+                           '--bundle "$bundle"',
+                           'verify_package_manifest "$bundle" "$out"',
+                           'require_matching_bundle_helper "$bundle"'):
+              assert required in unmount, required
+          PY
       - name: Authenticate synthetic transfer bundle and reject tampering
         run: |
           python3 - <<'PY'
