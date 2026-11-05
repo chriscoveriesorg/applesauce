@@ -171,6 +171,16 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             return
         }
         Self.verificationQueue.async { [self] in
+            // A probe can occupy the single verifier while unload cancels
+            // this request. Avoid decoding an archive whose ticket is stale.
+            lifecycleLock.lock()
+            let stillPending = loadGate.isPending(ticket)
+            lifecycleLock.unlock()
+            guard stillPending else {
+                url.stopAccessingSecurityScopedResource()
+                replyHandler(nil, Self.error(ENODEV))
+                return
+            }
             do {
                 // The reservation remains held across full archive verification.
                 // A second load cannot replace the descriptor, and an unload
