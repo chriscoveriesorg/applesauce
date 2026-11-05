@@ -46,6 +46,7 @@ jobs:
           assert attrs["FSShortName"] == "ascf"
           PY
           python3 fskit/verify_mount.py --self-test
+          python3 fskit/unmount_acceptance.py --self-test
           python3 fskit/acceptance_evidence.py --self-test
           python3 fskit/signing_profile.py --self-test
           python3 fskit/replacement_acceptance.py --self-test
@@ -118,6 +119,18 @@ jobs:
       - uses: actions/checkout@v6
       - name: Run portable mounted-readback acceptance tests
         run: python3 fskit/verify_mount.py --self-test
+      - name: Check kernel mount-table unmount witness regressions
+        run: python3 fskit/unmount_acceptance.py --self-test
+      - name: Exercise actual Darwin getmntinfo ABI
+        run: |
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, "fskit")
+          from unmount_acceptance import read_mount_table
+          entries = read_mount_table()
+          assert any(name == "/" for _, name in entries), "root mount missing from Darwin VFS table"
+          print("Darwin getmntinfo verified:", len(entries), "kernel mount entries")
+          PY
       - name: Verify complete remount and typed corruption evidence gate
         run: python3 fskit/acceptance_evidence.py --self-test
       - name: Verify host/extension signing-profile compatibility gate
