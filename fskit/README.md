@@ -316,6 +316,25 @@ bash fskit/signed_acceptance.sh acceptance-check . lzmesh \
 # Repeat for lzraven with its own five evidence files.
 ```
 
+After obtaining all five evidence files for **both** codecs, run the combined
+signed-host acceptance gate. Supply Raven's first/readback, unmount, remount,
+corrupt-refusal and replacement evidence paths, followed by Mesh's five paths:
+
+```sh
+bash fskit/signed_acceptance.sh acceptance-all . \
+  /raven/first.json /raven/unmounted.json /raven/remount.json \
+  /raven/corrupt-refusal.txt /raven/replacement.json \
+  /mesh/first.json /mesh/unmounted.json /mesh/remount.json \
+  /mesh/corrupt-refusal.txt /mesh/replacement.json
+```
+
+This validates the entire per-codec chain twice, requires identical restored
+logical bytes and recorded macOS build, and rejects reused verification IDs
+between the four mounted-readback events. A successful combined report still
+needs independent review of real signed installation and mounts. The
+verification code has portable synthetic tests; the signed-host command has
+not been exercised on a provisioned Mac.
+
 The command rechecks the SHA-256 manifest, signing identities, the archived
 source and both readback JSON reports, the intervening unmount, kernel-level
 read-only VFS flags, random/EOF evidence and the typed corruption-refusal
