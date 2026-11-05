@@ -344,13 +344,24 @@ def verify_mount(mount, original, require_real_mount=True):
                     observed = os.pread(mounted_fd, length, offset)
                 except OSError as error:
                     raise MountCheckError(f"random read failed at byte {offset}: {error}") from error
+                expected_length = min(length, original_size - offset)
+                require(len(expected) == expected_length,
+                        f"original random read returned short bytes at byte {offset}")
+                require(len(observed) == expected_length,
+                        f"mounted random read returned short bytes at byte {offset}")
                 require(observed == expected, f"random read disagrees at byte {offset}")
-            require(os.pread(mounted_fd, 32, original_size) == b"",
-                    "mounted read did not return EOF")
-            # An offset past EOF must also return an empty result. This catches
-            # erroneous offset-to-chunk arithmetic on the FSKit read path.
-            require(os.pread(mounted_fd, 32, original_size + 1) == b"",
-                    "mounted read beyond EOF returned data")
+            # EOF and beyond-EOF are independent FSKit calls. Propagate read
+            # errors as explicit acceptance failures, never as proof of EOF.
+            for eof_offset, label in ((original_size, "at EOF"),
+                                      (original_size + 1, "beyond EOF")):
+                try:
+                    eof_data = os.pread(mounted_fd, 32, eof_offset)
+                except OSError as error:
+                    raise MountCheckError(
+                        f"mounted EOF read failed {label} (byte {eof_offset}): {error}"
+                    ) from error
+                require(eof_data == b"",
+                        f"mounted read {label} returned data")
             # A descriptor can retain its inode while bytes change during
             # random-read acceptance. Reject observable concurrent mutations.
             for fd, before, label in ((source_fd, source_stat, "original"),
@@ -479,7 +490,47 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 with mock.patch("os.pread", side_effect=failing_pread):
                     with self.assertRaisesRegex(MountCheckError, "random read failed"):
                         verify_mount(self.mount, self.original, require_real_mount=False)
-        self.assertEqual(verify_mount(self.mount, self.original, require_real_mount=False)["result"], "pass")
+        # The synthetic file lives on a writable host filesystem. Model only
+        # the signed FSKit EROFS write-open rule for the positive control.
+        self.assertEqual(self.check()["result"], "pass")
+
+    def test_random_read_short_positive_results_fail_closed(self):
+        # POSIX pread can return a positive short count without raising.
+        # Requiring complete windows prevents incomplete FSKit readback from
+        # masquerading as a successful authenticated random read.
+        real_pread = os.pread
+        for shortened_call, label in ((1, "original"), (2, "mounted")):
+            with self.subTest(shortened_call=shortened_call):
+                calls = 0
+
+                def short_pread(fd, length, offset):
+                    nonlocal calls
+                    calls += 1
+                    data = real_pread(fd, length, offset)
+                    return data[:-1] if calls == shortened_call else data
+
+                with mock.patch("os.pread", side_effect=short_pread):
+                    with self.assertRaisesRegex(
+                            MountCheckError, label + " random read returned short bytes"):
+                        self.check()
+        self.assertEqual(self.check()["result"], "pass")
+
+    def test_eof_read_io_errors_fail_closed(self):
+        # The last two read operations check EOF and beyond-EOF separately.
+        # An EIO at either point must not be reported as a legitimate EOF.
+        real_pread = os.pread
+        size = self.original.stat().st_size
+        for failed_offset in (size, size + 1):
+            with self.subTest(failed_offset=failed_offset):
+                def failing_eof(fd, length, offset):
+                    if offset == failed_offset and length == 32:
+                        raise OSError(errno.EIO, "synthetic EOF I/O failure")
+                    return real_pread(fd, length, offset)
+
+                with mock.patch("os.pread", side_effect=failing_eof):
+                    with self.assertRaisesRegex(MountCheckError, "mounted EOF read failed"):
+                        self.check()
+        self.assertEqual(self.check()["result"], "pass")
 
     def test_digest_cleanup_does_not_mask_primary_error(self):
         # fdopen may fail before assuming ownership of the raw descriptor.
