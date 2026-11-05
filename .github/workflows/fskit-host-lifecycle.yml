@@ -33,6 +33,6 @@ jobs:
           set -euo pipefail
           xcrun swiftc --version
           xcrun swiftc -swift-version 5 -warnings-as-errors \
-            fskit/Host/OperationGate.swift fskit/tests/OperationGateTests.swift \
+            fskit/Host/OperationGate.swift fskit/Host/CorruptFixtureProof.swift fskit/tests/OperationGateTests.swift \
             -o "$RUNNER_TEMP/ascf-operation-gate-tests"
           "$RUNNER_TEMP/ascf-operation-gate-tests"
