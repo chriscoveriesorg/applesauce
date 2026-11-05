@@ -273,7 +273,11 @@ def verify_mount(mount, original, require_real_mount=True):
     # Preserve the reference leaf: resolve() would silently follow a symlink
     # before digest() can enforce O_NOFOLLOW on its opened descriptor.
     original = Path(os.path.abspath(original))
-    require(mount.is_dir(), "mount argument is not a directory")
+    try:
+        mount_is_dir = mount.is_dir()
+    except OSError as error:
+        raise MountCheckError(f"cannot inspect mount directory: {error}") from error
+    require(mount_is_dir, "mount argument is not a directory")
     try:
         mount_stat = os.stat(mount, follow_symlinks=False)
     except OSError as error:
@@ -505,6 +509,20 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_mount_directory_probe_io_error_fails_closed(self):
+        # A failed mount directory probe must remain a controlled refusal.
+        real_is_dir = Path.is_dir
+
+        def fail_mount_probe(path):
+            if path == self.mount:
+                raise OSError(errno.EIO, "synthetic mount directory probe failure")
+            return real_is_dir(path)
+
+        with mock.patch.object(Path, "is_dir", autospec=True, side_effect=fail_mount_probe):
+            with self.assertRaisesRegex(MountCheckError, "cannot inspect mount directory"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertEqual(self.check()["result"], "pass")
 
     def test_writable_open_close_failure_preserves_refusal(self):
         # Never actually open the mounted fixture writable: inject a harmless
