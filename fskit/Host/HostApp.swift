@@ -270,43 +270,53 @@ private final class ASCFMountController: ObservableObject {
             url.stopAccessingSecurityScopedResource()
             DispatchQueue.main.async { [self] in
                 guard operations.finish(ticket) else { return }
+                // A failed callback can still leave a mounted VFS volume.
+                // Reconcile both observations before reporting failure or
+                // allowing a second mount. The callback path is never trusted
+                // without its independent read-only ASCF statfs check.
+                let observed = mountedASCFVolumes()
+                let verifiedReturned = mounted.flatMap {
+                    isVerifiedReadOnlyASCFMount($0) ? $0.path : nil
+                }
+                let outcome = ASCFMountPostflight(
+                    returnedMount: mounted != nil, callbackError: error != nil,
+                    verifiedReturnedPath: verifiedReturned,
+                    observedVerifiedPaths: observed.map(\.path)
+                )
+                multipleASCFMounts = outcome.verifiedPaths.count > 1
+                if let path = outcome.singleVerifiedPath {
+                    mountedURL = observed.first(where: { $0.path == path })
+                        ?? mounted.flatMap { verifiedReturned == path ? $0 : nil }
+                } else {
+                    mountedURL = nil
+                }
                 if expectCorruptRefusal {
-                    // An error is evidence of refusal only after successful
-                    // extension discovery and an actual FSClient callback.
-                    // The specific reason must be retained for the operator.
-                    // Denial from sandbox/provisioning alone is inconclusive.
                     if let mounted {
-                        if isVerifiedReadOnlyASCFMount(mounted) { mountedURL = mounted }
                         status = "CORRUPT_REFUSAL_FAIL: FSKit returned a mount at \(mounted.path). Unmount it and reject acceptance."
+                    } else if outcome.hasOrphanedMount {
+                        status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSKit returned an error but an ASCF volume remains at \(outcome.verifiedPaths.joined(separator: ", ")). Unmount normally; acceptance is blocked."
                     } else if let error {
-                        let remaining = mountedASCFVolumes()
-                        if remaining.isEmpty {
-                            let actualError = error as NSError
-                            let detail = "\(actualError.domain) code \(actualError.code): \(actualError.localizedDescription)"
-                            if actualError.domain == FSKitErrorDomain
-                                && actualError.code == FSError.Code.resourceDamaged.rawValue {
-                                status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): signed FSKit probe rejected the recognized ASCF payload: \(detail)"
-                            } else {
-                                status = "CORRUPT_REFUSAL_INCONCLUSIVE: mount failed without a verified ASCF damage error: \(detail). Check activation, entitlements and access."
-                            }
+                        let actualError = error as NSError
+                        let detail = "\(actualError.domain) code \(actualError.code): \(actualError.localizedDescription)"
+                        if actualError.domain == FSKitErrorDomain
+                            && actualError.code == FSError.Code.resourceDamaged.rawValue {
+                            status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): signed FSKit probe rejected the recognized ASCF payload: \(detail)"
                         } else {
-                            status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSClient returned an error but ASCF volumes remain mounted: \(remaining.map(\.path).joined(separator: ", "))"
+                            status = "CORRUPT_REFUSAL_INCONCLUSIVE: mount failed without a verified ASCF damage error: \(detail). Check activation, entitlements and access."
                         }
                     } else {
                         status = "CORRUPT_REFUSAL_INCONCLUSIVE: FSClient returned neither mount nor error."
                     }
                     return
                 }
-                if let error {
+                if outcome.cleanSuccess, let path = outcome.singleVerifiedPath {
+                    status = "Verified read-only ASCF mount at \(path)"
+                } else if outcome.hasOrphanedMount {
+                    status = "MOUNT_INCONCLUSIVE: FSClient callback disagreed with the live VFS. Read-only ASCF mount(s) at \(outcome.verifiedPaths.joined(separator: ", ")). Unmount normally before retrying."
+                } else if let error {
                     status = "Mount failed: \(error.localizedDescription)"
                 } else if let mounted {
-                    guard isVerifiedReadOnlyASCFMount(mounted) else {
-                        mountedURL = nil
-                        status = "FSKit returned a mount without verified ASCF read-only VFS identity at \(mounted.path). Inspect the mount manually; acceptance is blocked."
-                        return
-                    }
-                    mountedURL = mounted
-                    status = "Verified read-only ASCF mount at \(mounted.path)"
+                    status = "FSKit returned a mount without verified ASCF read-only VFS identity at \(mounted.path). Inspect the mount manually; acceptance is blocked."
                 } else {
                     status = "FSKit returned no mounted volume."
                 }
