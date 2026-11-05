@@ -136,6 +136,8 @@ including 4 KiB, 64 KiB and 8 MiB boundaries, and rejects reads that return
 bytes at or beyond EOF. Its negative read-only check tries both **O_WRONLY**
 and **O_RDWR** opens without issuing any writes. It never changes the mounted
 file, source, ASCF archive or APFS metadata.
+Each signed readback also checks Darwin's complete kernel mount table. Exactly one `ascf` volume must be active, at the selected mountpoint, throughout the Terminal/Finder verification. Normal-unmount the private `cli-mount` volume before starting a host-UI mount, and unmount the prior codec before testing the next. A duplicate, stacked, relocated, or unexpected ASCF volume blocks acceptance even when the logical SHA-256 matches. This protects the operator evidence against attributing readback to an unrelated live FSKit mount. The mount-table check is repeated after Finder's copy-out; it does not replace signed physical-mount review.
+
 The signed Finder readback now runs the complete mounted verifier **again after Finder finishes copying**. A packaged `finder_mount_witness.py` checks that the pre/post Finder reports refer to the same kernel ASCF filesystem ID, mount directory device/inode, restored filename, logical SHA-256, read-only flags, and macOS build. It hashes the Finder copy independently and only then atomically stamps the first report with a verification ID. Missing post-Finder evidence, a swapped mount or a changed file blocks acceptance. The second report is retained as `post-finder-readback.json` for independent review. This is read-only acceptance instrumentation, not a signed physical-mount result by itself.
 
 Store the JSON report alongside the signed extension identity, macOS build,
