@@ -321,7 +321,10 @@ def verify_mount(mount, original, require_real_mount=True):
     except OSError as error:
         raise MountCheckError(f"cannot reopen original for random reads: {error}") from error
     try:
-        source_stat = os.fstat(source_fd)
+        try:
+            source_stat = os.fstat(source_fd)
+        except OSError as error:
+            raise MountCheckError(f"cannot inspect random-read original descriptor: {error}") from error
         require(stat.S_ISREG(source_stat.st_mode), "random-read original is not a regular file")
         require((source_stat.st_dev, source_stat.st_ino, source_stat.st_size,
                  source_stat.st_mtime_ns, source_stat.st_ctime_ns) == original_identity,
@@ -331,7 +334,10 @@ def verify_mount(mount, original, require_real_mount=True):
         except OSError as error:
             raise MountCheckError(f"cannot reopen mounted file for random reads: {error}") from error
         try:
-            mounted_stat = os.fstat(mounted_fd)
+            try:
+                mounted_stat = os.fstat(mounted_fd)
+            except OSError as error:
+                raise MountCheckError(f"cannot inspect random-read mounted descriptor: {error}") from error
             require(stat.S_ISREG(mounted_stat.st_mode), "random-read mounted input is not a regular file")
             require((mounted_stat.st_dev, mounted_stat.st_ino, mounted_stat.st_size,
                      mounted_stat.st_mtime_ns, mounted_stat.st_ctime_ns) == mounted_identity,
@@ -473,6 +479,25 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_random_read_initial_fstat_errors_fail_closed(self):
+        # A descriptor can become unavailable after a successful reopen.
+        real_fstat = os.fstat
+        for target in (1, 2):
+            with self.subTest(target=target):
+                # digest() performs two fstat calls per file; target only the
+                # initial random-read fstat after both digests have completed.
+                calls = 0
+                def failing_fstat(fd):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 4 + target:
+                        raise OSError(errno.EIO, "synthetic random-read fstat failure")
+                    return real_fstat(fd)
+                with mock.patch("os.fstat", side_effect=failing_fstat):
+                    with self.assertRaisesRegex(MountCheckError, "cannot inspect random-read"):
+                        self.check()
+        self.assertEqual(self.check()["result"], "pass")
 
     def test_random_read_io_errors_fail_closed(self):
         # A successful full digest does not guarantee subsequent pread works.
