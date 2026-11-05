@@ -190,7 +190,12 @@ def digest(path, nofollow=False, include_identity=False):
                     "digest input length changed during hashing")
     finally:
         if fd >= 0:
-            os.close(fd)
+            already_failing = sys.exc_info()[0] is not None
+            try:
+                os.close(fd)
+            except OSError as error:
+                if not already_failing:
+                    raise MountCheckError(f"cannot close digest descriptor: {error}") from error
     result = (total, checksum.hexdigest())
     return (*result, (identity.st_dev, identity.st_ino, identity.st_size,
                       identity.st_mtime_ns, identity.st_ctime_ns)) if include_identity else result
@@ -448,6 +453,15 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_digest_cleanup_does_not_mask_primary_error(self):
+        # fdopen may fail before assuming ownership of the raw descriptor.
+        # A secondary close failure must not mask the primary exception.
+        with mock.patch("os.fdopen", side_effect=OSError(errno.EIO, "fdopen failed")):
+            with mock.patch("os.close", side_effect=OSError(errno.EBADF, "close failed")):
+                with self.assertRaisesRegex(OSError, "fdopen failed"):
+                    digest(self.original)
+        self.assertEqual(digest(self.original)[0], self.original.stat().st_size)
 
     def test_digest_read_and_final_fstat_fail_closed(self):
         # A read error or late descriptor inspection error must never pass
