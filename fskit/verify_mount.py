@@ -316,14 +316,20 @@ def verify_mount(mount, original, require_real_mount=True):
     # windows. The final zero-byte read must return EOF.
     require(bool(getattr(os, "O_NONBLOCK", 0)), "O_NONBLOCK unavailable for safe descriptor open")
     read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK
-    source_fd = os.open(original, read_flags | os.O_NOFOLLOW)
+    try:
+        source_fd = os.open(original, read_flags | os.O_NOFOLLOW)
+    except OSError as error:
+        raise MountCheckError(f"cannot reopen original for random reads: {error}") from error
     try:
         source_stat = os.fstat(source_fd)
         require(stat.S_ISREG(source_stat.st_mode), "random-read original is not a regular file")
         require((source_stat.st_dev, source_stat.st_ino, source_stat.st_size,
                  source_stat.st_mtime_ns, source_stat.st_ctime_ns) == original_identity,
                 "original file changed between digest and random reads")
-        mounted_fd = os.open(mounted, read_flags | os.O_NOFOLLOW)
+        try:
+            mounted_fd = os.open(mounted, read_flags | os.O_NOFOLLOW)
+        except OSError as error:
+            raise MountCheckError(f"cannot reopen mounted file for random reads: {error}") from error
         try:
             mounted_stat = os.fstat(mounted_fd)
             require(stat.S_ISREG(mounted_stat.st_mode), "random-read mounted input is not a regular file")
@@ -851,6 +857,25 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 verify_mount(self.mount, self.original, require_real_mount=False)
         self.assertTrue(swapped)
         self.assertEqual(scans, 2)
+
+    def test_random_read_reopen_failures_are_controlled(self):
+        # Hashing succeeds first; a later descriptor reopen can still fail.
+        real_open = os.open
+        for target, label in ((self.original, "original"),
+                              (self.restored, "mounted")):
+            with self.subTest(target=label):
+                attempts = 0
+                def fail_second_open(path, flags, *args, **kwargs):
+                    nonlocal attempts
+                    if os.fspath(path) == os.fspath(target):
+                        attempts += 1
+                        if attempts == 2:
+                            raise OSError(errno.ENOENT, "synthetic reopen race")
+                    return real_open(path, flags, *args, **kwargs)
+                with mock.patch.object(os, "open", side_effect=fail_second_open):
+                    with self.assertRaisesRegex(MountCheckError,
+                                                "cannot reopen " + label):
+                        verify_mount(self.mount, self.original, require_real_mount=False)
 
     def test_clean_random_readback_and_eof(self):
         report = self.check()
