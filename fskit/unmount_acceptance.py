@@ -8,6 +8,7 @@ mountpoint disappeared or changed. The owner performs the unmount separately.
 import argparse
 import ctypes
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -49,7 +50,7 @@ def read_mount_table():
         raise UnmountError("kernel mount table contains an undecodable entry") from error
 
 
-def verify(mount, first_readback, *, mounts=None, is_mount=None):
+def verify(mount, first_readback, *, bundle=None, mounts=None, is_mount=None):
     """Validate the first signed readback and require no surviving ASCF mount."""
     require(isinstance(mount, str), "mount path must be text")
     # Signed host-created mounts live directly below /Volumes. Keep this
@@ -79,6 +80,32 @@ def verify(mount, first_readback, *, mounts=None, is_mount=None):
     require(isinstance(verification_id, str) and bool(verification_id),
             "previous readback lacks verification ID")
     require(previous.get("macos_build"), "previous readback lacks macOS build")
+
+    if bundle is not None:
+        # Bind a Finder-confirmed unmount to the signed bundle's synthetic
+        # codec, source SHA-256 and logical length before inspecting VFS.
+        name = previous.get("restored_file")
+        require(name in ("source.lzraven", "source.lzmesh"),
+                "bundle readback must identify a supported ASCF fixture")
+        source = Path(bundle) / (name + ".jsonl")
+        require(source.is_file() and not source.is_symlink(),
+                "bundle cleartext fixture missing or symlinked")
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            hasher = hashlib.sha256()
+            size = 0
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                hasher.update(block)
+                size += len(block)
+            after = os.fstat(stream.fileno())
+        keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        require(all(getattr(before, key) == getattr(after, key) for key in keys)
+                and size == before.st_size,
+                "bundle fixture changed during unmount provenance verification")
+        require(hasher.hexdigest() == digest and
+                previous.get("logical_bytes") == size,
+                "previous readback differs from signed-bundle logical bytes")
 
     active = read_mount_table() if mounts is None else mounts
     require(isinstance(active, list) and bool(active),
@@ -131,6 +158,54 @@ class UnmountTests(unittest.TestCase):
         return verify(self.payload["mount"], self.report, mounts=mounts,
                       is_mount=is_mount)
 
+    def bundle_fixture(self):
+        source = Path(self.folder.name) / "source.lzraven.jsonl"
+        data = b"synthetic ASCF logical cleartext\n" * 64
+        source.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        self.payload.update(restored_file="source.lzraven",
+                            logical_bytes=len(data), sha256=digest,
+                            finder_copy_sha256=digest)
+        self.save()
+        return source
+
+    def signed_bundle_check(self):
+        return verify(self.payload["mount"], self.report, bundle=self.folder.name,
+                      mounts=[("apfs", "/")], is_mount=False)
+
+    def test_signed_bundle_valid_source(self):
+        self.bundle_fixture()
+        self.assertEqual(self.signed_bundle_check()["previous_sha256"],
+                         self.payload["sha256"])
+
+    def test_signed_bundle_modified_source_refused(self):
+        source = self.bundle_fixture()
+        source.write_bytes(b"changed after first readback")
+        with self.assertRaisesRegex(UnmountError, "differs from signed-bundle"):
+            self.signed_bundle_check()
+
+    def test_signed_bundle_wrong_codec_refused(self):
+        self.bundle_fixture()
+        self.payload["restored_file"] = "unrelated-file"
+        self.save()
+        with self.assertRaisesRegex(UnmountError, "supported ASCF fixture"):
+            self.signed_bundle_check()
+
+    def test_signed_bundle_symlink_refused(self):
+        source = self.bundle_fixture()
+        other = source.with_suffix(".target")
+        source.rename(other)
+        source.symlink_to(other)
+        with self.assertRaisesRegex(UnmountError, "symlinked"):
+            self.signed_bundle_check()
+
+    def test_signed_bundle_wrong_length_refused(self):
+        self.bundle_fixture()
+        self.payload["logical_bytes"] += 1
+        self.save()
+        with self.assertRaisesRegex(UnmountError, "differs from signed-bundle"):
+            self.signed_bundle_check()
+
     def test_normal_unmount(self):
         result = self.check()
         self.assertTrue(result["kernel_mount_table_verified"])
@@ -177,6 +252,7 @@ def main():
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--mount")
     parser.add_argument("--first")
+    parser.add_argument("--bundle", help="manifest-authenticated acceptance bundle")
     args = parser.parse_args()
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(UnmountTests)
@@ -184,7 +260,7 @@ def main():
     if not args.mount or not args.first:
         parser.error("--mount and --first readback.json are required")
     try:
-        result = verify(args.mount, args.first)
+        result = verify(args.mount, args.first, bundle=args.bundle)
     except (UnmountError, OSError, ValueError, TypeError, KeyError) as error:
         print("FSKit unmount acceptance FAILED: " + str(error), file=sys.stderr)
         return 1
