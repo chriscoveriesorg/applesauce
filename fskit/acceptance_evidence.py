@@ -559,7 +559,13 @@ class EvidenceTests(unittest.TestCase):
             self.check()
 
     def test_corruption_refusal_rejects_bundle_mutation(self):
-        (self.base / "source.lzmesh.corrupt.ascf").write_bytes(b"changed")
+        # Keep the replacement-control evidence internally consistent so
+        # this test reaches and isolates the separate signed-host SHA gate.
+        modified = b"changed"
+        (self.base / "source.lzmesh.corrupt.ascf").write_bytes(modified)
+        replacement = load_json(self.items[4])
+        replacement["replacement_sha256"] = hashlib.sha256(modified).hexdigest()
+        self.items[4].write_text(json.dumps(replacement))
         with self.assertRaisesRegex(EvidenceError, "SHA-256"):
             self.check()
 
