@@ -252,7 +252,10 @@ def verify_mount(mount, original, require_real_mount=True):
     # before digest() can enforce O_NOFOLLOW on its opened descriptor.
     original = Path(os.path.abspath(original))
     require(mount.is_dir(), "mount argument is not a directory")
-    mount_stat = os.stat(mount, follow_symlinks=False)
+    try:
+        mount_stat = os.stat(mount, follow_symlinks=False)
+    except OSError as error:
+        raise MountCheckError(f"cannot inspect resolved mount path: {error}") from error
     require(stat.S_ISDIR(mount_stat.st_mode), "mount path is not a directory")
     mount_identity_pair = (mount_stat.st_dev, mount_stat.st_ino)
     mount_identity = {}
@@ -509,6 +512,18 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         with mock.patch.object(Path, "resolve", autospec=True,
                                side_effect=fail_mount_resolution):
             with self.assertRaisesRegex(MountCheckError, "cannot resolve mount argument"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+
+    def test_mount_disappears_after_resolution_fails_closed(self):
+        # The mount can vanish between strict resolution and the first stat.
+        real_stat = os.stat
+        def missing_mount_stat(path, *args, **kwargs):
+            if Path(path) == self.mount and kwargs.get("follow_symlinks") is False:
+                raise FileNotFoundError(errno.ENOENT, "synthetic mount removal")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch("os.stat", side_effect=missing_mount_stat):
+            with self.assertRaisesRegex(MountCheckError, "cannot inspect resolved mount path"):
                 verify_mount(self.mount, self.original, require_real_mount=False)
 
     def test_missing_mount_leaf_fails_closed(self):
