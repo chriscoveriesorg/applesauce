@@ -288,7 +288,11 @@ def verify_mount(mount, original, require_real_mount=True):
     if require_real_mount:
         require(os.path.ismount(mount), "path is not a filesystem mount point")
         mount_identity = signed_mount_identity(mount)
-    require(original.is_file(), "original cleartext is not a regular file")
+    try:
+        original_is_file = original.is_file()
+    except OSError as error:
+        raise MountCheckError(f"cannot inspect original cleartext: {error}") from error
+    require(original_is_file, "original cleartext is not a regular file")
     try:
         with os.scandir(mount) as scanner:
             entries = list(scanner)
@@ -509,6 +513,20 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_original_file_probe_io_error_fails_closed(self):
+        # An I/O failure while probing the reference must reject acceptance.
+        real_is_file = Path.is_file
+
+        def fail_original_probe(path):
+            if path == self.original:
+                raise OSError(errno.EIO, "synthetic original file probe failure")
+            return real_is_file(path)
+
+        with mock.patch.object(Path, "is_file", autospec=True, side_effect=fail_original_probe):
+            with self.assertRaisesRegex(MountCheckError, "cannot inspect original cleartext"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertEqual(self.check()["result"], "pass")
 
     def test_mount_directory_probe_io_error_fails_closed(self):
         # A failed mount directory probe must remain a controlled refusal.
