@@ -112,6 +112,63 @@ jobs:
               assert authenticate().returncode != 0, "missing provisioning profile accepted"
           PY
 
+      - name: Reject helper drift even if a package manifest is recomputed
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          script = Path("fskit/signed_acceptance.sh").resolve()
+          members = subprocess.check_output(
+              ["bash", str(script), "manifest-paths"], text=True
+          ).splitlines()
+          with tempfile.TemporaryDirectory() as directory:
+              bundle = Path(directory)
+              for name in members:
+                  target = bundle / name
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  if name == "fskit/signed_acceptance.sh":
+                      target.write_bytes(script.read_bytes())
+                  else:
+                      target.write_bytes(("synthetic:" + name).encode())
+
+              def manifest():
+                  (bundle / "SHA256SUMS").write_text(
+                      "".join(
+                          hashlib.sha256((bundle / name).read_bytes()).hexdigest()
+                          + "  " + name + "\\n"
+                          for name in members
+                      )
+                  )
+
+              def command(mode):
+                  return subprocess.run(
+                      ["bash", str(script), mode, str(bundle)],
+                      capture_output=True, text=True
+                  )
+              manifest()
+              initial = command("bundle-code-check")
+              assert initial.returncode == 0, initial.stdout + initial.stderr
+
+              # Recompute the manifest to model a signed bundle from another
+              # checkout. Hash verification alone should pass; the invoked
+              # helper must refuse to certify mismatched verification code.
+              bundled_script = bundle / "fskit/signed_acceptance.sh"
+              bundled_script.write_bytes(bundled_script.read_bytes() + b"\\n# drift\\n")
+              manifest()
+              assert command("manifest-check").returncode == 0
+              changed = command("bundle-code-check")
+              assert changed.returncode != 0, "accepted different operator code"
+              assert "helper differs from signed bundle" in changed.stderr
+
+              bundled_script.write_bytes(script.read_bytes())
+              manifest()
+              restored = command("bundle-code-check")
+              assert restored.returncode == 0, restored.stdout + restored.stderr
+          PY
+
   macos-sdk:
     runs-on: xcode-27
     timeout-minutes: 30
