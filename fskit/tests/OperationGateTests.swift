@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 @main
@@ -153,5 +154,35 @@ struct OperationGateTests {
             precondition(!ASCFMountLocation.isAllowed(path), "unsafe mount allowed: \(path)")
         }
         print("PASS: kernel mount discovery accepts only host and private acceptance paths")
+
+        // Bind the selected negative-control file to exact source bytes.
+        // Both the initial and post-FSClient digest must match the package.
+        let testDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ascf-corrupt-proof-" + UUID().uuidString)
+        try! FileManager.default.createDirectory(
+            at: testDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDirectory) }
+        let fixture = testDirectory.appendingPathComponent("source.lzraven.corrupt.ascf")
+        try! Data("abc".utf8).write(to: fixture)
+        let known = try! ASCFCorruptFixtureProof.sha256(fixture)
+        precondition(known == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        let large = Data(repeating: 0x5c, count: 2_300_000)
+        try! large.write(to: fixture)
+        let expectedLarge = SHA256.hash(data: large)
+            .map { String(format: "%02x", $0) }.joined()
+        precondition(try! ASCFCorruptFixtureProof.sha256(fixture) == expectedLarge)
+        precondition(expectedLarge != known)
+        let alias = testDirectory.appendingPathComponent("source.lzmesh.corrupt.ascf")
+        try! FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture)
+        do {
+            _ = try ASCFCorruptFixtureProof.sha256(alias)
+            preconditionFailure("symlink must be rejected")
+        } catch {}
+        do {
+            _ = try ASCFCorruptFixtureProof.sha256(testDirectory)
+            preconditionFailure("directory must be rejected")
+        } catch {}
+        print("PASS: signed corrupt-fixture SHA-256 is streamed, stable and no-follow")
+
     }
 }
