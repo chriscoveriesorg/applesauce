@@ -221,6 +221,24 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         )
         .unwrap();
         temp.as_file_mut().sync_all().unwrap();
+
+        // Interrupt after authenticating the first real chunk, rather than
+        // only testing cancellation before any decoder call. The second
+        // chunk must not be decoded or accepted after unload.
+        let mut verifier = applesauce_core::cold_archive::ArchiveReader::open(
+            File::open(temp.path()).unwrap(),
+        )
+        .unwrap();
+        let mut checks = 0;
+        let interrupted = verifier
+            .verify_all_cancellable(|| {
+                checks += 1;
+                checks >= 2
+            })
+            .unwrap_err();
+        assert_eq!(interrupted.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(checks, 2);
+
         let handle = open_from(&temp);
         // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         assert_eq!(unsafe { ascf_verify_all(handle) }, 0);
