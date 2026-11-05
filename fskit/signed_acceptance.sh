@@ -2,6 +2,8 @@
 # Owner-run acceptance. Never writes APFS xattrs, mounted data or unknown decmpfs types.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+# Xcode links from <repo>/target/release, and packaging needs reproducible paths.
+export CARGO_TARGET_DIR="$ROOT/target"
 cd "$ROOT"
 die() { printf 'ASCF acceptance: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
@@ -70,7 +72,7 @@ HELP
 # checked against the finished bundles by verify_host().
 signing_preflight() {
   mac_only
-  local tool product major sdk sdk_major team identities
+  local tool product major sdk sdk_major team identity
   for tool in cargo xcodegen xcodebuild xcrun codesign security python3 shasum ditto git; do
     need "$tool"
   done
@@ -85,13 +87,10 @@ signing_preflight() {
   team="${ASCFSKIT_TEAM_ID:-}"
   [[ "$team" =~ ^[A-Z0-9]{10}$ ]] \
     || die "export ASCFSKIT_TEAM_ID as the provisioned 10-character Apple Developer Team ID"
-  identities="$(/usr/bin/security find-identity -v -p codesigning)" \
-    || die "cannot inspect local code-signing identities"
-  if ! /usr/bin/grep -E "Apple Development:.*\\($team\\)" <<< "$identities" >/dev/null; then
-    die "no available Apple Development signing identity for team $team; install/unlock its certificate before signed-build"
-  fi
-  printf 'Signing preflight: macOS %s, SDK %s, developer team %s, tools and signing identity present.\n' \
-    "$product" "$sdk" "$team"
+  identity="$(/usr/bin/python3 "$ROOT/fskit/signing_profile.py" --preflight-identity "$team")" \
+    || die "no available Apple Development signing identity for team $team; install/unlock its certificate before signed-build"
+  printf 'Signing preflight: macOS %s, SDK %s, developer team %s, signing identity %s, tools present.\n' \
+    "$product" "$sdk" "$team" "$identity"
   printf 'FSKit entitlement grants still require signed-build profile validation.\n'
 }
 verify_bundle() {

@@ -17,7 +17,7 @@ mount point does not alter the original path or provide native APFS
 Build an unsigned development host and extension on a Mac with a compatible
 Xcode/macOS SDK:
 
-    cargo build --locked --release -p applesauce-fskit-bridge
+    CARGO_TARGET_DIR="$PWD/target" cargo build --locked --release -p applesauce-fskit-bridge
     xcodegen generate --spec fskit/project.yml
     xcodebuild -project fskit/ApplesauceASCF.xcodeproj \
       -scheme ASCFHost -configuration Debug CODE_SIGNING_ALLOWED=NO build

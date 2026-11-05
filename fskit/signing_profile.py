@@ -5,13 +5,68 @@ The host script verifies the code signature and CMS envelope before calling
 this helper. This preflight does not establish that a volume was mounted.
 """
 import datetime
+import hashlib
 import plistlib
+import re
+import ssl
+import subprocess
 import sys
 import unittest
 
 
 class SigningProfileError(ValueError):
     pass
+
+
+def select_identity(identities, subjects, team):
+    """Select only a valid Apple Development identity with a matching OU.
+
+    subjects maps certificate SHA-1 fingerprints to OpenSSL subject text.
+    """
+    for fingerprint, name in re.findall(
+            r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"(Apple Development:[^"\r\n]+)"',
+            identities, re.MULTILINE):
+        subject = subjects.get(fingerprint.upper(), "")
+        ous = re.findall(r'^\s*OU\s*=\s*([^\r\n]+?)\s*$', subject, re.MULTILINE)
+        if team in ous:
+            return name
+    return None
+
+
+def certificate_subjects(certificates):
+    """Extract subjects and fingerprint the actual PEM bytes, not labels."""
+    subjects = {}
+    for pem in re.findall(r'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
+                          certificates, re.DOTALL):
+        try:
+            der = ssl.PEM_cert_to_DER_cert(pem)
+            fingerprint = hashlib.sha1(der).hexdigest().upper()
+            result = subprocess.run(
+                ["/usr/bin/openssl", "x509", "-noout", "-subject", "-nameopt", "sep_multiline"],
+                input=pem, text=True, capture_output=True, check=True)
+            subjects[fingerprint] = result.stdout
+        except (ValueError, subprocess.CalledProcessError):
+            continue
+    return subjects
+
+
+def preflight_identity(team):
+    try:
+        identities = subprocess.run(
+            ["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"],
+            text=True, capture_output=True, check=True).stdout
+        certificates = subprocess.run(
+            ["/usr/bin/security", "find-certificate", "-a", "-Z", "-c", "Apple Development", "-p"],
+            text=True, capture_output=True, check=True).stdout
+        identity = select_identity(identities, certificate_subjects(certificates), team)
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"ASCF signing preflight: cannot inspect local signing certificates: {error}",
+              file=sys.stderr)
+        return 1
+    if not identity:
+        return 1
+    print(identity)
+    return 0
 
 
 def require(condition, message):
@@ -123,10 +178,45 @@ class SigningProfileTests(unittest.TestCase):
             self.verify()
 
 
+class IdentitySelectionTests(unittest.TestCase):
+    first = "A" * 40
+    second = "B" * 40
+    name = "Apple Development: Example Person (PERSON1234)"
+    team = "TEAM123456"
+
+    def line(self, fingerprint, name=None):
+        return f'  1) {fingerprint} "{name or self.name}"\n'
+
+    def subject(self, team):
+        return f"subject=\n    CN={self.name}\n    OU={team}\n"
+
+    def test_personal_id_differs_from_team(self):
+        self.assertEqual(select_identity(self.line(self.first),
+                                        {self.first: self.subject(self.team)}, self.team), self.name)
+
+    def test_name_suffix_does_not_override_wrong_ou(self):
+        name = f"Apple Development: Example Person ({self.team})"
+        self.assertIsNone(select_identity(self.line(self.first, name),
+                                         {self.first: self.subject("OTHER12345")}, self.team))
+
+    def test_certificate_absent_from_valid_identity_list(self):
+        self.assertIsNone(select_identity("  0 valid identities found\n",
+                                         {self.first: self.subject(self.team)}, self.team))
+
+    def test_multiple_identities_select_matching_ou(self):
+        other = "Apple Development: Other Person (OTHER12345)"
+        identities = self.line(self.first, other) + self.line(self.second)
+        subjects = {self.first: self.subject("OTHER12345"),
+                    self.second: self.subject(self.team)}
+        self.assertEqual(select_identity(identities, subjects, self.team), self.name)
+
+
 def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(SigningProfileTests)
+        suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+    if len(sys.argv) == 3 and sys.argv[1] == "--preflight-identity":
+        return preflight_identity(sys.argv[2])
     if len(sys.argv) != 7:
         sys.exit("usage: signing_profile.py ENTITLEMENTS.plist PROFILE.plist FSKit_KEY NAME TEAM_ID BUNDLE_ID")
     try:
