@@ -5,7 +5,18 @@ import CryptoKit
 import Darwin
 
 enum ASCFCorruptFixtureProof {
+    // Keep the verified file identity alongside the digest. Identical bytes
+    // at a newly substituted pathname are still a changed mount source.
+    struct Fingerprint: Equatable {
+        let sha256: String
+        let sourceIdentity: String
+    }
+
     static func sha256(_ url: URL) throws -> String {
+        try fingerprint(url).sha256
+    }
+
+    static func fingerprint(_ url: URL) throws -> Fingerprint {
         let fd: Int32 = url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return -1 }
             return Darwin.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
@@ -50,6 +61,14 @@ enum ASCFCorruptFixtureProof {
         guard pathValid && same(before, after) && same(after, current) else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(ESTALE))
         }
-        return digest.finalize().map { String(format: "%02x", $0) }.joined()
+        return Fingerprint(
+            sha256: digest.finalize().map { String(format: "%02x", $0) }.joined(),
+            sourceIdentity: [
+                String(after.st_dev), String(after.st_ino), String(after.st_size),
+                String(after.st_mode), String(after.st_mtimespec.tv_sec),
+                String(after.st_mtimespec.tv_nsec), String(after.st_ctimespec.tv_sec),
+                String(after.st_ctimespec.tv_nsec)
+            ].joined(separator: ":")
+        )
     }
 }

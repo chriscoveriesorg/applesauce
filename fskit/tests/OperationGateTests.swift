@@ -172,6 +172,17 @@ struct OperationGateTests {
             .map { String(format: "%02x", $0) }.joined()
         precondition(try! ASCFCorruptFixtureProof.sha256(fixture) == expectedLarge)
         precondition(expectedLarge != known)
+        // A same-byte atomic pathname replacement must not pass the host's
+        // pre-/post-FSClient comparison merely because SHA-256 is unchanged.
+        let originalFingerprint = try! ASCFCorruptFixtureProof.fingerprint(fixture)
+        let twin = testDirectory.appendingPathComponent("identical-copy.ascf")
+        try! large.write(to: twin)
+        try! FileManager.default.removeItem(at: fixture)
+        try! FileManager.default.moveItem(at: twin, to: fixture)
+        let replacementFingerprint = try! ASCFCorruptFixtureProof.fingerprint(fixture)
+        precondition(originalFingerprint.sha256 == replacementFingerprint.sha256)
+        precondition(originalFingerprint.sourceIdentity != replacementFingerprint.sourceIdentity)
+        precondition(originalFingerprint != replacementFingerprint)
         let alias = testDirectory.appendingPathComponent("source.lzmesh.corrupt.ascf")
         try! FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture)
         do {

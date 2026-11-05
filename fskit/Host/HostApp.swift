@@ -292,10 +292,10 @@ private final class ASCFMountController: ObservableObject {
         // Fingerprint the selected synthetic archive while its security scope
         // is open. The postflight rehash prevents a changed input from being
         // reported as a successful typed FSKit corruption-control rejection.
-        let corruptFixtureDigest: String?
+        let corruptFixtureBefore: ASCFCorruptFixtureProof.Fingerprint?
         if expectCorruptRefusal {
             do {
-                corruptFixtureDigest = try ASCFCorruptFixtureProof.sha256(url)
+                corruptFixtureBefore = try ASCFCorruptFixtureProof.fingerprint(url)
             } catch {
                 url.stopAccessingSecurityScopedResource()
                 operations.finish(ticket)
@@ -303,7 +303,7 @@ private final class ASCFMountController: ObservableObject {
                 return
             }
         } else {
-            corruptFixtureDigest = nil
+            corruptFixtureBefore = nil
         }
         status = expectCorruptRefusal
             ? "Attempting generated corrupt archive through the signed FSKit mount path..."
@@ -314,8 +314,8 @@ private final class ASCFMountController: ObservableObject {
             bundleID: "org.chriscoveries.applesauce.ascfhost.ascfextension",
             options: []
         ) { [self] mounted, error in
-            let corruptDigestAfter = expectCorruptRefusal
-                ? (try? ASCFCorruptFixtureProof.sha256(url)) : nil
+            let corruptFixtureAfter = expectCorruptRefusal
+                ? (try? ASCFCorruptFixtureProof.fingerprint(url)) : nil
             url.stopAccessingSecurityScopedResource()
             DispatchQueue.main.async { [self] in
                 guard operations.finish(ticket) else { return }
@@ -346,9 +346,9 @@ private final class ASCFMountController: ObservableObject {
                     mountedURL = nil
                 }
                 if expectCorruptRefusal {
-                    guard let digest = corruptFixtureDigest,
-                          corruptDigestAfter == digest else {
-                        status = "CORRUPT_REFUSAL_INCONCLUSIVE: selected corrupt fixture changed during FSKit verification."
+                    guard let fingerprint = corruptFixtureBefore,
+                          corruptFixtureAfter == fingerprint else {
+                        status = "CORRUPT_REFUSAL_INCONCLUSIVE: selected corrupt fixture bytes or inode changed during FSKit verification."
                         return
                     }
                     if let mounted {
@@ -360,7 +360,7 @@ private final class ASCFMountController: ObservableObject {
                         let detail = "\(actualError.domain) code \(actualError.code): \(actualError.localizedDescription)"
                         if actualError.domain == FSKitErrorDomain
                             && actualError.code == FSError.Code.resourceDamaged.rawValue {
-                            status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): sha256=\(digest): signed FSKit probe rejected the recognized ASCF payload: \(detail)"
+                            status = "CORRUPT_REFUSAL_CONFIRMED: \(url.lastPathComponent): sha256=\(fingerprint.sha256): signed FSKit probe rejected the recognized ASCF payload: \(detail)"
                         } else {
                             status = "CORRUPT_REFUSAL_INCONCLUSIVE: mount failed without a verified ASCF damage error: \(detail). Check activation, entitlements and access."
                         }
