@@ -25,8 +25,10 @@ jobs:
   operation-gate:
     # No FSKit dependency: the same production gate runs on this Swift host.
     # The complete macOS 27 app/extension build remains mandatory separately.
-    runs-on: macos-latest
-    timeout-minutes: 5
+    # The FSKit SDK workflow already compiles successfully on this provisioned
+    # macOS 27 label; macos-latest host-only jobs were cancelled without a runner.
+    runs-on: xcode-27
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - name: Record Swift compiler and test request ownership
