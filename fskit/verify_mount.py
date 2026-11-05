@@ -152,9 +152,15 @@ def digest(path, nofollow=False, include_identity=False):
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK
     if nofollow:
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags)
     try:
-        identity = os.fstat(fd)
+        fd = os.open(path, flags)
+    except OSError as error:
+        raise MountCheckError(f"cannot open digest input: {error}") from error
+    try:
+        try:
+            identity = os.fstat(fd)
+        except OSError as error:
+            raise MountCheckError(f"cannot inspect digest descriptor: {error}") from error
         require(stat.S_ISREG(identity.st_mode), "digest input is not a regular file")
         with os.fdopen(fd, "rb", buffering=0) as source:
             fd = -1
@@ -432,6 +438,20 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.original.write_bytes(payload)
         self.restored = self.mount / "restored"
         self.restored.write_bytes(payload)
+
+    def test_digest_open_and_fstat_fail_closed(self):
+        # Synthetic failures must be controlled refusals, not raw OS errors.
+        with mock.patch("os.open", side_effect=OSError(errno.EIO, "synthetic open failure")):
+            with self.assertRaisesRegex(MountCheckError, "cannot open digest input"):
+                digest(self.original)
+
+        real_open = os.open
+        with mock.patch("os.fstat", side_effect=OSError(errno.EIO, "synthetic fstat failure")):
+            with self.assertRaisesRegex(MountCheckError, "cannot inspect digest descriptor"):
+                digest(self.original)
+        # The failed descriptor inspection must not leak an open descriptor.
+        self.assertEqual(digest(self.original), (self.original.stat().st_size,
+                         hashlib.sha256(self.original.read_bytes()).hexdigest()))
 
     def test_mount_enumeration_disappearance_fails_closed(self):
         # A disappearing mount or unreadable directory must fail through the
