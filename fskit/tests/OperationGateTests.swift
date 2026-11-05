@@ -93,5 +93,28 @@ struct OperationGateTests {
         )
         precondition(!unrelated.cleanSuccess && !unrelated.hasOrphanedMount)
         print("PASS: mount callback reconciliation detects partial and ambiguous mounts")
+
+        // Host discovery must include the private Terminal acceptance mount.
+        // Arbitrary directories and lookalike names do not become trusted
+        // merely because the filesystem reports an ASCF type.
+        for path in [
+            "/Volumes/Applesauce ASCF",
+            "/Volumes/Applesauce ASCF 2",
+            "/private/tmp/ascf-cli-mount.A2b3C4d5/mount",
+        ] {
+            precondition(ASCFMountLocation.isAllowed(path), "valid mount rejected: \(path)")
+        }
+        for path in [
+            "", "/", "/Volumes", "/Volumes/", "/Volumes/../tmp/other",
+            "/private/tmp/ascf-cli-mount.ABCDEFGH/other",
+            "/private/tmp/ascf-cli-mount.short/mount",
+            "/private/tmp/ascf-cli-mount.ABCDEFGH/mount/extra",
+            "/private/tmp/ascf-cli-mount.ABCDEFGH/../mount",
+            "/tmp/ascf-cli-mount.ABCDEFGH/mount",
+            "/private/tmp/unrelated/mount", "/Users/example/ascf",
+        ] {
+            precondition(!ASCFMountLocation.isAllowed(path), "unsafe mount allowed: \(path)")
+        }
+        print("PASS: kernel mount discovery accepts only host and private acceptance paths")
     }
 }
