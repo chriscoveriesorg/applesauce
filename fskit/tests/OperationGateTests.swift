@@ -58,5 +58,40 @@ struct OperationGateTests {
         }
         precondition(!shared.isBusy)
         print("PASS: 1000 lifecycle cycles preserve exclusive request ownership")
+
+        // An FSClient error can follow a partly completed mount. Recover the
+        // verified ASCF VFS path instead of enabling another mount request.
+        let orphan = ASCFMountPostflight(
+            returnedMount: false, callbackError: true,
+            verifiedReturnedPath: nil,
+            observedVerifiedPaths: ["/Volumes/Applesauce ASCF"]
+        )
+        precondition(orphan.hasOrphanedMount)
+        precondition(orphan.singleVerifiedPath == "/Volumes/Applesauce ASCF")
+        precondition(!orphan.cleanSuccess)
+
+        let clean = ASCFMountPostflight(
+            returnedMount: true, callbackError: false,
+            verifiedReturnedPath: "/Volumes/Applesauce ASCF",
+            observedVerifiedPaths: []
+        )
+        precondition(clean.cleanSuccess)
+        precondition(!clean.hasOrphanedMount)
+
+        let duplicate = ASCFMountPostflight(
+            returnedMount: true, callbackError: false,
+            verifiedReturnedPath: "/Volumes/Applesauce ASCF",
+            observedVerifiedPaths: ["/Volumes/Applesauce ASCF", "/Volumes/Other ASCF"]
+        )
+        precondition(!duplicate.cleanSuccess)
+        precondition(duplicate.hasOrphanedMount)
+        precondition(duplicate.singleVerifiedPath == nil)
+
+        let unrelated = ASCFMountPostflight(
+            returnedMount: true, callbackError: false,
+            verifiedReturnedPath: nil, observedVerifiedPaths: []
+        )
+        precondition(!unrelated.cleanSuccess && !unrelated.hasOrphanedMount)
+        print("PASS: mount callback reconciliation detects partial and ambiguous mounts")
     }
 }
