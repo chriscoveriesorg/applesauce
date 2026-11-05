@@ -410,6 +410,22 @@ mod tests {
     }
 
     #[test]
+    fn range_parser_enforces_unsigned_bounds_and_explicit_syntax() {
+        for bad in ["", "1", "-1:2", "1:-2", "1:2:3", "1:", ":2", "1.0:2", "18446744073709551615:1"] {
+            assert!(parse_logical_range(bad).is_err(), "accepted {bad:?}");
+            assert!(crate::Cli::try_parse_from([
+                "applesauce", "archive", "extract", "src.ascf", "slice", "--range", bad
+            ]).is_err());
+        }
+        assert_eq!(parse_logical_range("0:0").unwrap(), (0, 0));
+        assert_eq!(parse_logical_range("65535:131073").unwrap(), (65535, 131073));
+        assert!(crate::Cli::try_parse_from(["applesauce", "archive", "info", "source.ascf"]).is_ok());
+        assert!(crate::Cli::try_parse_from([
+            "applesauce", "archive", "extract", "source.ascf", "slice", "--range", "65535:131073"
+        ]).is_ok());
+    }
+
+    #[test]
     fn existing_targets_and_symlink_sources_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("input.jsonl");
@@ -449,13 +465,28 @@ mod tests {
             extract(&archive, &restored).unwrap();
             assert_eq!(fs::read(&source).unwrap(), payload);
             assert_eq!(fs::read(&restored).unwrap(), payload);
+            info(&archive).unwrap();
+            let part = dir.path().join("partial.jsonl");
+            extract_range(&archive, &part, (65_535, 131_073)).unwrap();
+            assert_eq!(fs::read(&part).unwrap(), payload[65_535..196_608]);
+            let empty = dir.path().join("empty-range");
+            extract_range(&archive, &empty, (payload.len() as u64, 0)).unwrap();
+            assert_eq!(fs::read(&empty).unwrap(), b"");
+            let past_end = dir.path().join("outside-range");
+            assert!(extract_range(&archive, &past_end, (payload.len() as u64, 1)).is_err());
+            assert!(!past_end.exists());
             // A broken tail chunk must not produce any output.
             let mut corrupt = fs::read(&archive).unwrap();
             *corrupt.last_mut().unwrap() ^= 1;
             fs::write(&archive, corrupt).unwrap();
+            // Header/index remains parseable although payload authentication fails.
+            info(&archive).unwrap();
             let refused = dir.path().join("refused.jsonl");
             assert!(extract(&archive, &refused).is_err());
             assert!(!refused.exists());
+            let bad_slice = dir.path().join("corrupt-range");
+            assert!(extract_range(&archive, &bad_slice, (payload.len() as u64 - 5, 5)).is_err());
+            assert!(!bad_slice.exists());
         }
     }
 
@@ -468,6 +499,10 @@ mod tests {
             verify(&text).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+        assert_eq!(info(&text).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let no_output = dir.path().join("bad-range");
+        assert!(extract_range(&text, &no_output, (0, 1)).is_err());
+        assert!(!no_output.exists());
         // A magic-correct but truncated prefix is also refused.
         let short = dir.path().join("short.ascf");
         fs::write(&short, b"ASCF0001").unwrap();
