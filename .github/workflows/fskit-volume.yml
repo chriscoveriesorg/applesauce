@@ -291,12 +291,19 @@ jobs:
           xcrun swiftc -swift-version 5 -o "$RUNNER_TEMP/ascf-read-bounds-tests" \
             fskit/ASCFExtension/ReadBounds.swift fskit/tests/ReadBoundsTests.swift
           "$RUNNER_TEMP/ascf-read-bounds-tests"
+      - name: Reject concurrent FSKit resource loads and stale publications
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            -o "$RUNNER_TEMP/ascf-resource-load-tests" \
+            fskit/ASCFExtension/ResourceLoadGate.swift fskit/tests/ResourceLoadGateTests.swift
+          "$RUNNER_TEMP/ascf-resource-load-tests"
       - name: Check Swift FSKit framework conformances against current SDK
         run: |
           xcrun swiftc -swift-version 5 -parse-as-library -typecheck \
             -import-objc-header crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h \
             fskit/ASCFExtension/ArchiveIdentity.swift \
             fskit/ASCFExtension/ReadBounds.swift \
+            fskit/ASCFExtension/ResourceLoadGate.swift \
             fskit/ASCFExtension/ASCFExtension.swift fskit/ASCFExtension/ASCFVolume.swift
       - name: Validate extension property list
         run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements fskit/Host/Host.entitlements

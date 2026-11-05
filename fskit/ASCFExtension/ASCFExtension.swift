@@ -13,6 +13,10 @@ struct ASCFExtension: UnaryFileSystemExtension {
 }
 
 final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
+    // FSKit may issue overlapping load/unload callbacks. All lifecycle
+    // state, including the in-flight verification ticket, is lock-protected.
+    private let lifecycleLock = NSLock()
+    private var loadGate = ASCFResourceLoadGate()
     private var volume: ASCFVolume?
     private var scopedURL: URL?
 
@@ -139,32 +143,56 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             replyHandler(nil, Self.error(EINVAL))
             return
         }
-        guard volume == nil else {
-            replyHandler(nil, Self.error(EBUSY))
-            return
-        }
         if options.taskOptions.contains("-f") {
             replyHandler(nil, Self.error(ENOTSUP))
             return
         }
+        lifecycleLock.lock()
+        let ticket = loadGate.begin()
+        lifecycleLock.unlock()
+        guard let ticket else {
+            replyHandler(nil, Self.error(EBUSY))
+            return
+        }
+
         let url = path.url
         guard url.startAccessingSecurityScopedResource() else {
+            lifecycleLock.lock()
+            loadGate.cancel(ticket)
+            lifecycleLock.unlock()
             replyHandler(nil, Self.error(EACCES))
             return
         }
         do {
-            // Full verification is a mandatory pre-publication gate.
+            // The reservation remains held across full archive verification.
+            // A second load cannot replace the descriptor, and an unload
+            // invalidates the reservation even while verification is running.
             let (handle, info, identity) = try Self.openArchive(url, verify: true)
             let mounted = ASCFVolume(
                 handle: handle, info: info, archiveName: url.deletingPathExtension().lastPathComponent,
                 identifier: Self.identifier(for: info, archiveURL: url),
                 selectedArchiveURL: url, sourceIdentity: identity
             )
-            volume = mounted
-            scopedURL = url
-            containerStatus = .ready
+            lifecycleLock.lock()
+            let published = loadGate.publish(ticket)
+            if published {
+                volume = mounted
+                scopedURL = url
+                containerStatus = .ready
+            }
+            lifecycleLock.unlock()
+            guard published else {
+                // The local mounted object owns and closes the duplicate FD.
+                // Never publish a volume after unload has cancelled its load.
+                url.stopAccessingSecurityScopedResource()
+                replyHandler(nil, Self.error(ENODEV))
+                return
+            }
             replyHandler(mounted, nil)
         } catch {
+            lifecycleLock.lock()
+            loadGate.cancel(ticket)
+            lifecycleLock.unlock()
             url.stopAccessingSecurityScopedResource()
             replyHandler(nil, error)
         }
@@ -175,14 +203,18 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         options: FSTaskOptions,
         replyHandler reply: @escaping ((any Error)?) -> Void
     ) {
-        // FSKit deactivates the volume and finishes its operations before
-        // unload. ASCFVolume releases the duplicated FD in deinit.
+        // Invalidate any pending load before releasing the published volume.
+        // FSKit finishes active volume operations before unloading it.
+        lifecycleLock.lock()
+        loadGate.unload()
+        let oldScope = scopedURL
+        let oldVolume = volume
         volume = nil
-        scopedURL?.stopAccessingSecurityScopedResource()
         scopedURL = nil
-        // FSKit's notReady state requires a reason on the macOS 27 SDK.
         containerStatus = .notReady(status: Self.error(ENODEV))
-        reply(nil)
+        lifecycleLock.unlock()
+        oldScope?.stopAccessingSecurityScopedResource()
+        withExtendedLifetime(oldVolume) { reply(nil) }
     }
 
     func didFinishLoading() {}
