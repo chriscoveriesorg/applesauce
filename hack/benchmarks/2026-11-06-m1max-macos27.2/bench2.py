@@ -262,6 +262,11 @@ def main():
             input_path = os.path.join(DATA, "edge", name)
             if not os.path.isfile(input_path):
                 raise FileNotFoundError(f"benchmark input file does not exist: {input_path}")
+    if which == "main":
+        for corpus in required:
+            corpus_dir = os.path.join(DATA, corpus)
+            if not files_in(corpus_dir):
+                raise ValueError(f"benchmark corpus has no input files: {corpus_dir}")
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
     write_header = not os.path.exists(CSV_PATH)
