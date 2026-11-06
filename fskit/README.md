@@ -1,0 +1,514 @@
+# ASCF FSKit extension, experimental
+
+The ASCF volume exposes **one restored logical file** under a **separate mount
+point**. It is read-only. The filename is derived from the archive basename,
+because the v1 archive does not store its original filename. macOS 26+ FSKit
+and the macOS 27+ Raven/Mesh public buffer decoders are required.
+
+The FSKit module uses Apple's \`FSUnaryFileSystem\` and \`FSVolume.Operations\`
+APIs, with a security-scoped \`FSPathURLResource\`. Before publishing the
+volume it opens the source O_RDONLY/O_NOFOLLOW, asks the Rust bridge to verify
+**every chunk plus the whole-file SHA-256**, and exposes a single deterministic
+root/file directory. Reads are bounded to 8 MiB per call, support EOF and
+random offsets, and reject corruption. Mutations return EROFS. The separate
+mount point does not alter the original path or provide native APFS
+\`decmpfs\` Raven/Mesh compression.
+
+Build an unsigned development host and extension on a Mac with a compatible
+Xcode/macOS SDK:
+
+    CARGO_TARGET_DIR="$PWD/target" cargo build --locked --release -p applesauce-fskit-bridge
+    xcodegen generate --spec fskit/project.yml
+    xcodebuild -project fskit/ApplesauceASCF.xcodeproj \
+      -scheme ASCFHost -configuration Debug CODE_SIGNING_ALLOWED=NO build
+
+The volume identifier is derived deterministically from the verified logical digest,
+codec selector, and selected archive URL. FSKit sees the same container/volume
+identity at probe and load, and remounting the same archive preserves its
+identity. Distinct Raven and Mesh archives remain distinguishable even when
+they restore identical logical bytes. Unload resets the container readiness.
+
+Automatic Finder probes admit only case-insensitive `.ascf` filenames.
+Unrelated resources return `notRecognized` before reserving a verifier slot,
+requesting security-scoped access or reading any bytes. This avoids exhausting
+the bounded SHA-256 verification queue when Finder scans large directories.
+The host's explicitly selected `FSClient.mountSingleVolume` path still validates
+archive magic and every chunk, independent of its filename.
+
+Both automatic probes and explicit mounts must produce a single safe
+Finder-visible restored member name before decoding or acquiring sandbox
+access. The extension derives that name from the archive's basename and
+rejects ASCII control characters, DEL, slash, colon, backslash, dot/dot-dot,
+empty names and names longer than 255 UTF-8 bytes. Explicit unsafe-name
+requests fail with EINVAL; automatic probes do not claim the resource.
+This matches `finder_mount_witness.py`'s safe-copy requirements, so the
+mounted member name cannot silently alias a different filename. Unicode
+and spaces in valid filenames remain supported. The portable Swift
+`MountedMemberNameTests.swift` suite executes in macOS FSKit CI.
+
+Probe and load run full archive verification on one dedicated worker
+rather than blocking FSKit's callback thread. Explicit mount loads overtake
+queued Finder probes and preempt a currently verifying probe at the next
+authenticated chunk boundary, using the bridge's atomic cancellation flag.
+A preempted probe reports EBUSY so FSKit can retry it later; its security scope
+is released and no incomplete verification can be advertised as usable.
+The handle lifetime is guarded against concurrent unregister/close. At most
+eight pending probes and sixteen pending mounts can wait for the worker
+across FSKit instances. Their queued closures retain the selected URL but
+acquire **no security scope** until the verification worker begins. A
+ninth selected ASCF probe or seventeenth pending mount returns EBUSY
+without opening the archive. Refused mounts release their lifecycle
+reservation.
+Once the queue drains a mount can be retried. The scheduler never runs two
+decoders concurrently, so scratch memory remains bounded. An unload
+invalidates a queued load ticket, allowing the worker to skip decoding that archive. An unload also sets a Rust atomic
+cancellation flag for in-flight verification, stopping work at the next
+chunk boundary. A cancelled load returns ECANCELED and cannot publish the
+volume. The lifecycle lock prevents freeing a verification handle during
+cancellation. Probe scopes close as soon as their worker returns, including
+verification failure or preemption. Mount scopes start on the admitted
+worker and remain held by the published volume until unload; failed or
+cancelled mounts release them on that worker. The SDK compiler and
+portable scheduling/cancellation tests cover these paths; physical
+security-scope activation from an FSKit worker still requires signed
+mount acceptance on the provisioned Mac.
+
+The module's built `Info.plist` includes the FSKit activation, check, and
+format **option syntax metadata** from Apple's extension template. Those
+dictionaries configure FSKit command parsing, rather than enabling format
+operations; the module remains read-only and does not implement formatting.
+The CI build checks the *processed extension bundle* and the signed host
+preflight checks its actual activation syntax. This addresses a reported
+runtime probe failure when `FSActivateOptionSyntax.shortOptions` is missing.
+It does not establish successful signed mounting.
+
+Installing and mounting requires a valid developer signing identity,
+FSKit entitlement and explicit local extension enablement. The CI build
+type-checks the extension but does not install, approve, or mount it. End-to-end
+mounted readback needs an authorized disposable macOS host. The ASCF format
+is experimental and must not be the only copy of important files.
+
+Signed package provenance now records executable fingerprints and inherited
+build flags, including Cargo configuration files in `CARGO_HOME` and the
+`.cargo/config` / `.cargo/config.toml` search path from the checkout through
+its parent directories. These configuration files can change compiler and
+linker behaviour even when the Git working tree is clean. The manifest-covered
+`build-tools.txt` records their SHA-256 values or explicit absence, without
+publishing local paths or file contents. The package command compares this
+witness before and after the signed build, refusing altered, symlinked or
+nonregular configuration files. The toolchain `--self-test` command returns
+a failing process status when tests fail, so CI can enforce these checks.
+This evidence covers build inputs and does not establish signed mount acceptance.
+
+References: Apple's "Building a passthrough file system" sample and
+https://developer.apple.com/documentation/fskit/fsunaryfilesystemoperations .
+
+## User-initiated mounting on macOS 27+
+
+After signing and installing `ASCFHost.app` with the authorized FSKit
+module and mount entitlements, enable its filesystem extension in System
+Settings > General > Login Items & Extensions > File System Extensions.
+Launch the host, choose an `.ascf` file and select **Mount**. The host
+passes a read-only, security-scoped path resource to
+`FSClient.mountSingleVolume`. FSKit verifies the logical archive before
+publishing a volume under `/Volumes`, where Finder and ordinary apps can
+read the restored file. The host shows the resulting path and can reveal it
+in Finder. The original source path and attributes stay untouched.
+
+Provisioning must authorize both `com.apple.developer.fskit.fsmodule`
+(for the extension) and `com.apple.developer.fskit.mount` (for the host).
+Run `bash fskit/signed_acceptance.sh preflight` before compiling. It checks
+an unlocked Apple Development identity and locally installed, unexpired
+provisioning profiles that authorize **both** exact ASCF app IDs, including
+profiles stored in Xcode's newer `UserData/Provisioning Profiles` directory.
+The restricted FSKit grant checker requires an explicit identifier for each
+signed bundle. Wildcard App ID profiles such as `TEAM.*` are rejected as
+insufficient proof of authorization, even when they contain a grant key.
+It accepts macOS `.provisionprofile` and `.mobileprovision` files. If Xcode
+uses managed signing, open Xcode to create/download the two profiles first.
+The preflight reads CMS profiles without installing or modifying them.
+A passing preflight establishes local grants; the signed-build step then
+checks the embedded entitlements and certificate-bound signatures.
+Unsigned development builds validate compilation only. A complete signed
+install, extension enablement, mounted listing and SHA-256 comparison on
+an authorized disposable Mac remain required before claiming runtime
+compatibility. If the host lacks either entitlement, expect mount failure.
+
+## Signed negative control for corrupted archives
+
+The signed host exposes **Test corrupted archive mount refusal** alongside the
+normal mount button. Use it on the authorized disposable Mac after the
+extension has been installed and enabled. Select each generated
+`source.<codec>.corrupt.ascf` file from the portable acceptance bundle.
+The host fingerprints the chosen regular file through a no-follow, read-only
+file descriptor before and after FSClient. Its diagnostic carries
+`sha256=<digest>` for the exact selected bytes; `acceptance-check` must match
+that fingerprint to the manifest-covered corrupted fixture. A different
+corrupt archive with the same filename cannot qualify as this control.
+The host calls the same real `FSClient.mountSingleVolume` API as the normal
+mount path and keeps the full rejection diagnostic visible and copyable.
+A returned mount is reported as `CORRUPT_REFUSAL_FAIL` and blocks acceptance;
+the host never silently unmounts an unexpected result.
+
+`CORRUPT_REFUSAL_CONFIRMED` now requires the signed FSKit probe to return
+`FSKitErrorDomain` / `FSError.Code.resourceDamaged`, with no surviving ASCF
+volume. The host records `FSKitErrorDomain resourceDamaged code N` with the
+SDK's observed nonzero code. The packaged evidence checker requires the
+symbolic `resourceDamaged` identity; another FSKit error code or a generic
+permission/activation failure cannot satisfy this negative control. The extension emits this typed error only when a recognized ASCF
+header/index fails full codec or SHA-256 verification. Any other rejection,
+including permission, entitlement, sandbox or activation errors, produces
+`CORRUPT_REFUSAL_INCONCLUSIVE`. Capture diagnostics for **both** codecs.
+CLI verification alone does not prove mounted-path corruption refusal.
+
+## Terminal-driven FSKit mount on a provisioned disposable Mac
+
+Apple's FSKit passthrough sample documents dispatching a registered filesystem
+extension through `mount -t <filesystem>`. With the **signed** ASCF extension
+installed and enabled, the acceptance bundle now provides an explicit owner-run
+path using the registered `ascf` short name:
+
+```sh
+cd /path/to/ascf-acceptance.XXXXXXXX
+bash fskit/signed_acceptance.sh cli-mount . lzraven
+# Follow the printed Finder readback and normal unmount commands.
+```
+
+This invokes macOS `mount -F -k -r -t ascf` on a newly created private
+directory under `/private/tmp`. The `-F` flag selects the registered FSKit
+module instead of a traditional `mount_ascf` helper; `-k` refuses symlink
+substitution of the mountpoint, and `-r` requests a read-only kernel mount.
+The script checks the signed host and extension, provisioning profiles,
+handoff manifest and selected synthetic archive before the mount request.
+It retains the exact invocation in `mount-command.txt`, together with
+`mount-command.log`. An independent reader then verifies actual ASCF VFS
+identity, whole-file SHA-256, unaligned/random reads, EOF and denied write-opens.
+The command never elevates privileges, overwrites an existing path, changes
+APFS metadata or forces unmount.
+
+The signed host UI remains required for the corrupted-archive refusal control
+and the independently staged source-replacement control. Terminal mounting
+is a second integration path; a system mount failure establishes only that the
+specific host, permission or extension setup rejected it. Finder acceptance
+uses the separate `bundle-readback` command printed by `cli-mount`.
+
+The combined evidence checker also accepts real mounted Finder readback
+from the exact private `/private/tmp/ascf-cli-mount.XXXXXXXX/mount` directory
+created by `cli-mount`. Earlier it rejected these otherwise valid reports
+because it permitted only `/Volumes/` paths. It still requires the signed
+bundle, an actual unique read-only `ascf` VFS mount, complete hash and
+boundary-read proof, Finder copy-out, witnessed unmount/remount, typed
+corruption refusal and independent staged-replacement refusal. Arbitrary
+temporary paths and path traversal are rejected. Full physical acceptance
+and independent review remain outstanding.
+
+## Reproducible mounted-file acceptance
+
+The unsigned build and Swift typecheck cannot prove that macOS will register
+an extension or serve bytes through the actual mount. On an **authorized
+disposable** macOS 27+ host, sign and enable the module, then use the host UI
+to mount an ASCF archive created from a retained, uncompressed test fixture.
+
+Run from the repository checkout with the separate volume's actual mount
+point and that fixture:
+
+```sh
+python3 fskit/verify_mount.py --mount "/Volumes/Applesauce ASCF" --original "/path/to/fixture"
+```
+
+On macOS, the signed acceptance gate confirms the actual filesystem type is\n`ascf` using Darwin `statfs(2)` and its `f_fstypename` field and records the macOS product version and build\nin its JSON evidence. An ordinary APFS/disk-image mount with matching bytes\nwill fail this gate. Synthetic tests deliberately bypass the real mount check.\n\nThe verifier refuses an unmounted directory, symlinks, multi-file mounts,
+unexpected writable opens and any mismatched logical bytes. It reads the whole
+restored file for SHA-256, samples bounded, evenly distributed offsets throughout the logical file,
+including 4 KiB, 64 KiB and 8 MiB boundaries, and rejects reads that return
+bytes at or beyond EOF. Its negative read-only check tries both **O_WRONLY**
+and **O_RDWR** opens without issuing any writes. It never changes the mounted
+file, source, ASCF archive or APFS metadata.
+Each signed readback also checks Darwin's complete kernel mount table. Exactly one `ascf` volume must be active, at the selected mountpoint, throughout the Terminal/Finder verification. Normal-unmount the private `cli-mount` volume before starting a host-UI mount, and unmount the prior codec before testing the next. A duplicate, stacked, relocated, or unexpected ASCF volume blocks acceptance even when the logical SHA-256 matches. This protects the operator evidence against attributing readback to an unrelated live FSKit mount. The mount-table check is repeated after Finder's copy-out; it does not replace signed physical-mount review.
+
+Before either `readback` or `bundle-readback` passes a restored member name to Finder, `finder_mount_witness.py --readback-name` safely opens the generated readback JSON using `O_NOFOLLOW | O_NONBLOCK`, enforces the bounded regular-file/unique-key parser and requires successful real VFS, read-only and write-denial evidence. A member must be a single Finder-safe filename, without traversal, colons, backslashes or control characters. `bundle-readback` additionally requires the exact `source.<codec>` name. The direct command can verify the operator-generated report using `python3 fskit/finder_mount_witness.py --readback-name /path/readback.json`. This check occurs before AppleScript or local Finder-copy path construction and supplements the full post-copy identity witness.
+
+The signed Finder readback now runs the complete mounted verifier **again after Finder finishes copying**. A packaged `finder_mount_witness.py` checks that the pre/post Finder reports refer to the same kernel ASCF filesystem ID, mount directory device/inode, restored filename, logical SHA-256, read-only flags, and macOS build. It hashes the Finder copy independently and only then atomically stamps the first report with a verification ID. Missing post-Finder evidence, a swapped mount or a changed file blocks acceptance. The second report is retained as `post-finder-readback.json` for independent review. This is read-only acceptance instrumentation, not a signed physical-mount result by itself.
+
+Store the JSON report alongside the signed extension identity, macOS build,
+archive creation command, mount/unmount evidence and CLI verification output.
+A passing synthetic unit test does not qualify the FSKit runtime.
+
+Portable acceptance harness tests (also run in FSKit CI):
+
+```sh
+python3 fskit/verify_mount.py --self-test
+```
+
+The host now keeps track of the single active mount. Use **Unmount read-only
+volume** to request a normal macOS unmount; the UI reports busy-volume or
+permission errors rather than forcing an eject. Finder-initiated unmounts also
+clear the host's mounted state. Mounting another archive is disabled while a
+mount or unmount is underway or an archive remains mounted. A successful
+compile does not establish that signed installation and unmount work on a
+real macOS host; both remain part of end-to-end acceptance.
+
+
+## Signed, provisioned owner-run acceptance (disposable Mac)
+
+The compile workflow checks Swift and the bridge but cannot approve Apple's
+restricted entitlements or mount a real FSKit volume. This script makes those
+missing steps executable without changing APFS metadata:
+
+```sh
+# On a macOS 27+ Mac signed into a provisioned Apple Developer team:
+export ASCFSKIT_TEAM_ID=YOUR_10_CHARACTER_TEAM_ID
+bash fskit/signed_acceptance.sh signed-build
+bash fskit/signed_acceptance.sh fixture lzmesh
+# Optional second fixture with: fixture lzraven
+
+# Install the resulting ASCFHost.app on the authorized disposable Mac.
+# Enable the extension in System Settings > General > Login Items & Extensions.
+# Open ASCFHost.app and select the generated source.lzmesh.ascf archive.
+bash fskit/signed_acceptance.sh readback \
+  "/path/to/ASCFHost.app" "/Volumes/Applesauce ASCF" \
+  "/path/to/generated/source.jsonl"
+```
+
+For a single signed handoff containing both independently verified codecs,
+use:
+
+```sh
+export ASCFSKIT_TEAM_ID=YOUR_10_CHARACTER_TEAM_ID
+bash fskit/signed_acceptance.sh package
+```
+
+The standalone `signed-build` command now checks the clean, byte-exact Git
+source tree and snapshots compiler/toolchain identity before Rust or Xcode
+runs. After both builds, it rejects a changed HEAD, tracked-source bytes,
+Cargo configuration, compiler wrappers or build environment before releasing
+its signed host path. Its evidence folder includes `source-provenance.txt`,
+`build-tools.txt`, `build-tools-after.txt` and `source-check-after-build.txt`.
+The `package` command repeats these checks across fixture generation and final
+manifest creation. Portable CI checks their ordering; only an authorized Mac
+with signing grants can exercise the actual signed path.
+
+The `package` command builds and verifies a signed host and extension,
+generates matching synthetic cleartext plus LZRaven/LZMesh archives, creates
+one payload-corrupted ASCF fixture per codec, and confirms both corrupted
+fixtures fail CLI verification. It writes an isolated directory with
+`ASCFHost.app`, `SHA256SUMS`, fixture generation/build logs,
+`NEXT-STEPS.txt`, the original test data and **copies of both acceptance scripts**.
+The manifest includes all acceptance scripts, the Finder AppleScript, the recorded macOS build, authenticated operator instructions and every fixture,
+plus the exact signed host and extension executables, their Info.plists,
+code-signing resource seals and embedded provisioning profiles. The bundle
+records the source commit in `source-provenance.txt` as exactly two lines:
+`repository=chriscoveriesorg/applesauce` and `commit=<full 40-hex SHA>`.
+The final acceptance validator refuses a different repository, shortened SHA,
+non-hex revision or additional metadata even if operator evidence is otherwise
+self-consistent. The manifest hashes this record. An independent reviewer must
+still compare its full commit against the branch HEAD and signed host build.
+Packaging now
+requires a clean checkout, including no untracked source inputs, before
+signing. The attestation compares every tracked file's actual on-disk bytes
+with its staged Git blob using `git hash-object --no-filters`. This rejects
+modified Swift/Rust source concealed by user-configured Git clean filters,
+index flags or newline conversion. Prepare a byte-identical checkout on the
+signing Mac; a checkout with automatic line-ending conversion must be
+re-created with the source bytes preserved before packaging. It rechecks the
+same exact HEAD and raw source bytes after the build and after manifest
+generation to prevent a concurrent source change from receiving a misleading
+signed-package provenance stamp. The package also hashes the resolved
+Cargo/Rust, Xcode, Swift, Clang and XcodeGen executables before and after the
+signed build. Inherited Rust compiler wrappers, CC/CXX/linkers,
+`CARGO_TARGET_*_LINKER` overrides, Cargo's `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`
+and `CARGO_BUILD_RUSTDOC` aliases are fingerprinted by executable bytes,
+not merely their environment strings. All `CARGO_BUILD_*` overrides and
+`RUSTC_BOOTSTRAP` are included in the privacy-preserving environment witness. Ambiguous shell-command overrides
+fail closed: provide a single executable path or unset the override before
+signing. This detects a swapped compiler wrapper even when the checkout,
+override value and nominal tool versions are unchanged. The XcodeGen-generated
+`fskit/ApplesauceASCF.xcodeproj` and Rust `target` are ignored build products.
+The generated `source-check-final.txt` and bundled
+`source-provenance-tests.log` provide separate audit evidence. Run
+`bash fskit/signed_acceptance.sh manifest-check /path/to/bundle` before
+installing to verify every mandatory member and its SHA-256 independently.
+Run `bash fskit/signed_acceptance.sh bundle-code-check /path/to/bundle`
+from the selected package to also require that the running operator script is
+identical to the manifest-covered script. Every signed-bundle action now runs
+its packaged Python verifier, including the signing-profile check. A checkout
+whose acceptance script differs from the package stops before mount or
+replacement operations; use the package's own `fskit/signed_acceptance.sh`.
+A copied folder can be verified without Rust or the original repository checkout. Test the two valid
+files for mounted readback, normal unmount and remount; then attempt to mount
+both damaged archives and retain macOS rejection evidence. CLI verification proves that
+damaged data fails the archive decoder; only a real FSKit mount refusal
+qualifies the signed integration. The command itself never mounts anything.
+
+To run acceptance on a separate authorized Mac, copy the generated directory
+as a unit, install/enable the included signed host, and mount the archive from
+the host UI. Then use the **bundled** script from inside that copied directory:
+
+```sh
+cd /path/to/ascf-acceptance.XXXXXXXX
+bash fskit/signed_acceptance.sh bundle-readback . \
+  "/Volumes/Applesauce ASCF" lzmesh
+```
+
+The command validates the relative SHA256SUMS manifest, signed host and
+extension entitlements, the actual `ascf` mount type, SHA-256, random reads,
+EOF, denied write-open and the expected restored filename `source.lzmesh`.
+It also asks Finder through Apple Events to enumerate the one restored file and
+confirm its name and logical size. Keep the `finder-readback.txt` result beside
+the SHA-256 evidence. macOS may ask the invoking Terminal for permission to
+control Finder; a denial fails acceptance and is logged to `finder-error.txt`.
+The test opens no user files in Finder and makes no write requests.
+Repeat using `lzraven` after remounting its archive. The result includes the
+path to `readback.json` for subsequent `bundle-unmounted` verification. Both signed-bundle commands
+execute manifest-covered packaged helpers, including the Finder AppleScript.
+They never install, mount or edit a volume.
+
+The owner-run signing check also binds each provisioning profile to the signed
+bundle identifier and code-signing team. It rejects expired profiles and
+profiles that grant FSKit to another app, before extension installation.
+These checks run on the packaged helper without requiring the original checkout.
+
+The script verifies the host and extension code signatures **and** checks
+that both signed entitlements are allowed in their embedded provisioning
+profiles. A development/ad-hoc signature without those capabilities fails.
+It generates deterministic synthetic input above 8 MiB; archive construction
+and `archive verify` must succeed before mounting. The mounted acceptance
+uses the existing Python verifier for actual FSKit identity, complete logical
+SHA-256, randomized/boundary/EOF reads and denied write-opens. Each command
+writes evidence to a unique temporary directory and prints its path.
+Never use private source files for this test.
+
+After successful `readback`, use **Unmount read-only volume** in the host or
+Finder's normal eject action, then prove that the previously verified mount
+has disappeared. This command requires the successful `readback.json` from
+that same volume. It inspects Darwin's complete `getmntinfo` kernel mount table\nfor FSKit mounts, including private Terminal mountpoints, and rejects any\nsurviving ASCF volume, relocated mount or filesystem still using the prior\nmountpoint. A disappeared directory alone cannot qualify as a successful\nunmount. The witness binds the prior Finder-verified readback ID, SHA-256 and\nmacOS build to the observed zero-ASCF state:
+
+```sh
+bash fskit/signed_acceptance.sh bundle-unmounted . \
+  "/Volumes/Applesauce ASCF" "/tmp/ascf-bundle-readback.EXAMPLE/readback.json"
+```
+
+The bundle-unmounted command authenticates the package, signed host and
+extension, then binds the earlier Finder readback to the exact source codec,
+logical byte count and SHA-256 before witnessing a complete kernel unmount.
+The standalone `unmounted` command remains available for development
+diagnostics.
+
+Remount the original synthetic archive through the host UI and run `bundle-readback`
+again, retaining both JSON reports and the unmount evidence. The host uses
+FileManager's asynchronous volume unmount API rather than device ejection,
+so busy volumes are reported without a forced unmount or device action.
+The portable unmount checker has nine synthetic regressions and a macOS 27
+CI check that calls the real Darwin `getmntinfo` ABI. Those checks validate
+the witness code; only a signed, mounted physical lifecycle can satisfy
+PR #86 acceptance.
+Collect the Xcode build logs, signed entitlement/profile snapshots, and
+macOS build with the complete lifecycle evidence. Signing requires the Apple Developer
+team to provision `com.apple.developer.fskit.mount` and
+`com.apple.developer.fskit.fsmodule`. The script intentionally does not install
+an extension, request privileges, mount or force-unmount it. Owner-run
+acceptance is **still pending** until a signed disposable Mac demonstrates
+the full lifecycle; synthetic CI remains only a prerequisite.
+
+### Real mounted archive-replacement refusal on disposable test copies
+
+A valid ASCF archive must refuse fresh reads when its underlying pathname
+has been replaced after mounting. Test this separately from the corrupted
+payload control, using only private synthetic copies. On the authorized
+disposable macOS host, inside the signed acceptance bundle:
+
+```sh
+bash fskit/signed_acceptance.sh replacement-stage . lzmesh
+# Select the exact path printed by replacement-stage, for example
+# /tmp/ascf-replacement-.../source.lzmesh.<random-16-hex>.ascf
+# in the signed host. The resulting mounted filename MUST contain that nonce.
+# Then execute with the printed stage directory:
+bash fskit/signed_acceptance.sh replacement-check \
+  /tmp/ascf-replacement-XXXXXXXX "/Volumes/Applesauce ASCF" \
+  ./source.lzmesh.jsonl
+# Unmount normally, then repeat with lzraven.
+```
+
+The first command checks the signed bundle and copies its intact archive and
+independently damaged replacement into a private mode-0700 temporary directory.
+The copied archive receives a fresh random 16-hex suffix. Since FSKit uses
+the selected archive's basename as its mounted filename, replacement-check
+requires that same suffix in the restored filename before it replaces anything.
+This prevents an existing byte-identical mount of the original bundle archive
+from being mistaken for the independent staged replacement. The final evidence
+checker also verifies the stage nonce, generated archive name, mounted filename
+and stage-path consistency. These assertions are acceptance evidence checks;
+an independently reviewed signed physical mount is still mandatory.
+
+Its stage metadata records the canonical original signed bundle path. Keep
+that bundle in place until replacement-check finishes: the check reauthenticates
+the bundle manifest, selected helper, signed host and original fixture hashes
+before changing the staged copy. The second authenticates the **real mounted ASCF VFS** and whole logical
+SHA-256 before atomically replacing only the staged copy. It then requires
+**independent fresh opens** to reject reads at a deterministic series of
+offsets: the beginning, 4 KiB, 64 KiB and 8 MiB boundaries (with adjacent
+unaligned bytes), the midpoint, final byte, EOF and beyond EOF. Every
+probe must fail with ESTALE, EIO or ENODEV; readable cached data, even
+an empty successful EOF read, or an unrelated access error fails
+acceptance. Save the `denied_offsets` and matching `denied_errnos`
+arrays in the generated JSON alongside source hashes and signed-host
+diagnostics. The final evidence checker independently recomputes the
+required offset schedule from the authenticated reference file and rejects
+missing, reordered or successful probes. This check never installs, mounts,
+unmounts, changes xattrs or touches the source bundle.
+The operator must unmount normally after the negative-control attempt.
+
+The replacement-check command saves its verified report as
+/tmp/ascf-replacement-evidence.XXXXXXXX/replacement.json. Pass that file to
+acceptance-check as the last argument, after recording the first mount,
+witnessed unmount and remount. The final evidence gate binds both archive
+SHA-256 values, restored logical bytes, actual ASCF read-only VFS identity,
+macOS build, stale-read errno and event ordering to the signed bundle.
+Archive replacement refusal is required for both Raven and Mesh.
+
+Tests of this helper run as part of the macOS FSKit compile workflow and the
+signed acceptance package. A successful synthetic test never establishes
+actual mounted acceptance.
+
+### Machine-check the full signed lifecycle evidence
+
+For each codec, run `bundle-readback` on its first mount and again after
+a normal unmount confirmed with `unmounted`. Capture the host's
+`CORRUPT_REFUSAL_CONFIRMED` diagnostic as a text file after selecting the
+matching damaged fixture. The portable bundle contains a final check:
+
+```sh
+bash fskit/signed_acceptance.sh acceptance-check . lzmesh \
+  /path/first/readback.json /path/unmount/unmounted.json \
+  /path/remount/readback.json /path/corrupt-refusal.txt \
+  /path/replacement/replacement.json
+# Repeat for lzraven with its own five evidence files.
+```
+
+After obtaining all five evidence files for **both** codecs, run the combined
+signed-host acceptance gate. Supply Raven's first/readback, unmount, remount,
+corrupt-refusal and replacement evidence paths, followed by Mesh's five paths:
+
+```sh
+bash fskit/signed_acceptance.sh acceptance-all . \
+  /raven/first.json /raven/unmounted.json /raven/remount.json \
+  /raven/corrupt-refusal.txt /raven/replacement.json \
+  /mesh/first.json /mesh/unmounted.json /mesh/remount.json \
+  /mesh/corrupt-refusal.txt /mesh/replacement.json
+```
+
+This validates the entire per-codec chain twice, requires identical restored
+logical bytes and recorded macOS build, and rejects reused verification IDs
+between the four mounted-readback events. A successful combined report still
+needs independent review of real signed installation and mounts. The
+verification code has portable synthetic tests; the signed-host command has
+not been exercised on a provisioned Mac.
+
+The command rechecks the SHA-256 manifest, signing identities, the archived
+source and both readback JSON reports, the intervening unmount, kernel-level
+read-only VFS flags, random/EOF evidence and the typed corruption-refusal
+diagnostic. It emits a JSON summary with hashes of all five evidence files for each codec.
+Its success establishes **internal consistency of operator-supplied evidence**, including the staged archive-replacement refusal;
+the captured host diagnostic is not a signed machine attestation. Independent
+review of the authorized Mac's actual installed extension and mounted
+readback remains mandatory before merging PR #86. The gate can be regression
+tested separately with `python3 fskit/acceptance_evidence.py --self-test`.

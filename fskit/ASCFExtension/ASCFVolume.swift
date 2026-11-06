@@ -1,0 +1,263 @@
+// Single-file, read-only FSKit volume. All logical bytes come from the
+// SHA-256-verified ASCF bridge; directory operations never visit host paths.
+import Foundation
+import FSKit
+import Darwin
+
+final class ASCFItem: FSItem {
+    let name: FSFileName
+    let attributes: FSItem.Attributes
+
+    init(name: FSFileName, fileID: FSItem.Identifier, parentID: FSItem.Identifier,
+         type: FSItem.ItemType, size: UInt64) {
+        self.name = name
+        let a = FSItem.Attributes()
+        a.fileID = fileID
+        a.parentID = parentID
+        a.type = type
+        a.uid = getuid()
+        a.gid = getgid()
+        a.linkCount = 1
+        a.size = size
+        // This is logical allocation, not a claim about compressed APFS blocks.
+        a.allocSize = size
+        a.mode = type == .directory ? UInt32(S_IFDIR | 0o555) : UInt32(S_IFREG | 0o444)
+        a.flags = UInt32(UF_IMMUTABLE)
+        self.attributes = a
+        super.init()
+    }
+}
+
+final class ASCFVolume: FSVolume {
+    private let handle: OpaquePointer
+    private let root: ASCFItem
+    private let file: ASCFItem
+    private let selectedArchiveURL: URL
+    private let sourceIdentity: ASCFArchiveIdentity
+
+    init(handle: OpaquePointer, info: AscfInfo, archiveName: String, identifier: UUID,
+         selectedArchiveURL: URL, sourceIdentity: ASCFArchiveIdentity) {
+        self.handle = handle
+        self.selectedArchiveURL = selectedArchiveURL
+        self.sourceIdentity = sourceIdentity
+        root = ASCFItem(name: FSFileName(string: "/"),
+                        fileID: .rootDirectory, parentID: .parentOfRoot,
+                        type: .directory, size: 1)
+        // The filesystem validated archiveName before this volume was published.
+        file = ASCFItem(name: FSFileName(string: archiveName),
+                        fileID: FSItem.Identifier(rawValue: FSItem.Identifier.rootDirectory.rawValue + 1) ?? .invalid,
+                        parentID: .rootDirectory, type: .file, size: info.logical_size)
+        super.init(volumeID: FSVolume.Identifier(uuid: identifier),
+                   volumeName: FSFileName(string: "Applesauce ASCF"))
+    }
+
+    deinit { ascf_close(handle) }
+
+    private func failure(_ code: Int32) -> Error { fs_errorForPOSIXError(code) }
+    private func isRoot(_ item: FSItem) -> Bool { item === root }
+    private func isFile(_ item: FSItem) -> Bool { item === file }
+    private func requireOriginalArchive() throws {
+        guard sourceIdentity.matchesPath(selectedArchiveURL) else { throw failure(ESTALE) }
+    }
+}
+
+extension ASCFVolume: FSVolume.PathConfOperations {
+    var maximumLinkCount: Int { 1 }
+    var maximumNameLength: Int { 255 }
+    var restrictsOwnershipChanges: Bool { true }
+    var truncatesLongNames: Bool { false }
+    var maximumXattrSize: Int { 0 }
+    var maximumFileSize: UInt64 { file.attributes.size }
+}
+
+extension ASCFVolume: FSVolume.Operations {
+    // Ask FSKit to mount the volume read-only at the VFS layer as well as
+    // rejecting every modifying operation. FSKit samples this property after
+    // mount(options:) returns; a client-supplied mount option is insufficient.
+    var requestedMountOptions: FSVolume.MountOptions { .readOnly }
+
+    var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
+        let capabilities = FSVolume.SupportedCapabilities()
+        capabilities.supportsPersistentObjectIDs = true
+        capabilities.supports64BitObjectIDs = true
+        capabilities.doesNotSupportVolumeSizes = true
+        capabilities.caseFormat = .sensitive
+        return capabilities
+    }
+
+    var volumeStatistics: FSStatFSResult {
+        let stats = FSStatFSResult(fileSystemTypeName: "ascf")
+        stats.blockSize = 4096
+        stats.ioSize = 1024 * 1024
+        stats.totalBlocks = 0
+        stats.availableBlocks = 0
+        stats.freeBlocks = 0
+        stats.totalFiles = 2
+        stats.freeFiles = 0
+        return stats
+    }
+
+    func activate(options: FSTaskOptions) async throws -> FSItem {
+        try requireOriginalArchive()
+        return root
+    }
+    func deactivate(options: FSDeactivateOptions = []) async throws {}
+    func mount(options: FSTaskOptions) async throws { try requireOriginalArchive() }
+    func unmount() async {}
+    func synchronize(flags: FSSyncFlags) async throws {}
+
+    func attributes(_ requested: FSItem.GetAttributesRequest,
+                    of item: FSItem) async throws -> FSItem.Attributes {
+        guard let entry = item as? ASCFItem, isRoot(item) || isFile(item) else {
+            throw failure(ENOENT)
+        }
+        try requireOriginalArchive()
+        return entry.attributes
+    }
+
+    func setAttributes(_ requested: FSItem.SetAttributesRequest,
+                       on item: FSItem) async throws -> FSItem.Attributes {
+        throw failure(EROFS)
+    }
+
+    func lookupItem(named name: FSFileName,
+                    inDirectory directory: FSItem) async throws -> (FSItem, FSFileName) {
+        guard isRoot(directory), name == file.name else { throw failure(ENOENT) }
+        try requireOriginalArchive()
+        return (file, file.name)
+    }
+
+    func reclaimItem(_ item: FSItem) async throws {}
+    func readSymbolicLink(_ item: FSItem) async throws -> FSFileName { throw failure(EINVAL) }
+
+    func enumerateDirectory(_ directory: FSItem, startingAt cookie: FSDirectoryCookie,
+                            verifier: FSDirectoryVerifier,
+                            attributes: FSItem.GetAttributesRequest?,
+                            packer: FSDirectoryEntryPacker) async throws -> FSDirectoryVerifier {
+        guard isRoot(directory) else { throw failure(ENOTDIR) }
+        try requireOriginalArchive()
+        // FSKit requires "." and ".." when attributes are not requested,
+        // while requests with attributes should enumerate ordinary items only.
+        // Cookies identify a position in the canonical [., .., file] sequence.
+        // A failed pack does not advance it, so FSKit can retry with more room.
+        let includeDotEntries = attributes == nil
+        let start: Int
+        switch cookie {
+        case .initial:
+            start = includeDotEntries ? 0 : 2
+        case FSDirectoryCookie(1) where includeDotEntries:
+            start = 1
+        case FSDirectoryCookie(2) where includeDotEntries:
+            start = 2
+        case FSDirectoryCookie(3):
+            return FSDirectoryVerifier(1)
+        default:
+            // FSKit specifies NSPOSIXErrorDomain with the dedicated
+            // invalid-directory-cookie code. The FSKitErrorDomain wrapper
+            // compiles but violates the readdir error contract on macOS 27,
+            // which can make Finder handle stale directory cursors incorrectly.
+            throw NSError(domain: NSPOSIXErrorDomain,
+                          code: FSError.Code.invalidDirectoryCookie.rawValue)
+        }
+        for index in start..<3 {
+            let name: FSFileName
+            let kind: FSItem.ItemType
+            let identifier: FSItem.Identifier
+            if index == 0 {
+                name = FSFileName(string: ".")
+                kind = .directory
+                identifier = root.attributes.fileID
+            } else if index == 1 {
+                name = FSFileName(string: "..")
+                kind = .directory
+                identifier = root.attributes.fileID
+            } else {
+                name = file.name
+                kind = .file
+                identifier = file.attributes.fileID
+            }
+            let packed = packer.packEntry(name: name, itemType: kind,
+                                          itemID: identifier,
+                                          nextCookie: FSDirectoryCookie(UInt64(index + 1)),
+                                          attributes: index == 2 ? (attributes == nil ? nil : file.attributes) : nil)
+            if !packed { break }
+        }
+        // A fixed, nonzero verifier represents this immutable directory.
+        return FSDirectoryVerifier(1)
+    }
+
+    func createItem(named name: FSFileName, type: FSItem.ItemType, inDirectory directory: FSItem,
+                    attributes requested: FSItem.SetAttributesRequest) async throws -> (FSItem, FSFileName) {
+        throw failure(EROFS)
+    }
+
+    func createSymbolicLink(named name: FSFileName, inDirectory directory: FSItem,
+                            attributes requested: FSItem.SetAttributesRequest,
+                            linkContents: FSFileName) async throws -> (FSItem, FSFileName) {
+        throw failure(EROFS)
+    }
+
+    func createLink(to item: FSItem, named name: FSFileName,
+                    inDirectory directory: FSItem) async throws -> FSFileName {
+        throw failure(EROFS)
+    }
+
+    func removeItem(_ item: FSItem, named name: FSFileName,
+                    fromDirectory directory: FSItem) async throws { throw failure(EROFS) }
+
+    func renameItem(_ item: FSItem, inDirectory sourceDirectory: FSItem,
+                    named sourceName: FSFileName, to destinationName: FSFileName,
+                    inDirectory destinationDirectory: FSItem, overItem: FSItem?) async throws -> FSFileName {
+        throw failure(EROFS)
+    }
+}
+
+extension ASCFVolume: FSVolume.OpenCloseOperations {
+    func openItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {
+        guard isRoot(item) || isFile(item) else { throw failure(ENOENT) }
+        if modes.contains(.write) { throw failure(EROFS) }
+        try requireOriginalArchive()
+    }
+    func closeItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {}
+}
+
+extension ASCFVolume: FSVolume.ReadWriteOperations {
+    func read(from item: FSItem, at offset: off_t, length: Int,
+              into buffer: FSMutableFileDataBuffer) async throws -> Int {
+        guard isFile(item) else { throw failure(EISDIR) }
+        // Bound every call before invoking the C ABI. In particular, an EOF
+        // request and a zero-length buffer return immediately, without
+        // asking the decoder to produce bytes it cannot legally return.
+        guard let count = ASCFReadBounds.count(
+            offset: Int64(offset), requested: length, bufferLength: buffer.length,
+            logicalSize: file.attributes.size
+        ) else { throw failure(EINVAL) }
+        try requireOriginalArchive()
+        guard count > 0 else { return 0 }
+        var actual = 0
+        let status: Int32 = buffer.withUnsafeMutableBytes { bytes in
+            // FSKit reports capacity separately from the borrowed raw buffer.
+            // Recheck the actual span before giving its pointer to Rust; a
+            // mismatch must never become an out-of-bounds C ABI write.
+            guard bytes.count >= count, let baseAddress = bytes.baseAddress else {
+                return EINVAL
+            }
+            return ascf_pread(handle, UInt64(offset),
+                              baseAddress.assumingMemoryBound(to: UInt8.self),
+                              count, &actual)
+        }
+        guard status == 0 else { throw failure(status) }
+        // The bridge promises an exact count on success. Since count already
+        // clips to logical EOF, any short positive read can silently truncate
+        // a Finder copy and must be surfaced as a broken bridge contract.
+        guard ASCFReadBounds.isValidReadResult(actual, expected: count) else {
+            throw failure(EIO)
+        }
+        try requireOriginalArchive()
+        return actual
+    }
+
+    func write(contents: Data, to item: FSItem, at offset: off_t) async throws -> Int {
+        throw failure(EROFS)
+    }
+}

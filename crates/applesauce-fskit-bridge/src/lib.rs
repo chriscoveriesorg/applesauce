@@ -9,11 +9,14 @@ use std::io::{self, ErrorKind};
 use std::os::fd::{FromRawFd, RawFd};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// Opaque handle, serialising reads so decoder scratch remains reusable.
 pub struct AscfReader {
     inner: Mutex<ArchiveReader<File>>,
+    // Unload sets this independently of the potentially busy decode mutex.
+    cancel_verification: AtomicBool,
 }
 
 /// Metadata describes the uncompressed logical file.
@@ -35,6 +38,7 @@ fn errno(error: io::Error) -> libc::c_int {
         ErrorKind::InvalidData | ErrorKind::UnexpectedEof => libc::EIO,
         ErrorKind::InvalidInput => libc::EINVAL,
         ErrorKind::PermissionDenied => libc::EACCES,
+        ErrorKind::Interrupted => libc::ECANCELED,
         ErrorKind::Unsupported => libc::ENOTSUP,
         _ => error.raw_os_error().unwrap_or(libc::EIO),
     }
@@ -91,6 +95,7 @@ pub unsafe extern "C" fn ascf_open_fd(fd: libc::c_int, out: *mut *mut AscfReader
         let reader = ArchiveReader::open(open_readonly_fd(fd)?)?;
         let handle = Box::into_raw(Box::new(AscfReader {
             inner: Mutex::new(reader),
+            cancel_verification: AtomicBool::new(false),
         }));
         // SAFETY: out was checked nonnull and remains writable during call.
         unsafe { *out = handle };
@@ -182,13 +187,27 @@ pub unsafe extern "C" fn ascf_verify_all(handle: *mut AscfReader) -> libc::c_int
         return libc::EINVAL;
     }
     guarded(|| {
-        // SAFETY: live opaque handle is required by the API.
-        unsafe { &*handle }
-            .inner
-            .lock()
-            .map_err(|_| posix(libc::EIO))?
-            .verify_all()
+        // SAFETY: live opaque handle is required by the API. Cancellation
+        // is a separate atomic flag, so unload need not await decoder work.
+        let state = unsafe { &*handle };
+        let mut reader = state.inner.lock().map_err(|_| posix(libc::EIO))?;
+        reader.verify_all_cancellable(|| state.cancel_verification.load(Ordering::Relaxed))
     })
+}
+
+/// Signal cancellation at the next full-verification chunk boundary.
+/// The caller must retain the handle until verification has returned.
+///
+/// # Safety
+/// handle must remain live until this function and its verifier complete.
+#[no_mangle]
+pub unsafe extern "C" fn ascf_cancel_verification(handle: *mut AscfReader) {
+    if !handle.is_null() {
+        // SAFETY: the FSKit lifecycle lock prevents closing a registered handle.
+        unsafe { &*handle }
+            .cancel_verification
+            .store(true, Ordering::Relaxed);
+    }
 }
 
 /// Release the duplicated FD and reader scratch.

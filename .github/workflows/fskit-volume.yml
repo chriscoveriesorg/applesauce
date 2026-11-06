@@ -1,0 +1,428 @@
+name: ASCF FSKit volume compile
+
+on:
+  pull_request:
+    paths:
+      - 'fskit/**'
+      - 'crates/applesauce-fskit-bridge/**'
+      # The mounted bridge delegates all logical reads to ArchiveReader.
+      - 'crates/applesauce-core/src/cold_archive.rs'
+      - 'crates/applesauce-core/src/apple_buffer.rs'
+      - 'Cargo.lock'
+      - '.github/workflows/fskit-volume.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'fskit/**'
+      - 'crates/applesauce-fskit-bridge/**'
+      # The mounted bridge delegates all logical reads to ArchiveReader.
+      - 'crates/applesauce-core/src/cold_archive.rs'
+      - 'crates/applesauce-core/src/apple_buffer.rs'
+      - 'Cargo.lock'
+      - '.github/workflows/fskit-volume.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  # The signed FSKit/Xcode qualification still runs on xcode-27 below.
+  # Make the portable evidence and bundle safety checks independently
+  # visible when the macOS 27 runner has a long provisioning queue.
+  portable-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check executable owner handoff and signed evidence gates
+        run: |
+          bash -n fskit/signed_acceptance.sh
+          python3 - <<'PY'
+          import plistlib
+          with open("fskit/ASCFExtension/Info.plist", "rb") as stream:
+              attrs = plistlib.load(stream)["EXAppExtensionAttributes"]
+          assert attrs["FSActivateOptionSyntax"]["shortOptions"] == "g:m:o:u:"
+          assert attrs["FSCheckOptionSyntax"]["shortOptions"] == "nqy"
+          assert attrs["FSFormatOptionSyntax"]["shortOptions"] == "v"
+          assert attrs["FSShortName"] == "ascf"
+          PY
+          python3 fskit/verify_mount.py --self-test
+          python3 fskit/finder_mount_witness.py --self-test
+          python3 fskit/unmount_acceptance.py --self-test
+          python3 fskit/acceptance_evidence.py --self-test
+          python3 fskit/signing_profile.py --self-test
+          python3 fskit/source_provenance.py --self-test
+          python3 fskit/build_toolchain.py --self-test
+          python3 fskit/replacement_acceptance.py --self-test
+      - name: Preserve standalone signed-build provenance boundaries
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          script = Path("fskit/signed_acceptance.sh").read_text()
+          assert "set -euo pipefail" in script
+          signed = script.split("\n  signed-build)\n", 1)[1].split("\n  fixture)\n", 1)[0]
+          # A direct signed-build must refuse checkout/compiler drift, even
+          # when package was never invoked. The second snapshot follows BOTH
+          # compilers but precedes verification/publication of the signed app.
+          ordered = (
+              '--check "$ROOT")"',
+              'record_build_tools > "$out/build-tools.txt"',
+              'cargo build --locked --release -p applesauce-fskit-bridge',
+              'xcodegen generate --spec fskit/project.yml',
+              'xcodebuild -project fskit/ApplesauceASCF.xcodeproj',
+              '--expected-sha "$source_sha"',
+              'record_build_tools > "$out/build-tools-after.txt"',
+              '/usr/bin/cmp -s "$out/build-tools.txt" "$out/build-tools-after.txt"',
+              'verify_host "$built" "$out"',
+              'printf \'Signed host: %s',
+          )
+          offsets = [signed.index(value) for value in ordered]
+          assert offsets == sorted(offsets), "signed-build attestation order changed"
+          assert 'source-provenance.txt' in signed
+          assert 'source-check-after-build.txt' in signed
+          PY
+      - name: Guard signed bundle Finder and unmount helper provenance
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          script = Path("fskit/signed_acceptance.sh").read_text()
+          reader = script.split("\n  bundle-readback)\n", 1)[1].split("\n  readback)\n", 1)[0]
+          assert '"$bundle/fskit/finder_readback.applescript"' in reader
+          assert '"$bundle/fskit/finder_mount_witness.py"' in reader
+          assert 'post-finder-readback.json' in reader
+          assert '"$ROOT/fskit/finder_readback.applescript"' not in reader
+          unmount = script.split("\n  bundle-unmounted)\n", 1)[1].split("\n  unmounted)\n", 1)[0]
+          for required in ('"$bundle/fskit/unmount_acceptance.py"',
+                           '--bundle "$bundle"',
+                           'verify_package_manifest "$bundle" "$out"',
+                           'require_matching_bundle_helper "$bundle"'):
+              assert required in unmount, required
+          PY
+      - name: Authenticate synthetic transfer bundle and reject tampering
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import pathlib
+          import subprocess
+          import tempfile
+
+          script = pathlib.Path("fskit/signed_acceptance.sh").resolve()
+          members = subprocess.check_output(
+              ["bash", str(script), "manifest-paths"], text=True
+          ).splitlines()
+          assert len(members) == len(set(members)) and len(members) >= 15
+          assert "NEXT-STEPS.txt" in members and "macos.txt" in members
+          with tempfile.TemporaryDirectory() as directory:
+              root = pathlib.Path(directory)
+              for name in members:
+                  path = root / name
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_bytes(("synthetic:" + name).encode())
+              (root / "SHA256SUMS").write_text("".join(
+                  hashlib.sha256((root / name).read_bytes()).hexdigest()
+                  + "  " + name + "\n" for name in members
+              ))
+              def authenticate():
+                  return subprocess.run(
+                      ["bash", str(script), "manifest-check", str(root)],
+                      capture_output=True, text=True
+                  )
+              result = authenticate()
+              assert result.returncode == 0, result.stdout + result.stderr
+              # Refuse attempts to make shasum open files outside the bundle.
+              manifest = root / "SHA256SUMS"
+              clean_manifest = manifest.read_text()
+              manifest.write_text(clean_manifest + "0" * 64 + "  ../outside.txt\n")
+              assert authenticate().returncode != 0, "path traversal accepted"
+              manifest.write_text(clean_manifest + clean_manifest.splitlines()[0] + "\n")
+              assert authenticate().returncode != 0, "duplicate manifest member accepted"
+              manifest.write_text(clean_manifest)
+              steps = root / "NEXT-STEPS.txt"
+              steps.rename(root / "steps-target")
+              steps.symlink_to("steps-target")
+              assert authenticate().returncode != 0, "symlinked member accepted"
+              steps.unlink()
+              (root / "steps-target").rename(steps)
+              assert authenticate().returncode == 0, "restored safe bundle rejected"
+              signed_binary = root / "ASCFHost.app/Contents/MacOS/ASCFHost"
+              signed_binary.write_bytes(b"modified")
+              assert authenticate().returncode != 0, "altered signed binary accepted"
+              signed_binary.write_bytes(b"synthetic:ASCFHost.app/Contents/MacOS/ASCFHost")
+              operator_steps = root / "NEXT-STEPS.txt"
+              operator_steps.write_bytes(b"tampered operator instructions")
+              assert authenticate().returncode != 0, "altered owner instructions accepted"
+              operator_steps.write_bytes(b"synthetic:NEXT-STEPS.txt")
+              host_os = root / "macos.txt"
+              host_os.write_bytes(b"tampered OS provenance")
+              assert authenticate().returncode != 0, "altered macOS provenance accepted"
+              host_os.write_bytes(b"synthetic:macos.txt")
+              build_tools = root / "build-tools.txt"
+              build_tools.write_bytes(b"tampered compiler and SDK provenance")
+              assert authenticate().returncode != 0, "altered build toolchain provenance accepted"
+              build_tools.write_bytes(b"synthetic:build-tools.txt")
+              (root / "ASCFHost.app/Contents/embedded.provisionprofile").unlink()
+              assert authenticate().returncode != 0, "missing provisioning profile accepted"
+          PY
+
+      - name: Reject helper drift even if a package manifest is recomputed
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          script = Path("fskit/signed_acceptance.sh").resolve()
+          members = subprocess.check_output(
+              ["bash", str(script), "manifest-paths"], text=True
+          ).splitlines()
+          with tempfile.TemporaryDirectory() as directory:
+              bundle = Path(directory)
+              for name in members:
+                  target = bundle / name
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  if name == "fskit/signed_acceptance.sh":
+                      target.write_bytes(script.read_bytes())
+                  else:
+                      target.write_bytes(("synthetic:" + name).encode())
+
+              def manifest():
+                  (bundle / "SHA256SUMS").write_text(
+                      "".join(
+                          hashlib.sha256((bundle / name).read_bytes()).hexdigest()
+                          + "  " + name + "\n"
+                          for name in members
+                      )
+                  )
+
+              def command(mode):
+                  return subprocess.run(
+                      ["bash", str(script), mode, str(bundle)],
+                      capture_output=True, text=True
+                  )
+              manifest()
+              initial = command("bundle-code-check")
+              assert initial.returncode == 0, initial.stdout + initial.stderr
+
+              # Recompute the manifest to model a signed bundle from another
+              # checkout. Hash verification alone should pass; the invoked
+              # helper must refuse to certify mismatched verification code.
+              bundled_script = bundle / "fskit/signed_acceptance.sh"
+              bundled_script.write_bytes(bundled_script.read_bytes() + b"\n# drift\n")
+              manifest()
+              assert command("manifest-check").returncode == 0
+              changed = command("bundle-code-check")
+              assert changed.returncode != 0, "accepted different operator code"
+              assert "helper differs from signed bundle" in changed.stderr
+
+              bundled_script.write_bytes(script.read_bytes())
+              manifest()
+              restored = command("bundle-code-check")
+              assert restored.returncode == 0, restored.stdout + restored.stderr
+          PY
+
+  macos-sdk:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run portable mounted-readback acceptance tests
+        run: python3 fskit/verify_mount.py --self-test
+      - name: Bind Finder copy-out to unchanged ASCF mount identity
+        run: python3 fskit/finder_mount_witness.py --self-test
+      - name: Check kernel mount-table unmount witness regressions
+        run: python3 fskit/unmount_acceptance.py --self-test
+      - name: Exercise actual Darwin getmntinfo ABI
+        run: |
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, "fskit")
+          from unmount_acceptance import read_mount_table
+          entries = read_mount_table()
+          assert any(name == "/" for _, name in entries), "root mount missing from Darwin VFS table"
+          print("Darwin getmntinfo verified:", len(entries), "kernel mount entries")
+          PY
+      - name: Verify complete remount and typed corruption evidence gate
+        run: python3 fskit/acceptance_evidence.py --self-test
+      - name: Verify host/extension signing-profile compatibility gate
+        run: python3 fskit/signing_profile.py --self-test
+      - name: Verify immutable signed package source provenance
+        run: |
+          python3 fskit/source_provenance.py --self-test
+          python3 fskit/build_toolchain.py --self-test
+      - name: Verify disposable ASCF archive-replacement refusal acceptance
+        run: python3 fskit/replacement_acceptance.py --self-test
+      - name: Check mounted-acceptance Darwin fstatfs ABI on real macOS
+        run: |
+          python3 - <<'PY'
+          import sys
+          import tempfile
+          sys.path.insert(0, "fskit")
+          from verify_mount import darwin_statfs
+          info = darwin_statfs(tempfile.gettempdir())
+          kind = info.f_fstypename.decode("ascii")
+          assert kind and info.f_bsize > 0, "fstatfs returned invalid VFS identity"
+          print("Darwin descriptor-bound VFS inspection:", kind, "block size", info.f_bsize)
+          PY
+      - name: Validate signed FSKit handoff and Finder acceptance scripts
+        run: |
+          bash -n fskit/signed_acceptance.sh
+          bash fskit/signed_acceptance.sh --help
+          /usr/bin/osacompile -o "$RUNNER_TEMP/ascf-finder-acceptance.scpt" fskit/finder_readback.applescript
+      - name: Reject missing or tampered signed acceptance bundle members
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import pathlib
+          import subprocess
+          import tempfile
+
+          script = pathlib.Path("fskit/signed_acceptance.sh").resolve()
+          required = subprocess.check_output(
+              ["bash", str(script), "manifest-paths"], text=True
+          ).splitlines()
+          assert len(required) == len(set(required)) and len(required) >= 15
+          assert "NEXT-STEPS.txt" in required and "macos.txt" in required
+          assert "ASCFHost.app/Contents/MacOS/ASCFHost" in required
+          assert "ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/MacOS/ASCFExtension" in required
+
+          with tempfile.TemporaryDirectory() as tmp:
+              bundle = pathlib.Path(tmp)
+              for name in required:
+                  path = bundle / name
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_bytes(("synthetic-" + name).encode())
+
+              def write_manifest(members):
+                  (bundle / "SHA256SUMS").write_text(
+                      "".join(hashlib.sha256((bundle / name).read_bytes()).hexdigest()
+                              + "  " + name + "\n" for name in members)
+                  )
+
+              def verify(expect_success):
+                  outcome = subprocess.run(
+                      ["bash", str(script), "manifest-check", str(bundle)],
+                      capture_output=True, text=True
+                  )
+                  assert (outcome.returncode == 0) is expect_success, (
+                      outcome.stdout + outcome.stderr
+                  )
+
+              write_manifest(required)
+              verify(True)
+              executable = bundle / "ASCFHost.app/Contents/MacOS/ASCFHost"
+              executable.write_bytes(b"tampered")
+              verify(False)
+              executable.write_bytes(b"synthetic-ASCFHost.app/Contents/MacOS/ASCFHost")
+              write_manifest([name for name in required
+                              if name != "ASCFHost.app/Contents/embedded.provisionprofile"])
+              verify(False)
+          PY
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify Rust bridge
+        run: cargo test --locked -p applesauce-fskit-bridge
+      - name: Build C ABI static library
+        run: cargo build --locked --release -p applesauce-fskit-bridge
+      - name: Refuse archive replacements and edits after verification
+        run: |
+          xcrun swiftc -swift-version 5 -o "$RUNNER_TEMP/ascf-identity-tests" \
+            fskit/ASCFExtension/ArchiveIdentity.swift fskit/tests/ArchiveIdentityTests.swift
+          "$RUNNER_TEMP/ascf-identity-tests"
+      - name: Exercise FSKit read bounds on the macOS SDK
+        run: |
+          xcrun swiftc -swift-version 5 -o "$RUNNER_TEMP/ascf-read-bounds-tests" \
+            fskit/ASCFExtension/ReadBounds.swift fskit/tests/ReadBoundsTests.swift
+          "$RUNNER_TEMP/ascf-read-bounds-tests"
+      - name: Reject concurrent FSKit resource loads and stale publications
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            -o "$RUNNER_TEMP/ascf-resource-load-tests" \
+            fskit/ASCFExtension/ResourceLoadGate.swift fskit/tests/ResourceLoadGateTests.swift
+          "$RUNNER_TEMP/ascf-resource-load-tests"
+      - name: Prioritize mounted loads over bounded Finder probe backlogs
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            -o "$RUNNER_TEMP/ascf-verification-scheduler-tests" \
+            fskit/ASCFExtension/VerificationScheduler.swift \
+            fskit/tests/VerificationSchedulerTests.swift
+          "$RUNNER_TEMP/ascf-verification-scheduler-tests"
+      - name: Prove preempted probe handle lifetime on macOS 27
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            -o "$RUNNER_TEMP/ascf-probe-cancellation-tests" \
+            fskit/ASCFExtension/ProbeCancellation.swift \
+            fskit/tests/ProbeCancellationTests.swift
+          "$RUNNER_TEMP/ascf-probe-cancellation-tests"
+      - name: Verify single-member FSKit name admission matches Finder safety
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            -o "$RUNNER_TEMP/ascf-mounted-name-tests" \
+            fskit/ASCFExtension/MountedMemberName.swift \
+            fskit/tests/MountedMemberNameTests.swift
+          "$RUNNER_TEMP/ascf-mounted-name-tests"
+      - name: Run signed-host lifecycle state-machine tests on macOS 27
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            fskit/Host/OperationGate.swift fskit/Host/CorruptFixtureProof.swift \
+            fskit/tests/OperationGateTests.swift \
+            -o "$RUNNER_TEMP/ascf-host-lifecycle-tests"
+          "$RUNNER_TEMP/ascf-host-lifecycle-tests"
+      - name: Check Swift FSKit framework conformances against current SDK
+        run: |
+          xcrun swiftc -swift-version 5 -parse-as-library -typecheck \
+            -import-objc-header crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h \
+            fskit/ASCFExtension/ArchiveIdentity.swift \
+            fskit/ASCFExtension/ReadBounds.swift \
+            fskit/ASCFExtension/MountedMemberName.swift \
+            fskit/ASCFExtension/ResourceLoadGate.swift \
+            fskit/ASCFExtension/VerificationScheduler.swift \
+            fskit/ASCFExtension/ProbeCancellation.swift \
+            fskit/ASCFExtension/ASCFExtension.swift fskit/ASCFExtension/ASCFVolume.swift
+      - name: Validate extension property list
+        run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements fskit/Host/Host.entitlements
+
+      - name: Generate host and extension Xcode project
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
+          xcodegen generate --spec fskit/project.yml
+      - name: Build unsigned FSKit host and extension
+        run: |
+          xcodebuild -project fskit/ApplesauceASCF.xcodeproj \
+            -scheme ASCFHost -configuration Debug \
+            -derivedDataPath "$RUNNER_TEMP/ascf-derived" \
+            CODE_SIGNING_ALLOWED=NO build
+      - name: Verify built extension bundle metadata and host relationship
+        run: |
+          host="$RUNNER_TEMP/ascf-derived/Build/Products/Debug/ASCFHost.app/Contents/Info.plist"
+          ext="$RUNNER_TEMP/ascf-derived/Build/Products/Debug/ASCFHost.app/Contents/Extensions/ASCFExtension.appex/Contents/Info.plist"
+          test -f "$host" && test -f "$ext"
+          value() { plutil -extract "$1" raw -o - "$2"; }
+          test "$(value CFBundleIdentifier "$host")" = "org.chriscoveries.applesauce.ascfhost"
+          test "$(value CFBundleIdentifier "$ext")" = "org.chriscoveries.applesauce.ascfhost.ascfextension"
+          test "$(value CFBundlePackageType "$ext")" = "XPC!"
+          test "$(value EXAppExtensionAttributes.EXExtensionPointIdentifier "$ext")" = "com.apple.fskit.fsmodule"
+          test "$(value EXAppExtensionAttributes.FSShortName "$ext")" = "ascf"
+          # An unsigned build can pass compilation while FSKit's runtime
+          # probe rejects incomplete option-syntax metadata.
+          python3 - "$ext" <<'PY'
+          import plistlib
+          import sys
+          with open(sys.argv[1], "rb") as stream:
+              attributes = plistlib.load(stream)["EXAppExtensionAttributes"]
+          expected = {
+              "FSActivateOptionSyntax": "g:m:o:u:",
+              "FSCheckOptionSyntax": "nqy",
+              "FSFormatOptionSyntax": "v",
+          }
+          for key, short_options in expected.items():
+              assert attributes.get(key, {}).get("shortOptions") == short_options, (
+                  f"built extension lacks valid {key}.shortOptions")
+          assert attributes.get("FSSupportsPathURLs") is True
+          assert attributes.get("FSRequiresSecurityScopedPathURLResources") is True
+          assert attributes.get("FSSupportsBlockResources") is False
+          assert attributes.get("FSSupportsGenericURLResources") is False
+          assert attributes.get("FSSupportsServerURLs") is False
+          print("Validated built FSKit module activation grammar and path-resource metadata")
+          PY
+          test "$(value CFBundleShortVersionString "$host")" = "$(value CFBundleShortVersionString "$ext")"
+          test "$(value CFBundleVersion "$host")" = "$(value CFBundleVersion "$ext")"

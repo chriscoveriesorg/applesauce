@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::Write;
 use std::mem::size_of;
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::FileExt;
 use std::ptr;
 use tempfile::NamedTempFile;
 
@@ -63,6 +65,10 @@ fn metadata_and_eof_work_without_decoder() {
     assert_eq!(info.codec_selector, 0xD05);
     assert_eq!(info.reserved, 0);
     assert_eq!(info.logical_sha256, [0x5a; 32]);
+    // A parseable header with invalid compressed data must never pass the
+    // full verification gate used by FSKit probe and mount.
+    // SAFETY: handle was opened above, remains live, and is closed once below.
+    assert_ne!(unsafe { ascf_verify_all(handle) }, 0);
     assert_eq!(size_of::<AscfInfo>(), 48);
     let mut bytes = [0xa5u8; 8];
     let mut count = 55;
@@ -90,6 +96,29 @@ fn metadata_and_eof_work_without_decoder() {
     assert_eq!(bytes, [0xa5; 8]);
     // SAFETY: test uses live handles and valid output storage; all closes are single-use.
     unsafe { ascf_close(handle) };
+}
+
+#[test]
+fn cancelled_full_verification_returns_ecanceled_without_decoding() {
+    let temp = file_for(&synthetic_header());
+    let handle = open_from(&temp);
+    // SAFETY: retain the handle until all operations complete.
+    unsafe { ascf_cancel_verification(handle) };
+    // SAFETY: handle is valid and remains alive for the entire call.
+    assert_eq!(unsafe { ascf_verify_all(handle) }, libc::ECANCELED);
+    let mut info = AscfInfo {
+        logical_size: 0,
+        codec_selector: 0,
+        reserved: 0,
+        logical_sha256: [0; 32],
+    };
+    // SAFETY: the live handle and writable metadata storage are valid.
+    assert_eq!(unsafe { ascf_info(handle, &mut info) }, 0);
+    assert_eq!(info.logical_size, 1);
+    // SAFETY: all outstanding operations finished; close the handle once.
+    unsafe { ascf_close(handle) };
+    // SAFETY: the C ABI explicitly permits null as a no-op cancellation.
+    unsafe { ascf_cancel_verification(ptr::null_mut()) };
 }
 
 #[test]
@@ -146,6 +175,35 @@ fn refuses_writable_and_nonregular_fd_and_bad_buffers() {
     }
 }
 
+#[test]
+fn nonblocking_archive_open_rejects_fifo_without_a_writer() {
+    // A selected *.ascf path may be a named pipe. The Swift FSKit bridge
+    // opens O_NONBLOCK before this ABI verifies that the FD is regular.
+    // Without O_NONBLOCK, a read-only open can hang indefinitely here.
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("archive.ascf");
+    let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is a valid NUL-terminated pathname within the test dir.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    // SAFETY: O_NONBLOCK ensures opening a FIFO requires no concurrent writer.
+    let fd = unsafe {
+        libc::open(
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    assert!(fd >= 0);
+    let mut handle = ptr::null_mut();
+    // SAFETY: the live descriptor and output pointer are valid.
+    assert_eq!(unsafe { ascf_open_fd(fd, &mut handle) }, libc::EINVAL);
+    assert!(handle.is_null());
+    // SAFETY: we own fd and close it only once.
+    assert_eq!(unsafe { libc::close(fd) }, 0);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
@@ -167,6 +225,23 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         )
         .unwrap();
         temp.as_file_mut().sync_all().unwrap();
+
+        // Interrupt after authenticating the first real chunk, rather than
+        // only testing cancellation before any decoder call. The second
+        // chunk must not be decoded or accepted after unload.
+        let mut verifier =
+            applesauce_core::cold_archive::ArchiveReader::open(File::open(temp.path()).unwrap())
+                .unwrap();
+        let mut checks = 0;
+        let interrupted = verifier
+            .verify_all_cancellable(|| {
+                checks += 1;
+                checks >= 2
+            })
+            .unwrap_err();
+        assert_eq!(interrupted.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(checks, 2);
+
         let handle = open_from(&temp);
         // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         assert_eq!(unsafe { ascf_verify_all(handle) }, 0);
@@ -215,10 +290,41 @@ fn macos27_real_codecs_preserve_random_reads_and_reject_late_corruption() {
         );
         assert_eq!(got, 4);
         assert_eq!(&observed[..4], &logical[logical.len() - 4..]);
+        // Regression: another process can mutate an ASCF source after the
+        // full pre-mount verification. Each subsequent read must authenticate
+        // its chunk again and leave caller memory unchanged on corruption.
+        let before = std::fs::read(temp.path()).unwrap();
+        let second_offset = u64::from_le_bytes(before[112..120].try_into().unwrap());
+        assert_eq!(
+            temp.as_file()
+                .write_at(&[before[second_offset as usize] ^ 0xff], second_offset)
+                .unwrap(),
+            1
+        );
+        temp.as_file().sync_all().unwrap();
+        let mut late_sentinel = [0xa5u8; 32];
+        got = 999;
+        assert_ne!(
+            // SAFETY: test uses live handles and valid output storage; all closes are single-use.
+            unsafe {
+                ascf_pread(
+                    handle,
+                    MIN_CHUNK_BYTES as u64,
+                    late_sentinel.as_mut_ptr(),
+                    late_sentinel.len(),
+                    &mut got,
+                )
+            },
+            0
+        );
+        assert_eq!(got, 0);
+        assert_eq!(late_sentinel, [0xa5; 32]);
         // SAFETY: test uses live handles and valid output storage; all closes are single-use.
         unsafe { ascf_close(handle) };
 
-        let mut damaged = std::fs::read(temp.path()).unwrap();
+        // Start from the valid pre-mutation snapshot so both corruption
+        // checks exercise the decoder against independently damaged sources.
+        let mut damaged = before;
         let second = u64::from_le_bytes(damaged[112..120].try_into().unwrap()) as usize;
         damaged[second] ^= 0xff;
         let damaged_file = file_for(&damaged);
