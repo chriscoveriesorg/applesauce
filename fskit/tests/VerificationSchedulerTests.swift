@@ -132,6 +132,38 @@ struct ASCFVerificationSchedulerTests {
         precondition(bounded.submit(.mount) { boundedReuse.signal() },
                      "completed mount queue did not admit new work")
         precondition(boundedReuse.wait(timeout: .now() + 10) == .success)
+        // Simulate the FSKit scope lifetime: pending/rejected requests must
+        // not start access. Only the admitted worker may enter and then exit
+        // its scope. This guards the deferred acquisition contract used by
+        // both probeResource and loadResource.
+        let scopeScheduler = ASCFVerificationScheduler(maxPendingProbes: 1,
+                                                        maxPendingMounts: 1)
+        let scopeBlocked = DispatchSemaphore(value: 0)
+        let scopeRelease = DispatchSemaphore(value: 0)
+        let scopeGroup = DispatchGroup()
+        let scopeEvents = ASCFVerificationSchedulerEvents()
+        scopeGroup.enter()
+        precondition(scopeScheduler.submit(.probe) {
+            scopeBlocked.signal()
+            precondition(scopeRelease.wait(timeout: .now() + 10) == .success)
+            scopeGroup.leave()
+        })
+        precondition(scopeBlocked.wait(timeout: .now() + 10) == .success)
+        scopeGroup.enter()
+        precondition(scopeScheduler.submit(.mount) {
+            scopeEvents.add("scope-start")
+            scopeEvents.add("scope-stop")
+            scopeGroup.leave()
+        })
+        precondition(!scopeScheduler.submit(.mount) {
+            scopeEvents.add("rejected-scope-start")
+        }, "rejected mount unexpectedly scheduled scope access")
+        precondition(scopeEvents.snapshot().isEmpty,
+                     "queued or rejected mount started security scope early")
+        scopeRelease.signal()
+        precondition(scopeGroup.wait(timeout: .now() + 10) == .success)
+        precondition(scopeEvents.snapshot() == ["scope-start", "scope-stop"],
+                     "admitted worker did not own the scope lifecycle")
         print("ASCF verification scheduler: priority, bounded probe/mount admission, preemption and reuse passed")
     }
 }
