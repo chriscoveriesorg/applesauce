@@ -47,6 +47,11 @@ pub fn compressed_payload_is_allowed(
     logical_size_bytes: u64,
     minimum_compression_ratio: f64,
 ) -> bool {
+    // Library callers can bypass the CLI's argument validation. Never let
+    // NaN or infinity silently become a permissive native-write threshold.
+    if !minimum_compression_ratio.is_finite() {
+        return false;
+    }
     let maximum = (logical_size_bytes as f64 * minimum_compression_ratio) as u64;
     compressed_payload_bytes <= maximum
 }
@@ -62,6 +67,11 @@ mod compression_ratio_tests {
         assert!(compressed_payload_is_allowed(0, 100, 0.0));
         assert!(!compressed_payload_is_allowed(1, 100, 0.0));
         assert!(compressed_payload_is_allowed(101, 100, 1.01));
+        // Fail closed even when invoked through the public library API.
+        for ratio in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!compressed_payload_is_allowed(0, 100, ratio));
+            assert!(!compressed_payload_is_allowed(50, 100, ratio));
+        }
     }
 }
 
