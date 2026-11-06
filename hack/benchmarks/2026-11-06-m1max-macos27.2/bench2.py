@@ -267,8 +267,12 @@ def main():
     if which == "main":
         for corpus in required:
             corpus_dir = os.path.join(DATA, corpus)
-            if not files_in(corpus_dir):
+            inputs = files_in(corpus_dir)
+            if not inputs:
                 raise ValueError(f"benchmark corpus has no input files: {corpus_dir}")
+            for input_path in inputs:
+                if os.path.islink(input_path):
+                    raise ValueError(f"benchmark input must not be a symlink: {input_path}")
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
     write_header = not os.path.exists(CSV_PATH)
