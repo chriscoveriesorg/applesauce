@@ -67,6 +67,17 @@ def source_commit(root, expected=None):
             raise SourceProvenanceError(
                 "tracked source is not a normal stage-0 regular file "
                 "(symlink, gitlink or unmerged index): " + repr(record[:160]))
+        # Git status and ordinary hash-object honor user-supplied clean
+        # filters. A filter can normalize modified, same-length Swift/Rust
+        # source so that the index and Git status still appear unchanged.
+        # Compare the on-disk bytes directly to the pinned stage-0 blob.
+        # Signing from a checkout with transformed line endings also fails
+        # closed; this package requires byte-identical source inputs.
+        live_hash = git(root, "hash-object", "--no-filters", "--", filename)
+        if live_hash != parts[1]:
+            raise SourceProvenanceError(
+                "tracked source bytes differ from signed Git index: "
+                + repr(filename[:160]))
     # XcodeGen walks Host/extension inputs, while Cargo reads crates/ and
     # repository-local .cargo/config* (including compiler and linker overrides).
     # Rustup also reads root rust-toolchain* selection files. Git excludes can
@@ -170,6 +181,36 @@ class SourceProvenanceTests(unittest.TestCase):
                     "user.email=fixture@example.invalid", "commit", "-qm", "unusual")
         self.assertEqual(source_commit(self.root),
                          self.gitcmd("rev-parse", "--verify", "HEAD"))
+
+    def test_clean_filter_cannot_hide_modified_source_bytes(self):
+        # Git's clean filter can make Git status and normal hash-object
+        # accept modified source that the compiler will actually execute.
+        # Keep lengths equal so Git's ordinary stat-based check is also fooled.
+        attributes = self.root / ".gitattributes"
+        attributes.write_text("source.swift filter=mask\\n")
+        self.gitcmd("config", "filter.mask.clean", "sed s/untrusted/trusted__/g")
+        (self.root / "source.swift").write_text("trusted__\\n")
+        self.gitcmd("add", ".gitattributes", "source.swift")
+        self.gitcmd("-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-qm", "filtered")
+        trusted = source_commit(self.root)
+        (self.root / "source.swift").write_text("untrusted\\n")
+        self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+        self.assertEqual(self.gitcmd("hash-object", "source.swift"),
+                         self.gitcmd("rev-parse", ":source.swift"))
+        with self.assertRaisesRegex(SourceProvenanceError, "tracked source bytes"):
+            source_commit(self.root, trusted)
+
+    def test_unusual_filename_is_hashed_without_shell_interpretation(self):
+        name = "--leading-dash with\\nnewline.swift"
+        (self.root / name).write_text("safe bytes\\n")
+        self.gitcmd("add", "--", name)
+        self.gitcmd("-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-qm", "unusual path")
+        expected = source_commit(self.root)
+        (self.root / name).write_text("changed!\\n")
+        with self.assertRaisesRegex(SourceProvenanceError, "tracked source bytes"):
+            source_commit(self.root, expected)
 
     def test_tracked_symlink_to_mutable_external_source_refused(self):
         external = Path(self.temp.name).parent / (Path(self.temp.name).name + "-external.swift")
