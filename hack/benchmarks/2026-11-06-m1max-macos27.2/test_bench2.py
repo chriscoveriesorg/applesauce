@@ -138,6 +138,8 @@ class FreshOutputRootTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unknown benchmark batch"):
                     bench2.main()
             self.assertFalse((root / "results" / "runs2.csv").exists())
+            self.assertFalse((root / "work").exists())
+            self.assertFalse((root / "results").exists())
 
     def test_main_creates_results_directory_for_fresh_output_root(self):
         with tempfile.TemporaryDirectory() as tmp:
