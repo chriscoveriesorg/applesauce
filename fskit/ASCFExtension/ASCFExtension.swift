@@ -108,6 +108,14 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             return
         }
         let url = path.url
+        // Finder may ask every installed filesystem to probe unrelated files.
+        // Only .ascf candidates enter the costly, bounded SHA-256 verifier;
+        // in particular, a flood of ordinary files must not consume probe
+        // reservations or security-scoped resources.
+        guard ASCFProbeAdmission.shouldProbe(url) else {
+            replyHandler(.notRecognized, nil)
+            return
+        }
         // Queue probes without acquiring a file-access capability: Finder can
         // submit many probes while one full SHA-256 verification is active.
         // Security scope is acquired only by the admitted worker, and only for
