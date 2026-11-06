@@ -152,10 +152,10 @@ class SourceProvenanceTests(unittest.TestCase):
 
     def test_staged_or_modified_source_refused(self):
         (self.root / "source.swift").write_text("modified")
-        with self.assertRaisesRegex(SourceProvenanceError, "changed"):
+        with self.assertRaisesRegex(SourceProvenanceError, "changed|tracked source bytes"):
             source_commit(self.root)
         self.gitcmd("add", "source.swift")
-        with self.assertRaisesRegex(SourceProvenanceError, "changed"):
+        with self.assertRaisesRegex(SourceProvenanceError, "changed|tracked source bytes"):
             source_commit(self.root)
 
     def test_assume_unchanged_cannot_hide_modified_source(self):
