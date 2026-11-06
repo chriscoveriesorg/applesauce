@@ -5,6 +5,8 @@ The pre- and post-Finder reports must each come from verify_mount.py with
 require_real_mount=True. This checker only stamps generated evidence JSON.
 """
 import argparse
+from contextlib import redirect_stdout, redirect_stderr
+import io
 import datetime
 import hashlib
 import json
@@ -246,6 +248,20 @@ class WitnessTests(unittest.TestCase):
             with self.subTest(change=change):
                 with self.assertRaises(WitnessError):
                     safe_restored_name(dict(self.first, **change))
+
+    def test_readback_name_cli_requires_expected_member(self):
+        with mock.patch.object(sys, "argv", [
+            "finder_mount_witness.py", "--readback-name", str(self.before),
+            "--expected", "source.lzraven"
+        ]), redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(), 0)
+        self.assertEqual(output.getvalue().strip(), "source.lzraven")
+        with mock.patch.object(sys, "argv", [
+            "finder_mount_witness.py", "--readback-name", str(self.before),
+            "--expected", "source.lzmesh"
+        ]), redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main(), 1)
+        self.assertIn("not the expected archive source", errors.getvalue())
 
     def test_stamps_only_complete_unchanged_mount(self):
         result = stamp(self.before, self.after, self.copy)
