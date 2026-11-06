@@ -153,12 +153,28 @@ class FreshOutputRootTests(unittest.TestCase):
                     bench2.main()
             self.assertFalse(root.exists())
 
+    def test_missing_corpus_refuses_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "output"
+            data = Path(tmp) / "input"
+            data.mkdir()
+            (data / "canterbury").mkdir()
+            with patch.object(bench2, "DATA", str(data)), patch.object(
+                bench2, "WORK", str(root / "work")
+            ), patch.object(bench2, "CSV_PATH", str(root / "results" / "runs2.csv")
+            ), patch.object(bench2.sys, "argv", ["bench2.py", "main"]):
+                with self.assertRaisesRegex(FileNotFoundError, "large"):
+                    bench2.main()
+            self.assertFalse(root.exists())
+
     def test_main_creates_results_directory_for_fresh_output_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "fresh-benchmark-output"
             csv_path = root / "results" / "runs2.csv"
             data = Path(tmp) / "input"
             data.mkdir()
+            for corpus in ("canterbury", "large", "silesia", "enwik8", "synthetic"):
+                (data / corpus).mkdir()
             with patch.object(bench2, "DATA", str(data)), patch.object(bench2, "WORK", str(root / "work")), patch.object(
                 bench2, "CSV_PATH", str(csv_path)
             ), patch.object(bench2.sys, "argv", ["bench2.py", "main"]), patch.object(
