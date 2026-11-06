@@ -254,6 +254,14 @@ def main():
         corpus_dir = os.path.join(DATA, corpus)
         if not os.path.isdir(corpus_dir):
             raise FileNotFoundError(f"benchmark corpus directory does not exist: {corpus_dir}")
+    if which in ("edge", "big4g"):
+        names = (("big-4g.bin",) if which == "big4g" else
+                 ("empty.bin", "one.bin", "exact-64k.bin", "64k-plus-1.bin",
+                  "random-64m.bin"))
+        for name in names:
+            input_path = os.path.join(DATA, "edge", name)
+            if not os.path.isfile(input_path):
+                raise FileNotFoundError(f"benchmark input file does not exist: {input_path}")
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
     write_header = not os.path.exists(CSV_PATH)
