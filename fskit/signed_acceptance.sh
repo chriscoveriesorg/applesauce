@@ -512,10 +512,14 @@ These files are synthetic. Preserve the originals and the signed app.
    Keep the signed host diagnostic and the unchanged ASCF mount listing.
 7. After normally unmounting, stage an independent archive-replacement test:
    bash fskit/signed_acceptance.sh replacement-stage . lzmesh
-   Select its generated /tmp/.../source.lzmesh.ascf COPY in the signed host.
+   Select the EXACT generated /tmp/.../source.lzmesh.<16-hex>.ascf
+   COPY printed by replacement-stage in the signed host. The unique archive
+   basename must become the mounted restored filename. A bundle-fixture
+   mount cannot certify this separate replacement control.
    Once mounted, run:
    bash fskit/signed_acceptance.sh replacement-check STAGE_DIR "/Volumes/Applesauce ASCF" ./source.lzmesh.jsonl
-   Preserve the printed replacement.json path and unmount normally.
+   The report binds the nonce, archive filename, restored filename and
+   signed bundle digests. Preserve replacement.json and unmount normally.
    Repeat for lzraven. Only the private synthetic /tmp copy is replaced.
    Any cached read or unrelated permission failure blocks acceptance.
 8. For each codec, run acceptance-check with first readback.json,
