@@ -275,10 +275,12 @@ def signed_mount_identity(mount):
             "macos_build": output("/usr/bin/sw_vers", "-buildVersion")}
 
 
-def sampled_offsets(size):
-    # Exercise offset mapping throughout large files, including the first,
-    # middle and final independent blocks. The number of reads is bounded:
-    # whole-file SHA-256 is the exhaustive data-integrity check.
+def sampled_offsets(size, source_sha256=None):
+    # Keep fixed chunk-boundary/EOF probes and add a bounded set of
+    # content-derived, reproducible pseudorandom offsets. The digest is
+    # authenticated independently against the synthetic cleartext; using it
+    # as a seed prevents an old fixed-offset report from passing for another
+    # same-sized archive. This is a coverage schedule, not a security RNG.
     require(size >= 0, "invalid negative logical file size")
     values = {0, size, max(0, size - 1), size // 2}
     for block in (4096, 65536, 8 * 1024 * 1024):
@@ -291,6 +293,18 @@ def sampled_offsets(size):
         point = size * index // 33
         for delta in (-1, 0, 1):
             values.add(min(size, max(0, point + delta)))
+    if source_sha256 is not None:
+        require(isinstance(source_sha256, str) and len(source_sha256) == 64
+                and all(ch in "0123456789abcdef" for ch in source_sha256),
+                "invalid SHA-256 seed for independent read schedule")
+        if size:
+            seed = bytes.fromhex(source_sha256)
+            for index in range(64):
+                sample = hashlib.sha256(
+                    b"applesauce-ascf-read-offsets-v1\\0" + seed
+                    + index.to_bytes(4, "big")
+                ).digest()
+                values.add(int.from_bytes(sample[:8], "big") % size)
     return sorted(values)
 
 
@@ -397,7 +411,7 @@ def verify_mount(mount, original, require_real_mount=True):
             require((mounted_stat.st_dev, mounted_stat.st_ino, mounted_stat.st_size,
                      mounted_stat.st_mtime_ns, mounted_stat.st_ctime_ns) == mounted_identity,
                     "mounted file changed between digest and random reads")
-            offsets = sampled_offsets(original_size)
+            offsets = sampled_offsets(original_size, original_sha)
             for offset in offsets:
                 length = min(READ_BYTES, original_size - offset + 1)
                 try:
@@ -1687,6 +1701,27 @@ class SyntheticAcceptanceTests(unittest.TestCase):
         self.assertTrue(any(size * 3 // 4 < point < size - 8 * 1024 * 1024
                             for point in offsets))
         self.assertLess(len(offsets), 160)
+
+    def test_seeded_random_offsets_cover_unaligned_regions_and_bind_digest(self):
+        size = 64 * 1024 * 1024
+        first_seed = hashlib.sha256(b"independent-A").hexdigest()
+        second_seed = hashlib.sha256(b"independent-B").hexdigest()
+        fixed = sampled_offsets(size)
+        first = sampled_offsets(size, first_seed)
+        self.assertEqual(first, sampled_offsets(size, first_seed))
+        self.assertNotEqual(first, sampled_offsets(size, second_seed))
+        self.assertTrue(set(fixed).issubset(first))
+        self.assertGreaterEqual(len(set(first) - set(fixed)), 50)
+        self.assertLessEqual(len(first), len(fixed) + 64)
+        self.assertTrue(all(0 <= offset <= size for offset in first))
+        self.assertTrue(any(offset % 4096 not in (0, 1, 4095)
+                            for offset in set(first) - set(fixed)))
+        self.assertEqual(sampled_offsets(0, first_seed), [0])
+        self.assertEqual(sampled_offsets(1, first_seed), [0, 1])
+        for invalid in ("Z" * 64, first_seed[:-1], first_seed.upper(), 123):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(MountCheckError, "invalid SHA-256 seed"):
+                    sampled_offsets(size, invalid)
 
     def test_corrupted_random_read_is_rejected_after_matching_digest(self):
         # A correct whole-file digest does not excuse a broken random-read
