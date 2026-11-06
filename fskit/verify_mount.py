@@ -192,6 +192,10 @@ def digest(path, nofollow=False, include_identity=False):
                     "digest input changed during hashing")
             require(total == identity.st_size,
                     "digest input length changed during hashing")
+    except OSError as error:
+        # Buffered stream teardown can fail after all reads succeeded.
+        # Never report successful acceptance when closing the digest fails.
+        raise MountCheckError(f"cannot finalize digest stream: {error}") from error
     finally:
         if fd >= 0:
             already_failing = sys.exc_info()[0] is not None
@@ -734,6 +738,30 @@ class SyntheticAcceptanceTests(unittest.TestCase):
             with mock.patch("os.close", side_effect=OSError(errno.EBADF, "close failed")):
                 with self.assertRaisesRegex(MountCheckError, "cannot wrap digest descriptor"):
                     digest(self.original)
+        self.assertEqual(digest(self.original)[0], self.original.stat().st_size)
+
+    def test_digest_stream_close_failure_fails_closed(self):
+        # A successful read is not sufficient if stream teardown fails.
+        real_fdopen = os.fdopen
+
+        class CloseFailure:
+            def __init__(self, stream):
+                self.stream = stream
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+            def __exit__(self, *args):
+                self.stream.__exit__(*args)
+                raise OSError(errno.EIO, "synthetic stream close failure")
+            def read(self, size):
+                return self.stream.read(size)
+            def fileno(self):
+                return self.stream.fileno()
+
+        with mock.patch("os.fdopen",
+                        side_effect=lambda *a, **kw: CloseFailure(real_fdopen(*a, **kw))):
+            with self.assertRaisesRegex(MountCheckError, "cannot finalize digest stream"):
+                digest(self.original)
         self.assertEqual(digest(self.original)[0], self.original.stat().st_size)
 
     def test_digest_read_and_final_fstat_fail_closed(self):
