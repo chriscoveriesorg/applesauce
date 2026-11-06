@@ -167,6 +167,21 @@ class FreshOutputRootTests(unittest.TestCase):
                     bench2.main()
             self.assertFalse(root.exists())
 
+    def test_edge_batches_refuse_missing_input_files_without_output(self):
+        for batch, expected in (("edge", "empty.bin"), ("big4g", "big-4g.bin")):
+            with self.subTest(batch=batch), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "output"
+                data = Path(tmp) / "input"
+                (data / "edge").mkdir(parents=True)
+                with patch.object(bench2, "DATA", str(data)), patch.object(
+                    bench2, "WORK", str(root / "work")
+                ), patch.object(
+                    bench2, "CSV_PATH", str(root / "results" / "runs2.csv")
+                ), patch.object(bench2.sys, "argv", ["bench2.py", batch]):
+                    with self.assertRaisesRegex(FileNotFoundError, expected):
+                        bench2.main()
+                self.assertFalse(root.exists())
+
     def test_main_creates_results_directory_for_fresh_output_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "fresh-benchmark-output"
