@@ -34,10 +34,25 @@ enum ASCFCorruptFixtureProof {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
         }
 
+        // A successful EOF from FileHandle is only valid after every byte
+        // promised by fstat has been hashed. A truncated stream on a buggy
+        // filesystem must not generate an authoritative corruption witness.
+        guard before.st_size >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+        }
         let reader = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
         var digest = SHA256()
+        var hashedBytes: Int64 = 0
         while let bytes = try reader.read(upToCount: 1024 * 1024), !bytes.isEmpty {
+            let (next, overflow) = hashedBytes.addingReportingOverflow(Int64(bytes.count))
+            guard !overflow && next <= before.st_size else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+            }
+            hashedBytes = next
             digest.update(data: bytes)
+        }
+        guard hashedBytes == before.st_size else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
         }
         var after = stat()
         var current = stat()
