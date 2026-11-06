@@ -395,8 +395,10 @@ disposable macOS host, inside the signed acceptance bundle:
 
 ```sh
 bash fskit/signed_acceptance.sh replacement-stage . lzmesh
-# Select the printed /tmp/ascf-replacement-.../source.lzmesh.ascf
-# in the signed host and mount it. Then execute with that stage path:
+# Select the exact path printed by replacement-stage, for example
+# /tmp/ascf-replacement-.../source.lzmesh.<random-16-hex>.ascf
+# in the signed host. The resulting mounted filename MUST contain that nonce.
+# Then execute with the printed stage directory:
 bash fskit/signed_acceptance.sh replacement-check \
   /tmp/ascf-replacement-XXXXXXXX "/Volumes/Applesauce ASCF" \
   ./source.lzmesh.jsonl
@@ -405,6 +407,15 @@ bash fskit/signed_acceptance.sh replacement-check \
 
 The first command checks the signed bundle and copies its intact archive and
 independently damaged replacement into a private mode-0700 temporary directory.
+The copied archive receives a fresh random 16-hex suffix. Since FSKit uses
+the selected archive's basename as its mounted filename, replacement-check
+requires that same suffix in the restored filename before it replaces anything.
+This prevents an existing byte-identical mount of the original bundle archive
+from being mistaken for the independent staged replacement. The final evidence
+checker also verifies the stage nonce, generated archive name, mounted filename
+and stage-path consistency. These assertions are acceptance evidence checks;
+an independently reviewed signed physical mount is still mandatory.
+
 Its stage metadata records the canonical original signed bundle path. Keep
 that bundle in place until replacement-check finishes: the check reauthenticates
 the bundle manifest, selected helper, signed host and original fixture hashes
