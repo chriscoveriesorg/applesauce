@@ -187,14 +187,14 @@ class SourceProvenanceTests(unittest.TestCase):
         # accept modified source that the compiler will actually execute.
         # Keep lengths equal so Git's ordinary stat-based check is also fooled.
         attributes = self.root / ".gitattributes"
-        attributes.write_text("source.swift filter=mask\\n")
+        attributes.write_text("source.swift filter=mask\n")
         self.gitcmd("config", "filter.mask.clean", "sed s/untrusted/trusted__/g")
-        (self.root / "source.swift").write_text("trusted__\\n")
+        (self.root / "source.swift").write_text("trusted__\n")
         self.gitcmd("add", ".gitattributes", "source.swift")
         self.gitcmd("-c", "user.name=Fixture", "-c",
                     "user.email=fixture@example.invalid", "commit", "-qm", "filtered")
         trusted = source_commit(self.root)
-        (self.root / "source.swift").write_text("untrusted\\n")
+        (self.root / "source.swift").write_text("untrusted\n")
         self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
         self.assertEqual(self.gitcmd("hash-object", "source.swift"),
                          self.gitcmd("rev-parse", ":source.swift"))
@@ -202,13 +202,13 @@ class SourceProvenanceTests(unittest.TestCase):
             source_commit(self.root, trusted)
 
     def test_unusual_filename_is_hashed_without_shell_interpretation(self):
-        name = "--leading-dash with\\nnewline.swift"
-        (self.root / name).write_text("safe bytes\\n")
+        name = "--leading-dash with\nnewline.swift"
+        (self.root / name).write_text("safe bytes\n")
         self.gitcmd("add", "--", name)
         self.gitcmd("-c", "user.name=Fixture", "-c",
                     "user.email=fixture@example.invalid", "commit", "-qm", "unusual path")
         expected = source_commit(self.root)
-        (self.root / name).write_text("changed!\\n")
+        (self.root / name).write_text("changed!\n")
         with self.assertRaisesRegex(SourceProvenanceError, "tracked source bytes"):
             source_commit(self.root, expected)
 
