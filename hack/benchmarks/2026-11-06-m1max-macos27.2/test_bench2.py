@@ -153,6 +153,26 @@ class FreshOutputRootTests(unittest.TestCase):
                     bench2.main()
             self.assertFalse(root.exists())
 
+    def test_symlinked_data_root_refused_before_output(self):
+        for batch in ("main", "edge", "big4g"):
+            with self.subTest(batch=batch), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "output"
+                outside = Path(tmp) / "outside-input"
+                outside.mkdir()
+                (outside / "fixture.bin").write_bytes(b"external synthetic fixture")
+                data = Path(tmp) / "input"
+                data.symlink_to(outside, target_is_directory=True)
+                with patch.object(bench2, "DATA", str(data)), patch.object(
+                    bench2, "WORK", str(root / "work")
+                ), patch.object(
+                    bench2, "CSV_PATH", str(root / "results" / "runs2.csv")
+                ), patch.object(bench2.sys, "argv", ["bench2.py", batch]):
+                    with self.assertRaisesRegex(ValueError, "data root must not be a symlink"):
+                        bench2.main()
+                self.assertFalse(root.exists())
+                self.assertEqual((outside / "fixture.bin").read_bytes(),
+                                 b"external synthetic fixture")
+
     def test_missing_corpus_refuses_before_creating_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "output"
