@@ -217,6 +217,51 @@ struct ASCFVerificationSchedulerTests {
         precondition(staleEvents.snapshot() == ["abandoned-canceled", "fresh"],
                      "canceled queued mount lost its completion or executed work")
 
+        // Reclaim a mixed batch through one admission. Every canceled mount
+        // must receive one completion; live mounts retain FIFO priority.
+        let mixed = ASCFVerificationScheduler(maxPendingProbes: 1,
+                                              maxPendingMounts: 4)
+        let mixedStarted = DispatchSemaphore(value: 0)
+        let mixedRelease = DispatchSemaphore(value: 0)
+        let mixedDone = DispatchGroup()
+        let mixedEvents = ASCFVerificationSchedulerEvents()
+        mixedDone.enter()
+        precondition(mixed.submit(.probe) {
+            mixedStarted.signal()
+            precondition(mixedRelease.wait(timeout: .now() + 10) == .success)
+            mixedDone.leave()
+        })
+        precondition(mixedStarted.wait(timeout: .now() + 10) == .success)
+        var mixedTokens: [ASCFVerificationCancellation] = []
+        for index in 0..<4 {
+            let token = ASCFVerificationCancellation()
+            mixedTokens.append(token)
+            mixedDone.enter()
+            precondition(mixed.submit(.mount, cancellation: token,
+                                      onCancellation: {
+                mixedEvents.add("cancel\(index)")
+                mixedDone.leave()
+            }) {
+                mixedEvents.add("run\(index)")
+                mixedDone.leave()
+            })
+        }
+        mixedTokens[1].cancel()
+        mixedTokens[3].cancel()
+        mixedDone.enter()
+        precondition(mixed.submit(.mount) {
+            mixedEvents.add("fresh")
+            mixedDone.leave()
+        }, "canceled batch failed to release queue reservations")
+        precondition(mixedEvents.snapshot() == ["cancel1", "cancel3"],
+                     "reclaimed requests did not receive one completion each")
+        mixedRelease.signal()
+        precondition(mixedDone.wait(timeout: .now() + 10) == .success,
+                     "mixed canceled/live mount batch stalled")
+        precondition(mixedEvents.snapshot() ==
+                     ["cancel1", "cancel3", "run0", "run2", "fresh"],
+                     "canceled queue entries ran or completed twice")
+
         // Without another mount arriving, the worker must also skip a
         // canceled reservation when it finally drains after the probe.
         let skip = ASCFVerificationScheduler(maxPendingProbes: 1, maxPendingMounts: 1)
