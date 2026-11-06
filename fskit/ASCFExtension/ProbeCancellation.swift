@@ -31,6 +31,10 @@ final class ASCFProbeCancellation: @unchecked Sendable {
 
     func cancel() {
         lock.lock()
+        guard !cancelled else {
+            lock.unlock()
+            return
+        }
         cancelled = true
         if let activeHandle { cancelHandle(activeHandle) }
         lock.unlock()
