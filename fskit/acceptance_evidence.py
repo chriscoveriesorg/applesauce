@@ -22,6 +22,7 @@ import unittest
 # evidence validator. A partial/randomly invented offset list must not pass.
 from verify_mount import sampled_offsets
 from replacement_acceptance import replacement_offsets
+from finder_mount_witness import load_report
 
 
 class EvidenceError(ValueError):
@@ -34,8 +35,13 @@ def require(condition, message):
 
 
 def load_json(path):
-    with open(path, encoding="utf-8") as stream:
-        return json.load(stream)
+    # Evidence files are operator-supplied. A FIFO must not hang acceptance,
+    # a symlink must not redirect it, and duplicate JSON keys must not let
+    # independent verifiers interpret contradictory success claims.
+    try:
+        return load_report(path)
+    except (OSError, ValueError) as error:
+        raise EvidenceError(f"unsafe signed acceptance evidence: {error}") from error
 
 
 def signed_source_commit(bundle):
@@ -400,6 +406,23 @@ class EvidenceTests(unittest.TestCase):
         replacement["replacement_sha256"] = hashlib.sha256(damaged).hexdigest()
         paths[4].write_text(json.dumps(replacement))
         return paths
+
+    def test_rejects_ambiguous_or_nonfinite_signed_evidence(self):
+        self.items[0].write_text('{"result":"fail","result":"pass"}')
+        with self.assertRaisesRegex(EvidenceError, "duplicate JSON"):
+            self.check()
+        self.items[0].write_text('{"result":"pass","logical_bytes":Infinity}')
+        with self.assertRaisesRegex(EvidenceError, "non-finite"):
+            self.check()
+
+    def test_rejects_oversized_and_symlinked_signed_evidence(self):
+        self.items[1].write_bytes(b" " * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(EvidenceError, "bounded regular file"):
+            self.check()
+        self.items[1].unlink()
+        self.items[1].symlink_to(self.items[0])
+        with self.assertRaisesRegex(EvidenceError, "unsafe signed acceptance"):
+            self.check()
 
     def test_canonical_manifest_source_commit_is_reported(self):
         self.assertEqual(self.check()["source_commit"], "a" * 40)
