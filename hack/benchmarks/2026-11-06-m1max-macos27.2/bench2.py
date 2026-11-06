@@ -244,6 +244,7 @@ def files_in(d):
 
 def main():
     os.makedirs(WORK, exist_ok=True)
+    os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
     which = sys.argv[1] if len(sys.argv) > 1 else "main"
     write_header = not os.path.exists(CSV_PATH)
     fh = open(CSV_PATH, "a", newline="")
