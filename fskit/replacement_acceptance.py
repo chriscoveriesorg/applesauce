@@ -11,6 +11,8 @@ import errno
 import hashlib
 import json
 import os
+import re
+import secrets
 from pathlib import Path
 import shutil
 import stat
@@ -47,7 +49,12 @@ def stage(bundle, codec):
         require(path.is_file() and not path.is_symlink(), f"missing safe bundle fixture: {path}")
     target = Path(tempfile.mkdtemp(prefix="ascf-replacement-", dir="/tmp"))
     os.chmod(target, 0o700)
-    good = target / archive.name
+    # The only mounted filename is derived from the archive basename.
+    # Use a fresh stage-specific basename so a different, byte-identical
+    # bundle mount cannot accidentally qualify as this replacement control.
+    nonce = secrets.token_hex(8)
+    staged_name = f"source.{codec}.{nonce}.ascf"
+    good = target / staged_name
     bad = target / "replacement.ascf"
     shutil.copyfile(archive, good)
     shutil.copyfile(damaged, bad)
@@ -57,7 +64,8 @@ def stage(bundle, codec):
         # manifest-authenticated helper rather than unrelated checkout code.
         "bundle": str(bundle),
         "codec": codec,
-        "archive": archive.name,
+        "stage_nonce": nonce,
+        "archive": staged_name,
         "good_sha256": sha256(good),
         "replacement_sha256": sha256(bad),
         "original_sha256": sha256(cleartext),
@@ -87,7 +95,10 @@ def validate_stage(directory):
     require(metadata_file.is_file() and not metadata_file.is_symlink(), "stage metadata missing")
     metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
     codec = metadata.get("codec")
-    require(codec in CODECS and metadata.get("archive") == f"source.{codec}.ascf",
+    nonce = metadata.get("stage_nonce")
+    require(codec in CODECS and isinstance(nonce, str)
+            and re.fullmatch(r"[0-9a-f]{16}", nonce) is not None
+            and metadata.get("archive") == f"source.{codec}.{nonce}.ascf",
             "stage archive identity invalid")
     bundle_string = metadata.get("bundle")
     require(isinstance(bundle_string, str) and bundle_string.startswith("/"),
@@ -146,7 +157,7 @@ def probe_read(path, offset):
 def check(directory, mount, original, verifier=None, read_probe=probe_read):
     metadata, good, bad = validate_stage(directory)
     mount = Path(mount)
-    expected = mount / f"source.{metadata['codec']}"
+    expected = mount / Path(metadata["archive"]).stem
     require(Path(original).is_file(), "original cleartext fixture missing")
     require(sha256(original) == metadata["original_sha256"],
             "cleartext reference differs from staged archive")
@@ -163,6 +174,7 @@ def check(directory, mount, original, verifier=None, read_probe=probe_read):
             and type(report.get("active_ascf_mounts")) is int
             and report["active_ascf_mounts"] == 1
             and report.get("restored_file") == expected.name
+            and report.get("mount") == str(mount)
             and report.get("sha256") == metadata["original_sha256"]
             and bool(report.get("macos_build")),
             "mounted ASCF readback prerequisite failed")
@@ -187,6 +199,8 @@ def check(directory, mount, original, verifier=None, read_probe=probe_read):
                 f"FSKit served replaced-source bytes at offset {offset} ({len(data)} bytes)"
             )
     outcome = {"result": "pass", "codec": metadata["codec"],
+               "stage_nonce": metadata["stage_nonce"],
+               "staged_archive_name": metadata["archive"],
                "stage": str(good.parent), "archive": str(good),
                "replacement_sha256": metadata["replacement_sha256"],
                "source_archive_sha256": metadata["good_sha256"],
@@ -229,6 +243,8 @@ class ReplacementTests(unittest.TestCase):
     def test_stages_only_synthetic_copies(self):
         meta, good, bad = self.prepare()
         self.assertEqual(meta["codec"], "lzmesh")
+        self.assertRegex(meta["stage_nonce"], r"^[0-9a-f]{16}$")
+        self.assertEqual(good.name, f"source.lzmesh.{meta['stage_nonce']}.ascf")
         self.assertNotEqual(sha256(good), sha256(bad))
         self.assertEqual((self.bundle / "source.lzmesh.ascf").read_bytes(), b"ASCF0001valid")
 
@@ -255,11 +271,34 @@ class ReplacementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "signed bundle provenance"):
             validate_stage(self.stage_dir)
 
+    def test_stale_archive_name_cannot_certify_another_mount(self):
+        meta, good, bad = self.prepare()
+        def wrong_mount(*_args, **_kwargs):
+            return {"result": "pass", "filesystem_type": "ascf",
+                    "kernel_readonly": True, "unique_ascf_mount_verified": True,
+                    "active_ascf_mounts": 1, "restored_file": "source.lzmesh",
+                    "sha256": meta["original_sha256"], "macos_build": "synthetic",
+                    "mount": "/Volumes/ASCF"}
+        with self.assertRaisesRegex(ValueError, "mounted ASCF readback prerequisite"):
+            check(self.stage_dir, "/Volumes/ASCF",
+                  self.bundle / "source.lzmesh.jsonl", wrong_mount)
+        self.assertTrue(bad.exists(), "wrong mount must be rejected before replacement")
+        self.assertEqual(sha256(good), meta["good_sha256"])
+
+    def test_tampered_stage_nonce_cannot_select_a_different_archive(self):
+        self.prepare()
+        metadata_path = self.stage_dir / "stage.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["stage_nonce"] = "0" * 16
+        metadata_path.write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError, "stage archive identity invalid"):
+            validate_stage(self.stage_dir)
+
     def test_replaced_archive_read_must_fail_closed(self):
         meta, good, bad = self.prepare()
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
-                    "restored_file": "source.lzmesh", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
+                    "restored_file": f"source.lzmesh.{meta['stage_nonce']}", "sha256": meta["original_sha256"], "macos_build": "synthetic", "mount": "/Volumes/ASCF"}
         def refused(_path, _offset):
             raise OSError(errno.ESTALE, "source identity changed")
         with mock.patch("builtins.print"):
@@ -278,8 +317,8 @@ class ReplacementTests(unittest.TestCase):
         def ambiguous(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf",
                     "kernel_readonly": True, "unique_ascf_mount_verified": True,
-                    "active_ascf_mounts": 2, "restored_file": "source.lzmesh",
-                    "sha256": meta["original_sha256"], "macos_build": "synthetic"}
+                    "active_ascf_mounts": 2, "restored_file": f"source.lzmesh.{meta['stage_nonce']}",
+                    "sha256": meta["original_sha256"], "macos_build": "synthetic", "mount": "/Volumes/ASCF"}
         with self.assertRaisesRegex(ValueError, "mounted ASCF readback prerequisite"):
             check(self.stage_dir, "/Volumes/ASCF",
                   self.bundle / "source.lzmesh.jsonl", ambiguous)
@@ -290,7 +329,7 @@ class ReplacementTests(unittest.TestCase):
         meta, _, _ = self.prepare("lzraven")
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
-                    "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
+                    "restored_file": f"source.lzraven.{meta['stage_nonce']}", "sha256": meta["original_sha256"], "macos_build": "synthetic", "mount": "/Volumes/ASCF"}
         with self.assertRaisesRegex(ValueError, "served replaced-source bytes at offset 0"):
             check(self.stage_dir, "/Volumes/ASCF",
                   self.bundle / "source.lzraven.jsonl", verified, lambda _path, _offset: b"x")
@@ -308,8 +347,8 @@ class ReplacementTests(unittest.TestCase):
         meta, _, _ = self.prepare()
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf",
-                    "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1, "restored_file": "source.lzmesh",
-                    "sha256": meta["original_sha256"], "macos_build": "synthetic"}
+                    "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1, "restored_file": f"source.lzmesh.{meta['stage_nonce']}",
+                    "sha256": meta["original_sha256"], "macos_build": "synthetic", "mount": "/Volumes/ASCF"}
         visited = []
         def probe(_path, offset):
             visited.append(offset)
@@ -325,7 +364,7 @@ class ReplacementTests(unittest.TestCase):
         meta, _, _ = self.prepare("lzraven")
         def verified(*_args, **_kwargs):
             return {"result": "pass", "filesystem_type": "ascf", "kernel_readonly": True, "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
-                    "restored_file": "source.lzraven", "sha256": meta["original_sha256"], "macos_build": "synthetic"}
+                    "restored_file": f"source.lzraven.{meta['stage_nonce']}", "sha256": meta["original_sha256"], "macos_build": "synthetic", "mount": "/Volumes/ASCF"}
         def denied(_path, _offset):
             raise OSError(errno.EACCES, "permissions")
         with self.assertRaisesRegex(ValueError, "unrelated reason"):
