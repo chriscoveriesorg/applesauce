@@ -73,7 +73,8 @@ def capture_environment(environ=None):
     return sorted(selected), hashlib.sha256(serialized).hexdigest()
 
 
-def record(tool_names=TOOLS, finder=shutil.which, xcrun=None, environ=None):
+def record(tool_names=TOOLS, finder=shutil.which, xcrun=None,
+           rust_binary=None, environ=None):
     """Pin executable bytes, including actual SDK compilers, and relevant flags."""
     tool_hashes = {}
     for name in tool_names:
@@ -90,6 +91,9 @@ def record(tool_names=TOOLS, finder=shutil.which, xcrun=None, environ=None):
             if not resolved or "\n" in resolved:
                 raise ToolchainError("untrusted SDK compiler path: " + name)
             tool_hashes["xcrun:" + name] = executable_fingerprint(resolved)
+    if rust_binary is not None:
+        for name in ("rustc", "cargo"):
+            tool_hashes["rust-toolchain:" + name] = executable_fingerprint(rust_binary(name))
     env_keys, env_sha = capture_environment(environ)
     return {
         "schema": "ascf-build-toolchain-v1",
@@ -97,6 +101,16 @@ def record(tool_names=TOOLS, finder=shutil.which, xcrun=None, environ=None):
         "build_environment_keys": env_keys,
         "build_environment_sha256": env_sha,
     }
+
+
+def rust_toolchain_binary(name):
+    try:
+        root = subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ToolchainError("cannot locate actual Rust compiler") from error
+    if not root or "\n" in root:
+        raise ToolchainError("invalid Rust sysroot")
+    return Path(root) / "bin" / name
 
 
 def sdk_compiler(name):
@@ -135,9 +149,11 @@ class ToolchainTests(unittest.TestCase):
 
     def test_finder_and_sdk_compiler_are_fingerprinted(self):
         report = record(("cargo",), lambda name: str(self.binary),
-                        lambda name: str(self.binary), {"PATH": "/bin"})
+                        lambda name: str(self.binary), lambda name: str(self.binary),
+                        {"PATH": "/bin"})
         self.assertEqual(set(report["executables_sha256"]),
-                         {"cargo", "xcrun:swiftc", "xcrun:clang"})
+                         {"cargo", "xcrun:swiftc", "xcrun:clang",
+                          "rust-toolchain:rustc", "rust-toolchain:cargo"})
         self.assertEqual(report["build_environment_keys"], ["PATH"])
         self.assertNotIn("/bin", json.dumps(report))
 
@@ -155,7 +171,7 @@ def main():
         unittest.main(argv=[sys.argv[0]], exit=False)
     elif args.record:
         try:
-            print(json.dumps(record(xcrun=sdk_compiler), sort_keys=True, indent=2))
+            print(json.dumps(record(xcrun=sdk_compiler, rust_binary=rust_toolchain_binary), sort_keys=True, indent=2))
         except ToolchainError as error:
             sys.exit(str(error))
     else:
