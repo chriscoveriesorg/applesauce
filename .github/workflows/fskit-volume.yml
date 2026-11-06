@@ -353,6 +353,13 @@ jobs:
             fskit/ASCFExtension/ProbeCancellation.swift \
             fskit/tests/ProbeCancellationTests.swift
           "$RUNNER_TEMP/ascf-probe-cancellation-tests"
+      - name: Verify single-member FSKit name admission matches Finder safety
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            -o "$RUNNER_TEMP/ascf-mounted-name-tests" \
+            fskit/ASCFExtension/MountedMemberName.swift \
+            fskit/tests/MountedMemberNameTests.swift
+          "$RUNNER_TEMP/ascf-mounted-name-tests"
       - name: Run signed-host lifecycle state-machine tests on macOS 27
         run: |
           xcrun swiftc -swift-version 5 -warnings-as-errors \
@@ -366,6 +373,7 @@ jobs:
             -import-objc-header crates/applesauce-fskit-bridge/include/applesauce_fskit_bridge.h \
             fskit/ASCFExtension/ArchiveIdentity.swift \
             fskit/ASCFExtension/ReadBounds.swift \
+            fskit/ASCFExtension/MountedMemberName.swift \
             fskit/ASCFExtension/ResourceLoadGate.swift \
             fskit/ASCFExtension/VerificationScheduler.swift \
             fskit/ASCFExtension/ProbeCancellation.swift \
