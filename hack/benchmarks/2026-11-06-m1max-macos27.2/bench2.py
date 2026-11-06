@@ -254,6 +254,8 @@ def main():
         corpus_dir = os.path.join(DATA, corpus)
         if not os.path.isdir(corpus_dir):
             raise FileNotFoundError(f"benchmark corpus directory does not exist: {corpus_dir}")
+        if os.path.islink(corpus_dir):
+            raise ValueError(f"benchmark corpus directory must not be a symlink: {corpus_dir}")
     if which in ("edge", "big4g"):
         names = (("big-4g.bin",) if which == "big4g" else
                  ("empty.bin", "one.bin", "exact-64k.bin", "64k-plus-1.bin",
