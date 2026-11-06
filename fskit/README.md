@@ -98,8 +98,17 @@ read the restored file. The host shows the resulting path and can reveal it
 in Finder. The original source path and attributes stay untouched.
 
 Provisioning must authorize both `com.apple.developer.fskit.fsmodule`
-(for the extension) and `com.apple.developer.fskit.mount` (for the host);
-unsigned development builds validate compilation only. A complete signed
+(for the extension) and `com.apple.developer.fskit.mount` (for the host).
+Run `bash fskit/signed_acceptance.sh preflight` before compiling. It checks
+an unlocked Apple Development identity and locally installed, unexpired
+provisioning profiles that authorize **both** exact ASCF app IDs, including
+profiles stored in Xcode's newer `UserData/Provisioning Profiles` directory.
+It accepts macOS `.provisionprofile` and `.mobileprovision` files. If Xcode
+uses managed signing, open Xcode to create/download the two profiles first.
+The preflight reads CMS profiles without installing or modifying them.
+A passing preflight establishes local grants; the signed-build step then
+checks the embedded entitlements and certificate-bound signatures.
+Unsigned development builds validate compilation only. A complete signed
 install, extension enablement, mounted listing and SHA-256 comparison on
 an authorized disposable Mac remain required before claiming runtime
 compatibility. If the host lacks either entitlement, expect mount failure.
