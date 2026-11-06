@@ -74,6 +74,33 @@ class NativeSizeInspectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "no valid compressed byte count"):
                     self.inspect(output)
 
+    def test_native_ratio_skip_detects_changed_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "source.bin"
+            src.write_bytes(b"original synthetic bytes")
+            work = Path(tmp) / "work"
+            work.mkdir()
+            out = io.StringIO()
+            writer = csv.DictWriter(out, fieldnames=bench2.FIELDS)
+            writer.writeheader()
+
+            def corrupting_compress(cmd, stdout_to=None):
+                # Simulate an unexpected mutation even though the codec
+                # reports that compression was skipped for ratio reasons.
+                Path(cmd[-1]).write_bytes(b"changed synthetic bytes")
+                return dict(real=1.0, user=0.2, sys=0.1, rc=0,
+                            rss=None, instr=None, cycles=None, peak=None, err="")
+
+            with patch.object(bench2, "WORK", str(work)), patch.object(
+                bench2, "run_timed", side_effect=corrupting_compress
+            ), patch.object(bench2, "decmpfs_size",
+                            return_value=(None, False, "not-compressed")):
+                bench2.bench_file("test", "synthetic", str(src),
+                                 [("lzfse", "decmpfs")], {"*": 1}, writer, out)
+            row = list(csv.DictReader(io.StringIO(out.getvalue())))[0]
+            self.assertEqual(row["status"], "SHA-MISMATCH")
+            self.assertEqual(row["sha_ok"], "False")
+
     def test_native_row_cannot_report_ok_if_info_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "source.bin"
