@@ -172,9 +172,10 @@ def local_profile_paths(home):
     for root in roots:
         if not root.is_dir() or root.is_symlink():
             continue
-        for path in sorted(root.glob("*.mobileprovision")):
-            if path.is_file() and not path.is_symlink():
-                found.append(path)
+        for suffix in ("*.mobileprovision", "*.provisionprofile"):
+            for path in sorted(root.glob(suffix)):
+                if path.is_file() and not path.is_symlink():
+                    found.append(path)
     return found
 
 
@@ -241,11 +242,11 @@ class ProfileCoverageTests(unittest.TestCase):
     def test_both_profiles_are_required(self):
         host, extension = FSKIT_TARGETS
         self.assertEqual(covered_targets([self.profile(host)],
-                         self.team, datetime.datetime(2026, 11, 6)),
+                         self.team, datetime.datetime(2026, 11, 6, tzinfo=datetime.timezone.utc)),
                          {"host"})
         self.assertEqual(covered_targets([self.profile(host),
                                          self.profile(extension)], self.team,
-                         datetime.datetime(2026, 11, 6)), {"host", "extension"})
+                         datetime.datetime(2026, 11, 6, tzinfo=datetime.timezone.utc)), {"host", "extension"})
 
     def test_wrong_team_expiry_and_wrong_app_are_refused(self):
         host = FSKIT_TARGETS[0]
@@ -262,7 +263,7 @@ class ProfileCoverageTests(unittest.TestCase):
                 else:
                     profile["Entitlements"][host[2]] = False
                 self.assertEqual(covered_targets([profile], self.team,
-                                 datetime.datetime(2026, 11, 6)), set())
+                                 datetime.datetime(2026, 11, 6, tzinfo=datetime.timezone.utc)), set())
 
     def test_profile_without_application_identity_is_refused(self):
         profile = self.profile(FSKIT_TARGETS[0])
@@ -297,6 +298,9 @@ class ProfileCoverageTests(unittest.TestCase):
             elsewhere.write_bytes(b"outside")
             (folder / "fake.mobileprovision").symlink_to(elsewhere)
             self.assertEqual(local_profile_paths(home), [])
+            regular = folder / "valid.provisionprofile"
+            regular.write_bytes(b"macOS-style profile")
+            self.assertEqual(local_profile_paths(home), [regular])
 
 
 class SigningProfileTests(unittest.TestCase):
