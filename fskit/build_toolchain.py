@@ -123,6 +123,24 @@ def cargo_home_config_fingerprints(environ=None):
     }
 
 
+def cargo_directory_config_fingerprints(cwd=None):
+    """Pin Cargo config search paths from checkout up through its ancestors.
+
+    Cargo can read .cargo/config[.toml] from parent directories outside Git.
+    Record absence as well as bytes so a configuration appearing mid-build
+    invalidates the signed artifact's source/toolchain witness.
+    """
+    directory = Path.cwd() if cwd is None else Path(cwd)
+    if not directory.is_absolute():
+        raise ToolchainError("Cargo build directory must be absolute")
+    hashes = {}
+    for depth, ancestor in enumerate((directory, *directory.parents)):
+        for name in ("config", "config.toml"):
+            hashes[f"cargo-parent:{depth}:{name}"] = fingerprint_optional_regular_file(
+                ancestor / ".cargo" / name)
+    return hashes
+
+
 def capture_environment(environ=None):
     environ = os.environ if environ is None else environ
     selected = {key: value for key, value in environ.items()
@@ -190,6 +208,7 @@ def record(tool_names=TOOLS, finder=shutil.which, xcrun=None,
         "schema": "ascf-build-toolchain-v1",
         "executables_sha256": dict(sorted(tool_hashes.items())),
         "cargo_home_config_sha256": cargo_home_config_fingerprints(environ),
+        "cargo_directory_config_sha256": cargo_directory_config_fingerprints(),
         "build_environment_keys": env_keys,
         "build_environment_sha256": env_sha,
     }
@@ -305,6 +324,26 @@ class ToolchainTests(unittest.TestCase):
         config.unlink()
         self.assertEqual(first["cargo_home_config_sha256"],
                          cargo_home_config_fingerprints(env))
+
+    def test_parent_cargo_configuration_is_fingerprinted_even_outside_git(self):
+        outer = Path(self.temporary.name) / "outside-checkout"
+        current = outer / "project" / "source"
+        current.mkdir(parents=True)
+        before = cargo_directory_config_fingerprints(current)
+        self.assertEqual(before["cargo-parent:2:config.toml"], "absent")
+        cargo_dir = outer / ".cargo"
+        cargo_dir.mkdir()
+        config = cargo_dir / "config.toml"
+        config.write_text('[build]\\nrustflags = ["--cfg", "outside"]\\n')
+        after = cargo_directory_config_fingerprints(current)
+        self.assertNotEqual(before["cargo-parent:2:config.toml"],
+                            after["cargo-parent:2:config.toml"])
+        config.write_text('[build]\\nrustflags = ["--cfg", "changed"]\\n')
+        again = cargo_directory_config_fingerprints(current)
+        self.assertNotEqual(after["cargo-parent:2:config.toml"],
+                            again["cargo-parent:2:config.toml"])
+        with self.assertRaisesRegex(ToolchainError, "must be absolute"):
+            cargo_directory_config_fingerprints(Path("relative-checkout"))
 
     def test_cargo_home_symlink_and_nonregular_config_rejected(self):
         cargo_home = Path(self.temporary.name) / "cargo-home"
