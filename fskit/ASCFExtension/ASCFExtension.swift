@@ -112,7 +112,8 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // Only .ascf candidates enter the costly, bounded SHA-256 verifier;
         // in particular, a flood of ordinary files must not consume probe
         // reservations or security-scoped resources.
-        guard ASCFProbeAdmission.shouldProbe(url) else {
+        guard ASCFProbeAdmission.shouldProbe(url),
+              ASCFMountedMemberName.fromArchiveURL(url) != nil else {
             replyHandler(.notRecognized, nil)
             return
         }
@@ -211,6 +212,14 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             replyHandler(nil, Self.error(ENOTSUP))
             return
         }
+        // Validate the single file's Finder-visible name before queue admission,
+        // sandbox access or full decoding. This is also required for explicit
+        // mounts of archive paths that do not end in .ascf.
+        let url = path.url
+        guard let restoredName = ASCFMountedMemberName.fromArchiveURL(url) else {
+            replyHandler(nil, Self.error(EINVAL))
+            return
+        }
         let cancellation = ASCFVerificationCancellation()
         lifecycleLock.lock()
         let ticket = loadGate.begin()
@@ -221,7 +230,6 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             return
         }
 
-        let url = path.url
         let accepted = Self.verificationScheduler.submit(
             .mount, cancellation: cancellation,
             onCancellation: { replyHandler(nil, Self.error(ENODEV)) }
@@ -274,7 +282,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                         lifecycleLock.unlock()
                     })
                 let mounted = ASCFVolume(
-                    handle: handle, info: info, archiveName: url.deletingPathExtension().lastPathComponent,
+                    handle: handle, info: info, archiveName: restoredName,
                     identifier: Self.identifier(for: info, archiveURL: url),
                     selectedArchiveURL: url, sourceIdentity: identity
                 )
