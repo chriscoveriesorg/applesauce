@@ -51,6 +51,7 @@ jobs:
           python3 fskit/acceptance_evidence.py --self-test
           python3 fskit/signing_profile.py --self-test
           python3 fskit/source_provenance.py --self-test
+          python3 fskit/build_toolchain.py --self-test
           python3 fskit/replacement_acceptance.py --self-test
       - name: Guard signed bundle Finder and unmount helper provenance
         run: |
@@ -219,6 +220,7 @@ jobs:
         run: python3 fskit/signing_profile.py --self-test
       - name: Verify immutable signed package source provenance
         run: python3 fskit/source_provenance.py --self-test
+          python3 fskit/build_toolchain.py --self-test
       - name: Verify disposable ASCF archive-replacement refusal acceptance
         run: python3 fskit/replacement_acceptance.py --self-test
       - name: Check mounted-acceptance Darwin fstatfs ABI on real macOS
