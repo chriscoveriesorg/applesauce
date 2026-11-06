@@ -236,9 +236,15 @@ extension ASCFVolume: FSVolume.ReadWriteOperations {
         guard count > 0 else { return 0 }
         var actual = 0
         let status: Int32 = buffer.withUnsafeMutableBytes { bytes in
-            ascf_pread(handle, UInt64(offset),
-                       bytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                       count, &actual)
+            // FSKit reports capacity separately from the borrowed raw buffer.
+            // Recheck the actual span before giving its pointer to Rust; a
+            // mismatch must never become an out-of-bounds C ABI write.
+            guard bytes.count >= count, let baseAddress = bytes.baseAddress else {
+                return EINVAL
+            }
+            return ascf_pread(handle, UInt64(offset),
+                              baseAddress.assumingMemoryBound(to: UInt8.self),
+                              count, &actual)
         }
         guard status == 0 else { throw failure(status) }
         // The bridge promises an exact count on success. Since count already
