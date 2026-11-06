@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 import shutil
 import stat
@@ -29,6 +30,13 @@ EXACT_ENV = frozenset((
     "DYLD_INSERT_LIBRARIES", "PKG_CONFIG_PATH",
 ))
 ENV_PREFIXES = ("CARGO_TARGET_", "CARGO_PROFILE_", "CARGO_ENCODED_", "RUSTFLAGS_")
+# The environment's hash alone does not pin executable bytes. Compiler,
+# linker and Cargo wrapper overrides must also be inspected individually.
+EXECUTABLE_OVERRIDES = frozenset((
+    "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOC",
+    "CARGO_BUILD_RUSTC", "CARGO_BUILD_RUSTC_WRAPPER",
+    "CC", "CXX", "LD", "AR", "PKG_CONFIG", "SWIFT_EXEC",
+))
 
 
 class ToolchainError(ValueError):
@@ -67,11 +75,42 @@ def executable_fingerprint(path):
 def capture_environment(environ=None):
     environ = os.environ if environ is None else environ
     selected = {key: value for key, value in environ.items()
-                if key in EXACT_ENV or key.startswith(ENV_PREFIXES)}
+                if key in EXACT_ENV or key in EXECUTABLE_OVERRIDES
+                or key.startswith(ENV_PREFIXES)}
     serialized = json.dumps(selected, sort_keys=True, ensure_ascii=True,
                             separators=(",", ":")).encode("utf-8")
     return sorted(selected), hashlib.sha256(serialized).hexdigest()
 
+
+
+def fingerprint_executable_overrides(environ=None, finder=shutil.which):
+    """Pin the programs selected by inherited build-tool overrides.
+
+    A shell command with arguments or redirection is ambiguous in a
+    signed build. Reject it instead of attesting only the unchanging
+    environment string while an arbitrary wrapper binary changes.
+    """
+    environ = os.environ if environ is None else environ
+    hashes = {}
+    for key, value in sorted(environ.items()):
+        if not (key in EXECUTABLE_OVERRIDES
+                or (key.startswith("CARGO_TARGET_")
+                    and key.endswith(("_LINKER", "_AR")))):
+            continue
+        if not value.strip():
+            continue
+        try:
+            tokens = shlex.split(value)
+        except ValueError as error:
+            raise ToolchainError("invalid executable override: " + key) from error
+        if len(tokens) != 1:
+            raise ToolchainError("ambiguous executable override: " + key)
+        command = tokens[0]
+        resolved = command if "/" in command else finder(command)
+        if not resolved:
+            raise ToolchainError("unresolved executable override: " + key)
+        hashes["override:" + key] = executable_fingerprint(resolved)
+    return hashes
 
 def record(tool_names=TOOLS, finder=shutil.which, xcrun=None,
            rust_binary=None, environ=None):
@@ -94,6 +133,7 @@ def record(tool_names=TOOLS, finder=shutil.which, xcrun=None,
     if rust_binary is not None:
         for name in ("rustc", "cargo"):
             tool_hashes["rust-toolchain:" + name] = executable_fingerprint(rust_binary(name))
+    tool_hashes.update(fingerprint_executable_overrides(environ, finder))
     env_keys, env_sha = capture_environment(environ)
     return {
         "schema": "ascf-build-toolchain-v1",
@@ -156,6 +196,31 @@ class ToolchainTests(unittest.TestCase):
                           "rust-toolchain:rustc", "rust-toolchain:cargo"})
         self.assertEqual(report["build_environment_keys"], ["PATH"])
         self.assertNotIn("/bin", json.dumps(report))
+
+    def test_wrapper_executable_changes_are_recorded(self):
+        env = {"RUSTC_WRAPPER": str(self.binary)}
+        original = record(("cargo",), lambda name: str(self.binary),
+                          environ=env)
+        self.assertIn("override:RUSTC_WRAPPER", original["executables_sha256"])
+        self.binary.write_bytes(b"#!/bin/sh\\nexit 1\\n")
+        changed = record(("cargo",), lambda name: str(self.binary),
+                         environ=env)
+        self.assertEqual(original["build_environment_sha256"],
+                         changed["build_environment_sha256"])
+        self.assertNotEqual(original["executables_sha256"],
+                            changed["executables_sha256"])
+
+    def test_target_linker_is_pinned_and_ambiguous_commands_rejected(self):
+        key = "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
+        witness = record(("cargo",), lambda name: str(self.binary),
+                         environ={key: str(self.binary)})
+        self.assertIn("override:" + key, witness["executables_sha256"])
+        with self.assertRaisesRegex(ToolchainError, "ambiguous executable override"):
+            record(("cargo",), lambda name: str(self.binary),
+                   environ={"RUSTC_WRAPPER": "ccache rustc"})
+        with self.assertRaisesRegex(ToolchainError, "unresolved executable override"):
+            record(("cargo",), lambda name: None,
+                   environ={"RUSTC_WRAPPER": "missing-wrapper"})
 
     def test_missing_tool_fails(self):
         with self.assertRaises(ToolchainError):
