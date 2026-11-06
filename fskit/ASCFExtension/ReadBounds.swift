@@ -10,9 +10,17 @@ enum ASCFReadBounds {
                       logicalSize: UInt64) -> Int? {
         guard offset >= 0, requested >= 0, bufferLength >= 0 else { return nil }
         let start = UInt64(offset)
-        guard requested > 0, bufferLength > 0, start < logicalSize else { return 0 }
-        let bounded = min(requested, bufferLength, maximumBytes)
-        return Int(min(UInt64(bounded), logicalSize - start))
+        guard requested > 0, start < logicalSize else { return 0 }
+        // A short FSKit buffer is a caller-contract error, never EOF or a
+        // successful short read before EOF. That would silently truncate a
+        // Finder copy even though the bridge authenticated its returned bytes.
+        // Large requests are served in successive 8 MiB reads. Capacity is
+        // required only for the bytes legally available in this invocation,
+        // including the final partial request at logical EOF.
+        let bounded = min(requested, maximumBytes)
+        let count = Int(min(UInt64(bounded), logicalSize - start))
+        guard bufferLength >= count else { return nil }
+        return count
     }
 
     // The bridge's ascf_pread contract is exact on success. Unlike a generic
