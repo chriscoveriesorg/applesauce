@@ -14,8 +14,8 @@ struct ASCFExtension: UnaryFileSystemExtension {
 
 final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     // A user-requested mount must not sit behind Finder's queued probes.
-    // One worker still bounds decoder scratch, with at most eight queued
-    // probes retaining security-scoped access.
+    // One worker still bounds decoder scratch. Queued probes and mounts
+    // retain URLs and reservations, never open security-scoped access.
     private static let verificationScheduler = ASCFVerificationScheduler()
 
     // FSKit may issue overlapping load/unload callbacks. All lifecycle
