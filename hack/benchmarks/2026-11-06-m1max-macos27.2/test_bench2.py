@@ -182,6 +182,22 @@ class FreshOutputRootTests(unittest.TestCase):
                         bench2.main()
                 self.assertFalse(root.exists())
 
+    def test_empty_main_corpus_refuses_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "output"
+            data = Path(tmp) / "input"
+            for corpus in ("canterbury", "large", "silesia", "enwik8", "synthetic"):
+                (data / corpus).mkdir(parents=True)
+                if corpus != "silesia":
+                    (data / corpus / "fixture.bin").write_bytes(b"synthetic")
+            with patch.object(bench2, "DATA", str(data)), patch.object(
+                bench2, "WORK", str(root / "work")
+            ), patch.object(bench2, "CSV_PATH", str(root / "results" / "runs2.csv")
+            ), patch.object(bench2.sys, "argv", ["bench2.py", "main"]):
+                with self.assertRaisesRegex(ValueError, "corpus has no input files.*silesia"):
+                    bench2.main()
+            self.assertFalse(root.exists())
+
     def test_main_creates_results_directory_for_fresh_output_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "fresh-benchmark-output"
@@ -190,10 +206,11 @@ class FreshOutputRootTests(unittest.TestCase):
             data.mkdir()
             for corpus in ("canterbury", "large", "silesia", "enwik8", "synthetic"):
                 (data / corpus).mkdir()
+                (data / corpus / "fixture.bin").write_bytes(b"synthetic")
             with patch.object(bench2, "DATA", str(data)), patch.object(bench2, "WORK", str(root / "work")), patch.object(
                 bench2, "CSV_PATH", str(csv_path)
             ), patch.object(bench2.sys, "argv", ["bench2.py", "main"]), patch.object(
-                bench2, "files_in", return_value=[]
+                bench2, "bench_file"
             ), patch.object(bench2, "batch_header"):
                 bench2.main()
             self.assertTrue((root / "work").is_dir())
