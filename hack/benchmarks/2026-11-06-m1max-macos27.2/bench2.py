@@ -262,6 +262,8 @@ def main():
             input_path = os.path.join(DATA, "edge", name)
             if not os.path.isfile(input_path):
                 raise FileNotFoundError(f"benchmark input file does not exist: {input_path}")
+            if os.path.islink(input_path):
+                raise ValueError(f"benchmark input must not be a symlink: {input_path}")
     if which == "main":
         for corpus in required:
             corpus_dir = os.path.join(DATA, corpus)
