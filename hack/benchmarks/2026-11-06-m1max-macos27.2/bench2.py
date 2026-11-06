@@ -79,12 +79,22 @@ def warm(path):
             pass
 
 def decmpfs_size(path):
-    p = subprocess.run([BIN, "info", path], capture_output=True, text=True)
-    out = p.stdout
-    if "is not compressed" in out:
+    """Require a successful, parseable native compression report.
+
+    An info command failure or missing size must never produce an apparently
+    successful native-codec benchmark row with a blank compression ratio.
+    """
+    p = subprocess.run([BIN, "info", path], capture_output=True, text=True,
+                       timeout=TIMEOUT)
+    if p.returncode:
+        raise RuntimeError(
+            f"applesauce info failed (rc={p.returncode}): {p.stderr.strip()[-160:]}")
+    if "is not compressed" in p.stdout:
         return None, False, "not-compressed"
-    m = re.search(r"Compressed size: (\d+)", out)
-    return (int(m.group(1)) if m else None), True, ""
+    m = re.search(r"Compressed size:\s*(\d+)\b", p.stdout)
+    if not m or int(m.group(1)) <= 0:
+        raise RuntimeError("applesauce info returned no valid compressed byte count")
+    return int(m.group(1)), True, ""
 
 def batch_header(tag):
     up = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
