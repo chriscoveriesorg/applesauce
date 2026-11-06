@@ -309,6 +309,13 @@ jobs:
             -o "$RUNNER_TEMP/ascf-resource-load-tests" \
             fskit/ASCFExtension/ResourceLoadGate.swift fskit/tests/ResourceLoadGateTests.swift
           "$RUNNER_TEMP/ascf-resource-load-tests"
+      - name: Prioritize mounted loads over bounded Finder probe backlogs
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            -o "$RUNNER_TEMP/ascf-verification-scheduler-tests" \
+            fskit/ASCFExtension/VerificationScheduler.swift \
+            fskit/tests/VerificationSchedulerTests.swift
+          "$RUNNER_TEMP/ascf-verification-scheduler-tests"
       - name: Run signed-host lifecycle state-machine tests on macOS 27
         run: |
           xcrun swiftc -swift-version 5 -warnings-as-errors \
@@ -323,6 +330,7 @@ jobs:
             fskit/ASCFExtension/ArchiveIdentity.swift \
             fskit/ASCFExtension/ReadBounds.swift \
             fskit/ASCFExtension/ResourceLoadGate.swift \
+            fskit/ASCFExtension/VerificationScheduler.swift \
             fskit/ASCFExtension/ASCFExtension.swift fskit/ASCFExtension/ASCFVolume.swift
       - name: Validate extension property list
         run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements fskit/Host/Host.entitlements
