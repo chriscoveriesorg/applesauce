@@ -505,6 +505,27 @@ mod tests {
             assert_eq!(fs::read(&source).unwrap(), payload);
             assert_eq!(fs::read(&restored).unwrap(), payload);
             info(&archive).unwrap();
+            let report = crate::size_report::analyze(std::slice::from_ref(&archive));
+            assert!(report.complete);
+            let report = serde_json::to_value(report).unwrap();
+            let entry = &report["paths"][0];
+            assert_eq!(entry["source"], "ascf");
+            assert_eq!(entry["logical_size_bytes"], payload.len() as u64);
+            assert_eq!(
+                entry["archive_bytes"],
+                fs::metadata(&archive).unwrap().len()
+            );
+            assert_eq!(entry["codec"], codec.name());
+            assert_eq!(
+                entry["entry_count"],
+                (payload.len() as u64).div_ceil(64 * 1024)
+            );
+            assert_eq!(
+                entry["raw_compressed_bytes"].as_u64().unwrap()
+                    + 64
+                    + 48 * entry["entry_count"].as_u64().unwrap(),
+                entry["archive_bytes"]
+            );
             let part = dir.path().join("partial.jsonl");
             extract_range(&archive, &part, (65_535, 131_073)).unwrap();
             assert_eq!(fs::read(&part).unwrap(), payload[65_535..196_608]);
@@ -520,6 +541,8 @@ mod tests {
             fs::write(&archive, corrupt).unwrap();
             // Header/index remains parseable although payload authentication fails.
             info(&archive).unwrap();
+            // Size inspection validates metadata only and never decodes payloads.
+            assert!(crate::size_report::analyze(std::slice::from_ref(&archive)).complete);
             let refused = dir.path().join("refused.jsonl");
             assert!(extract(&archive, &refused).is_err());
             assert!(!refused.exists());

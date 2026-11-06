@@ -53,6 +53,31 @@ fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap()
 }
 
+/// Real compression reports actual storage afterwards. The fixture's deliberately
+/// malformed `required-decmpfs` file makes that report incomplete; nothing else may.
+fn assert_compressed_except_malformed_fixture(output: &Output) {
+    if output.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let errors: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i].trim_start().starts_with("error["))
+        .collect();
+    let only_fixture = errors.len() == 1
+        && errors[0] > 0
+        && lines[errors[0] - 1].contains("/required-decmpfs:")
+        && !stdout.contains("operation_errors")
+        && output.stderr.is_empty();
+    assert!(
+        only_fixture,
+        "status={}\nstdout={}\nstderr={}",
+        output.status,
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -842,7 +867,7 @@ fn accuracy_all_stable_codecs_projection_table() {
             arg("0.95"),
             copy.as_os_str(),
         ]);
-        assert_success(&real);
+        assert_compressed_except_malformed_fixture(&real);
 
         let mut projected_total = 0u64;
         let mut upper_total = 0u64;

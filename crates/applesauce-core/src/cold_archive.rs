@@ -369,6 +369,16 @@ impl<R: Read + Seek> ArchiveReader<R> {
         self.entries.len()
     }
 
+    /// Sum of encoded chunk payload lengths, excluding the archive header and index.
+    /// This inspects validated metadata without decoding or reading payload bytes.
+    #[must_use]
+    pub fn raw_compressed_bytes(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|entry| u64::from(entry.stored_len))
+            .sum()
+    }
+
     #[must_use]
     pub const fn logical_sha256(&self) -> [u8; 32] {
         self.logical_sha256

@@ -1,0 +1,21 @@
+Thu Nov  5 23:18:04 UTC 2026
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+Apple M1 Max
+10
+68719476736
+MacBookPro18,4
+27.2
+26B123
+P-cores: 8 E-cores: 2
+Xcode 27.0
+Build version 27A266a
+27.0
+rustc 1.93.1 (01f6ddf75 2026-02-11)
+cargo 1.93.1 (083ac5135 2025-12-15)
+10:18  up 1 day, 15:58, 1 user, load averages: 3.92 3.82 5.57
+ -InternalBattery-0 (id=58196067)	80%; AC attached; not charging present: true
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

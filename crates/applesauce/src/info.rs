@@ -1,4 +1,4 @@
-use applesauce_core::{decmpfs, round_to_block_size};
+use applesauce_core::decmpfs;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs::Metadata;
@@ -115,20 +115,23 @@ impl AfscFolderInfo {
 
 pub fn get_recursive(path: &Path) -> io::Result<AfscFolderInfo> {
     let mut result = AfscFolderInfo::default();
+    let mut seen_files = std::collections::HashSet::new();
     for entry in jwalk::WalkDir::new(path) {
         let entry = entry?;
         let file_type = entry.file_type();
 
         #[allow(clippy::filetype_is_file)]
         if file_type.is_file() {
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if !seen_files.insert((metadata.dev(), metadata.ino())) {
+                continue;
+            }
             let info = get(&entry.path())?;
             result.num_files += 1;
             if info.is_compressed {
                 result.num_compressed_files += 1;
-                result.total_compressed_size += info.on_disk_size;
-            } else {
-                result.total_compressed_size += info.stat_size;
             }
+            result.total_compressed_size += info.on_disk_size;
             result.total_uncompressed_size += info.stat_size;
         } else if file_type.is_dir() {
             result.num_folders += 1;
@@ -139,7 +142,7 @@ pub fn get_recursive(path: &Path) -> io::Result<AfscFolderInfo> {
 
 pub fn get_file_info(path: &Path, metadata: &Metadata, volumes: &Volumes) -> FileInfo {
     let compression_info = get_compression_state(path, metadata, volumes);
-    let on_disk_size = round_to_block_size(metadata.blocks() * 512, metadata.st_blksize());
+    let on_disk_size = metadata.blocks() * 512;
     FileInfo {
         on_disk_size,
         compression_state: compression_info,
@@ -205,7 +208,7 @@ pub fn get_compression_state(
 pub fn get(path: &Path) -> io::Result<AfscFileInfo> {
     let metadata = path.metadata()?;
 
-    let on_disk_size = round_to_block_size(metadata.blocks() * 512, metadata.st_blksize());
+    let on_disk_size = metadata.blocks() * 512;
 
     // TODO: Try a local buffer for non-alloc fast path
     let path = CString::new(path.as_os_str().as_bytes())?;

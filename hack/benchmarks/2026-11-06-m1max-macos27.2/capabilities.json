@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "applesauce_version": "0.5.31",
+  "host": {
+    "os": "macos",
+    "arch": "aarch64",
+    "macos_version": "27.2.0",
+    "macos_build": "26B123"
+  },
+  "codecs": [
+    {
+      "name": "zlib",
+      "apple_buffer": {
+        "available": true,
+        "verified_roundtrip": true,
+        "reason": "generated buffer round trip passed; this does not establish native filesystem support"
+      },
+      "native_decmpfs": {
+        "writable": true,
+        "decmpfs_types": [
+          3,
+          4
+        ],
+        "experimental": false,
+        "reason": "native writer enabled; target volume and per-file eligibility are checked when compressing"
+      }
+    },
+    {
+      "name": "lzvn",
+      "apple_buffer": {
+        "available": false,
+        "verified_roundtrip": false,
+        "reason": "no public Apple buffer selector for LZVN; native implementation is separate"
+      },
+      "native_decmpfs": {
+        "writable": true,
+        "decmpfs_types": [
+          7,
+          8
+        ],
+        "experimental": false,
+        "reason": "native writer enabled; target volume and per-file eligibility are checked when compressing"
+      }
+    },
+    {
+      "name": "lzfse",
+      "apple_buffer": {
+        "available": true,
+        "verified_roundtrip": true,
+        "reason": "generated buffer round trip passed; this does not establish native filesystem support"
+      },
+      "native_decmpfs": {
+        "writable": true,
+        "decmpfs_types": [
+          11,
+          12
+        ],
+        "experimental": false,
+        "reason": "native writer enabled; target volume and per-file eligibility are checked when compressing"
+      }
+    },
+    {
+      "name": "lzbitmap",
+      "apple_buffer": {
+        "available": true,
+        "verified_roundtrip": true,
+        "reason": "generated buffer round trip passed; this does not establish native filesystem support"
+      },
+      "native_decmpfs": {
+        "writable": true,
+        "decmpfs_types": [
+          13,
+          14
+        ],
+        "experimental": true,
+        "reason": "opt-in experimental LZBitmap writer; requires a compatible target volume and backup; readback verification is forced by the CLI"
+      }
+    },
+    {
+      "name": "lzmesh",
+      "apple_buffer": {
+        "available": true,
+        "verified_roundtrip": true,
+        "reason": "generated buffer round trip passed; this does not establish native filesystem support"
+      },
+      "native_decmpfs": {
+        "writable": false,
+        "decmpfs_types": [],
+        "experimental": true,
+        "reason": "no verified native decmpfs type/framing mapping; buffer support does not authorize file compression"
+      }
+    },
+    {
+      "name": "lzraven",
+      "apple_buffer": {
+        "available": true,
+        "verified_roundtrip": true,
+        "reason": "generated buffer round trip passed; this does not establish native filesystem support"
+      },
+      "native_decmpfs": {
+        "writable": false,
+        "decmpfs_types": [],
+        "experimental": true,
+        "reason": "no verified native decmpfs type/framing mapping; buffer support does not authorize file compression"
+      }
+    }
+  ]
+}
