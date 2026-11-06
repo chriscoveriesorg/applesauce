@@ -301,7 +301,7 @@ def sampled_offsets(size, source_sha256=None):
             seed = bytes.fromhex(source_sha256)
             for index in range(64):
                 sample = hashlib.sha256(
-                    b"applesauce-ascf-read-offsets-v1\\0" + seed
+                    b"applesauce-ascf-read-offsets-v1\0" + seed
                     + index.to_bytes(4, "big")
                 ).digest()
                 values.add(int.from_bytes(sample[:8], "big") % size)
