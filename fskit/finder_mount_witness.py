@@ -133,6 +133,10 @@ def validate(first, after, copied):
 
 def stamp(first_path, after_path, copied):
     before, first_identity = load_report(first_path, include_identity=True)
+    # Preserve the explicit replay refusal even if stamping changed the first
+    # report's mtime beyond the second report's original observation.
+    require("verification_id" not in before and not before.get("finder_copy_verified"),
+            "first readback was already stamped")
     after, second_identity = load_report(after_path, include_identity=True)
     # The post-Finder report must be a fresh filesystem observation. The
     # first report reused as "after", including through a hard link, cannot
