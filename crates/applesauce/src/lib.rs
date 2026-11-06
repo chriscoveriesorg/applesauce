@@ -12,6 +12,7 @@ extern crate core;
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 compile_error!("applesauce only works on macos/ios");
 
+pub mod dry_run;
 pub mod info;
 pub mod progress;
 pub use applesauce_core::apple_buffer;
@@ -35,6 +36,34 @@ use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::{io, mem, ptr};
 use tracing::warn;
+
+/// Apply the same compressed-payload ratio gate used by the mutating writer.
+///
+/// The ratio is deliberately based on the sum of encoded block payloads. Native
+/// decmpfs framing and filesystem allocation are reported separately by dry-run.
+#[must_use]
+pub fn compressed_payload_is_allowed(
+    compressed_payload_bytes: u64,
+    logical_size_bytes: u64,
+    minimum_compression_ratio: f64,
+) -> bool {
+    let maximum = (logical_size_bytes as f64 * minimum_compression_ratio) as u64;
+    compressed_payload_bytes <= maximum
+}
+
+#[cfg(test)]
+mod compression_ratio_tests {
+    use super::compressed_payload_is_allowed;
+
+    #[test]
+    fn payload_ratio_gate_includes_equality_and_preserves_finite_edges() {
+        assert!(compressed_payload_is_allowed(50, 100, 0.5));
+        assert!(!compressed_payload_is_allowed(51, 100, 0.5));
+        assert!(compressed_payload_is_allowed(0, 100, 0.0));
+        assert!(!compressed_payload_is_allowed(1, 100, 0.0));
+        assert!(compressed_payload_is_allowed(101, 100, 1.01));
+    }
+}
 
 use crate::info::{FileCompressionState, FileInfo};
 use crate::progress::Progress;
