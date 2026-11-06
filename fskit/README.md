@@ -36,7 +36,10 @@ A preempted probe reports EBUSY so FSKit can retry it later; its security scope
 is released and no incomplete verification can be advertised as usable.
 The handle lifetime is guarded against concurrent unregister/close. At most
 eight pending probes may retain security-scoped access; a ninth selected ASCF
-probe reports EBUSY until the queue drains. The scheduler never runs two
+probe reports EBUSY until the queue drains. Across separate FSKit instances,
+up to sixteen selected mounts can wait for the worker; additional requests
+return EBUSY and release their security scope and lifecycle reservation.
+Once the queue drains a mount can be retried. The scheduler never runs two
 decoders concurrently, so scratch memory remains bounded. An unload
 invalidates a queued load ticket, allowing the worker to skip decoding that archive. An unload also sets a Rust atomic
 cancellation flag for in-flight verification, stopping work at the next

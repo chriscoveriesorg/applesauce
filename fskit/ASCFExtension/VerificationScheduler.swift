@@ -1,4 +1,4 @@
-// Bound background archive probes without starving an explicitly requested FSKit mount.
+// Bound queued FSKit requests without starving an explicitly requested mount.
 // A single worker owns decoder scratch at any one time. New load requests run
 // ahead of already queued probes; an active probe can be cancelled at a chunk boundary.
 import Foundation
@@ -10,6 +10,7 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
     private let lock = NSLock()
     private let worker: DispatchQueue
     private let maxPendingProbes: Int
+    private let maxPendingMounts: Int
     private var active = false
     private struct ScheduledProbe {
         let work: Job
@@ -21,14 +22,15 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
     private var activeProbeCancellation: Job?
 
     init(label: String = "org.chriscoveries.applesauce.ascf.verification",
-         maxPendingProbes: Int = 8) {
-        precondition(maxPendingProbes > 0)
+         maxPendingProbes: Int = 8, maxPendingMounts: Int = 16) {
+        precondition(maxPendingProbes > 0 && maxPendingMounts > 0)
         self.maxPendingProbes = maxPendingProbes
+        self.maxPendingMounts = maxPendingMounts
         worker = DispatchQueue(label: label, qos: .userInitiated)
     }
 
-    // Returning false means the bounded probe backlog is full. Mount loads
-    // are reserved by ASCFResourceLoadGate and always admitted here.
+    // Returning false means the bounded probe or mount backlog is full.
+    // A rejected caller must release its security scope and reservation.
     @discardableResult
     func submit(_ priority: Priority, onPreempt: (@Sendable () -> Void)? = nil,
                 _ work: @escaping @Sendable () -> Void) -> Bool {
@@ -36,6 +38,12 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
         let interruptActiveProbe: Job?
         switch priority {
         case .mount:
+            // Many FSKit instances share this scheduler. Per-instance load
+            // gates cannot bound queued mounts or retained security scopes.
+            guard pendingMounts.count < maxPendingMounts else {
+                lock.unlock()
+                return false
+            }
             pendingMounts.append(work)
             interruptActiveProbe = activeProbeCancellation
         case .probe:

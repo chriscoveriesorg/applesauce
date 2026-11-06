@@ -205,7 +205,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             replyHandler(nil, Self.error(EACCES))
             return
         }
-        Self.verificationScheduler.submit(.mount) { [self] in
+        let accepted = Self.verificationScheduler.submit(.mount) { [self] in
             // A probe can occupy the single verifier while unload cancels
             // this request. Avoid decoding an archive whose ticket is stale.
             lifecycleLock.lock()
@@ -263,6 +263,15 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                 url.stopAccessingSecurityScopedResource()
                 replyHandler(nil, error)
             }
+        }
+        if !accepted {
+            // Other FSKit instances may hold queued mounts. Release our
+            // rejected ticket and scope so refused requests retain nothing.
+            lifecycleLock.lock()
+            loadGate.cancel(ticket)
+            lifecycleLock.unlock()
+            url.stopAccessingSecurityScopedResource()
+            replyHandler(nil, Self.error(EBUSY))
         }
     }
 

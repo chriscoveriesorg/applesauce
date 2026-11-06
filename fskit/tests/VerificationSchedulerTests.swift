@@ -98,6 +98,40 @@ struct ASCFVerificationSchedulerTests {
         precondition(probeEvents.snapshot() ==
                      ["active-probe", "requested-mount", "queued-probe"],
                      "preemption did not preserve mount priority")
-        print("ASCF verification scheduler: priority, bounded admission, preemption and reuse passed")
+        // Separate FSKit instances share a scheduler. An active verifier
+        // must not allow unbounded selected mounts to retain security scopes.
+        let bounded = ASCFVerificationScheduler(maxPendingProbes: 1,
+                                                 maxPendingMounts: 2)
+        let boundedStarted = DispatchSemaphore(value: 0)
+        let boundedRelease = DispatchSemaphore(value: 0)
+        let boundedGroup = DispatchGroup()
+        let boundedEvents = ASCFVerificationSchedulerEvents()
+        boundedGroup.enter()
+        precondition(bounded.submit(.probe) {
+            boundedEvents.add("active-probe")
+            boundedStarted.signal()
+            precondition(boundedRelease.wait(timeout: .now() + 10) == .success)
+            boundedGroup.leave()
+        })
+        precondition(boundedStarted.wait(timeout: .now() + 10) == .success)
+        for index in 0..<2 {
+            boundedGroup.enter()
+            precondition(bounded.submit(.mount) {
+                boundedEvents.add("mount\(index)")
+                boundedGroup.leave()
+            })
+        }
+        precondition(!bounded.submit(.mount) { boundedEvents.add("overflow-mount") },
+                     "mount backlog was unbounded")
+        boundedRelease.signal()
+        precondition(boundedGroup.wait(timeout: .now() + 10) == .success)
+        precondition(boundedEvents.snapshot() ==
+                     ["active-probe", "mount0", "mount1"],
+                     "bounded mount backlog lost priority or ran refused work")
+        let boundedReuse = DispatchSemaphore(value: 0)
+        precondition(bounded.submit(.mount) { boundedReuse.signal() },
+                     "completed mount queue did not admit new work")
+        precondition(boundedReuse.wait(timeout: .now() + 10) == .success)
+        print("ASCF verification scheduler: priority, bounded probe/mount admission, preemption and reuse passed")
     }
 }
