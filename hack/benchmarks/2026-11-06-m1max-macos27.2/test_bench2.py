@@ -182,6 +182,28 @@ class FreshOutputRootTests(unittest.TestCase):
                         bench2.main()
                 self.assertFalse(root.exists())
 
+    def test_edge_symlink_refused_without_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "output"
+            data = Path(tmp) / "input"
+            edge = data / "edge"
+            edge.mkdir(parents=True)
+            for name in ("empty.bin", "one.bin", "exact-64k.bin",
+                         "64k-plus-1.bin", "random-64m.bin"):
+                (edge / name).write_bytes(b"synthetic")
+            outside = Path(tmp) / "outside.bin"
+            outside.write_bytes(b"do not benchmark outside corpus")
+            (edge / "one.bin").unlink()
+            (edge / "one.bin").symlink_to(outside)
+            with patch.object(bench2, "DATA", str(data)), patch.object(
+                bench2, "WORK", str(root / "work")
+            ), patch.object(bench2, "CSV_PATH", str(root / "results" / "runs2.csv")
+            ), patch.object(bench2.sys, "argv", ["bench2.py", "edge"]):
+                with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+                    bench2.main()
+            self.assertFalse(root.exists())
+            self.assertEqual(outside.read_bytes(), b"do not benchmark outside corpus")
+
     def test_empty_main_corpus_refuses_before_creating_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "output"
