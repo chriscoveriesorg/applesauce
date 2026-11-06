@@ -27,8 +27,9 @@ Usage:
   bash fskit/signed_acceptance.sh replacement-stage BUNDLE_DIR lzraven|lzmesh
   bash fskit/signed_acceptance.sh replacement-check STAGE_DIR MOUNT_DIR ORIGINAL_JSONL
 
-preflight: verify macOS 27+, matching SDK, local tools and an unlocked
-Apple Development signing identity for ASCFSKIT_TEAM_ID. Read-only checks.
+preflight: verify macOS 27+, matching SDK, local tools, unlocked
+Apple Development identity and BOTH local restricted FSKit provisioning grants.
+Xcode may need an interactive profile download before this read-only check.
 signed-build: set ASCFSKIT_TEAM_ID to your Apple Developer Team ID, with
 FSKit mount and module capabilities enabled for their respective App IDs.
 The local Xcode account must already have matching provisioning profiles.
@@ -89,9 +90,14 @@ signing_preflight() {
     || die "export ASCFSKIT_TEAM_ID as the provisioned 10-character Apple Developer Team ID"
   identity="$(/usr/bin/python3 "$ROOT/fskit/signing_profile.py" --preflight-identity "$team")" \
     || die "no available Apple Development signing identity for team $team; install/unlock its certificate before signed-build"
-  printf 'Signing preflight: macOS %s, SDK %s, developer team %s, signing identity %s, tools present.\n' \
+  # macOS FSKit capabilities are restricted: a usable signing identity by
+  # itself does not supply the host mount and extension fsmodule grants.
+  # Catch missing/expired local profiles before a long Rust/Xcode build.
+  /usr/bin/python3 "$ROOT/fskit/signing_profile.py" --preflight-profiles "$team" \
+    || die "missing restricted FSKit provisioning profile(s); create/download both App ID profiles in Xcode and rerun preflight"
+  printf 'Signing preflight: macOS %s, SDK %s, developer team %s, signing identity %s, tools and local profile grants present.\n' \
     "$product" "$sdk" "$team" "$identity"
-  printf 'FSKit entitlement grants still require signed-build profile validation.\n'
+  printf 'Signed binaries and embedded profile grants will be independently verified after the build.\n'
 }
 # Signed-source SHA alone cannot identify the build toolchain. Pin the
 # compiler, SDK and generator executable used to build the signed package.
