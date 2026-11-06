@@ -16,6 +16,30 @@ enum ASCFCorruptFixtureProof {
         try fingerprint(url).sha256
     }
 
+    // Keep this pure reader boundary independently testable. Some virtual
+    // filesystems may return EOF while fstat still reports logical bytes.
+    // A partial digest must never certify a damaged fixture for FSKit.
+    static func hashStream(expectedSize: Int64,
+                           readChunk: () throws -> Data?) throws -> String {
+        guard expectedSize >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+        }
+        var digest = SHA256()
+        var hashedBytes: Int64 = 0
+        while let bytes = try readChunk(), !bytes.isEmpty {
+            let (next, overflow) = hashedBytes.addingReportingOverflow(Int64(bytes.count))
+            guard !overflow && next <= expectedSize else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+            }
+            hashedBytes = next
+            digest.update(data: bytes)
+        }
+        guard hashedBytes == expectedSize else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+        }
+        return digest.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     static func fingerprint(_ url: URL) throws -> Fingerprint {
         let fd: Int32 = url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return -1 }
@@ -34,25 +58,9 @@ enum ASCFCorruptFixtureProof {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
         }
 
-        // A successful EOF from FileHandle is only valid after every byte
-        // promised by fstat has been hashed. A truncated stream on a buggy
-        // filesystem must not generate an authoritative corruption witness.
-        guard before.st_size >= 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
-        }
         let reader = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-        var digest = SHA256()
-        var hashedBytes: Int64 = 0
-        while let bytes = try reader.read(upToCount: 1024 * 1024), !bytes.isEmpty {
-            let (next, overflow) = hashedBytes.addingReportingOverflow(Int64(bytes.count))
-            guard !overflow && next <= before.st_size else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
-            }
-            hashedBytes = next
-            digest.update(data: bytes)
-        }
-        guard hashedBytes == before.st_size else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+        let checksum = try hashStream(expectedSize: Int64(before.st_size)) {
+            try reader.read(upToCount: 1024 * 1024)
         }
         var after = stat()
         var current = stat()
@@ -77,7 +85,7 @@ enum ASCFCorruptFixtureProof {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(ESTALE))
         }
         return Fingerprint(
-            sha256: digest.finalize().map { String(format: "%02x", $0) }.joined(),
+            sha256: checksum,
             sourceIdentity: [
                 String(after.st_dev), String(after.st_ino), String(after.st_size),
                 String(after.st_mode), String(after.st_mtimespec.tv_sec),
