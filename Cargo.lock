@@ -105,6 +105,7 @@ dependencies = [
  "humansize",
  "indicatif",
  "libc",
+ "resource-fork",
  "serde",
  "serde_json",
  "sha2",
