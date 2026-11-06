@@ -1,6 +1,6 @@
 // Bound background archive probes without starving an explicitly requested FSKit mount.
 // A single worker owns decoder scratch at any one time. New load requests run
-// ahead of already queued probes, while the active probe completes normally.
+// ahead of already queued probes; an active probe can be cancelled at a chunk boundary.
 import Foundation
 import Dispatch
 
