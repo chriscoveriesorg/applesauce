@@ -73,7 +73,7 @@ HELP
 signing_preflight() {
   mac_only
   local tool product major sdk sdk_major team identity
-  for tool in cargo xcodegen xcodebuild xcrun codesign security python3 shasum ditto git; do
+  for tool in cargo rustc xcodegen xcodebuild xcrun codesign security python3 shasum ditto git; do
     need "$tool"
   done
   product="$(/usr/bin/sw_vers -productVersion)" || die "cannot read macOS version"
@@ -92,6 +92,17 @@ signing_preflight() {
   printf 'Signing preflight: macOS %s, SDK %s, developer team %s, signing identity %s, tools present.\n' \
     "$product" "$sdk" "$team" "$identity"
   printf 'FSKit entitlement grants still require signed-build profile validation.\n'
+}
+# Signed-source SHA alone cannot identify the build toolchain. Pin the
+# compiler, SDK and generator executable used to build the signed package.
+# Package compares this witness before and after building.
+record_build_tools() {
+  printf 'cargo: '; cargo --version
+  printf 'rustc:\n'; rustc --version --verbose
+  printf 'Xcode:\n'; xcodebuild -version
+  printf 'macOS SDK: '; xcrun --sdk macosx --show-sdk-version
+  printf 'XcodeGen executable SHA-256: '
+  /usr/bin/shasum -a 256 "$(command -v xcodegen)" | /usr/bin/awk '{print $1}'
 }
 verify_bundle() {
   local bundle="$1" key="$2" name="$3" out="$4" helper_root="${5:-$ROOT}"
@@ -173,6 +184,7 @@ source.lzmesh.corrupt.ascf
 source.lzraven.corrupt.ascf
 source-provenance.txt
 macos.txt
+build-tools.txt
 NEXT-STEPS.txt
 fskit/signed_acceptance.sh
 fskit/verify_mount.py
@@ -360,6 +372,8 @@ case "$1" in
     # Explicit single-command handoff. Every input is generated from synthetic
     # data. A signed app is copied intact, preserving its embedded extension.
     out="$(mktemp -d /tmp/ascf-acceptance.XXXXXXXX)"
+    record_build_tools > "$out/build-tools.txt" \
+      || die "could not capture Cargo, Rust, Xcode SDK and generator toolchain provenance"
     host_log="$out/signed-build.log"
     if ! bash "$ROOT/fskit/signed_acceptance.sh" signed-build > "$host_log" 2>&1; then
       die "signed build failed; full diagnostics: $host_log"
@@ -447,6 +461,11 @@ PY
     printf 'repository=chriscoveriesorg/applesauce\ncommit=%s\n' \
       "$source_sha" > "$out/source-provenance.txt"
     /usr/bin/sw_vers > "$out/macos.txt"
+    record_build_tools > "$out/.build-tools-final.txt" \
+      || die "could not recheck signed-build toolchain provenance"
+    /usr/bin/cmp -s "$out/build-tools.txt" "$out/.build-tools-final.txt" \
+      || die "signed-build toolchain changed during packaging; reject provenance"
+    /bin/rm "$out/.build-tools-final.txt"
     cat > "$out/NEXT-STEPS.txt" <<'STEPS'
 These files are synthetic. Preserve the originals and the signed app.
 1. Copy this entire folder onto an authorized disposable macOS 27+ Mac.
@@ -488,7 +507,8 @@ These files are synthetic. Preserve the originals and the signed app.
    Preserve the combined acceptance.json and the individual reports for review.
 The bundle hashes the signed host and extension binaries and provisioning
 profiles alongside every fixture and verifier; source-provenance.txt records
-the clean source checkout commit. It does not need Rust on the receiving Mac.
+the clean source commit. build-tools.txt captures compiler, SDK and XcodeGen
+identity across the signed build. Rust is not needed on the receiving Mac.
 Keep the signed readback, unmount, mount, and rejection evidence.
 No data on the target Mac is automatically mounted or overwritten.
 STEPS
