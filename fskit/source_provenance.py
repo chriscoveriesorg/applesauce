@@ -67,13 +67,16 @@ def source_commit(root, expected=None):
             raise SourceProvenanceError(
                 "tracked source is not a normal stage-0 regular file "
                 "(symlink, gitlink or unmerged index): " + repr(record[:160]))
-    # XcodeGen discovers Host/extension inputs by walking source directories;
-    # Cargo likewise reads source under crates/. Git exclude rules can hide
-    # additional build inputs from normal status. Allow only harmless Finder
-    # metadata so Macs with .DS_Store files can still sign a clean checkout.
+    # XcodeGen walks Host/extension inputs, while Cargo reads crates/ and
+    # repository-local .cargo/config* (including compiler and linker overrides).
+    # Rustup also reads root rust-toolchain* selection files. Git excludes can
+    # hide any of these inputs from status, even though they affect the binary
+    # signed under HEAD. Reject them unless tracked by the pinned commit.
+    # Finder metadata is the only harmless ignored exception.
     ignored_sources = git(root, "ls-files", "--others", "--ignored",
                           "--exclude-standard", "-z", "--",
-                          "fskit/Host", "fskit/ASCFExtension", "crates")
+                          "fskit/Host", "fskit/ASCFExtension", "crates",
+                          ".cargo", "rust-toolchain", "rust-toolchain.toml")
     for name in ignored_sources.split("\0"):
         if name and Path(name).name != ".DS_Store":
             raise SourceProvenanceError(
@@ -214,6 +217,30 @@ class SourceProvenanceTests(unittest.TestCase):
         self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
         with self.assertRaisesRegex(SourceProvenanceError, "ignored build input"):
             source_commit(self.root)
+
+    def test_git_ignored_cargo_config_refused(self):
+        # Repo-local Cargo config can change the compiler/linker or inject a
+        # rustc wrapper while Git continues to report a clean source HEAD.
+        cargo = self.root / ".cargo"
+        cargo.mkdir()
+        (self.root / ".git" / "info" / "exclude").write_text(
+            ".cargo/config.toml\\n")
+        (cargo / "config.toml").write_text(
+            '[build]\\nrustflags = ["--cfg", "unreviewed_code"]\\n')
+        self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+        with self.assertRaisesRegex(SourceProvenanceError, "ignored build input"):
+            source_commit(self.root, self.original)
+
+    def test_git_ignored_rustup_toolchain_refused(self):
+        # An ignored rust-toolchain.toml can silently change the compiler
+        # used for an otherwise identical source SHA.
+        (self.root / ".git" / "info" / "exclude").write_text(
+            "rust-toolchain.toml\\n")
+        (self.root / "rust-toolchain.toml").write_text(
+            '[toolchain]\\nchannel = "nightly"\\n')
+        self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
+        with self.assertRaisesRegex(SourceProvenanceError, "ignored build input"):
+            source_commit(self.root, self.original)
 
     def test_finder_metadata_ignored_without_weakening_source_gate(self):
         for directory in ("fskit/Host", "fskit/ASCFExtension", "crates"):
