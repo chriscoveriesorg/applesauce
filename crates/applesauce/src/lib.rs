@@ -52,6 +52,11 @@ pub fn compressed_payload_is_allowed(
     if !minimum_compression_ratio.is_finite() || minimum_compression_ratio < 0.0 {
         return false;
     }
+    // Converting u64 sizes above 2^53 to f64 loses integer precision.
+    // A ratio of exactly one must compare byte counts without rounding.
+    if minimum_compression_ratio == 1.0 {
+        return compressed_payload_bytes <= logical_size_bytes;
+    }
     let maximum = (logical_size_bytes as f64 * minimum_compression_ratio) as u64;
     compressed_payload_bytes <= maximum
 }
@@ -67,6 +72,12 @@ mod compression_ratio_tests {
         assert!(compressed_payload_is_allowed(0, 100, 0.0));
         assert!(!compressed_payload_is_allowed(1, 100, 0.0));
         assert!(compressed_payload_is_allowed(101, 100, 1.01));
+        // 2^53 + 1 cannot be represented exactly by f64. At ratio 1,
+        // equality must still pass and one extra byte must fail.
+        let large = (1_u64 << 53) + 1;
+        assert!(compressed_payload_is_allowed(large, large, 1.0));
+        assert!(!compressed_payload_is_allowed(large + 1, large, 1.0));
+        assert!(compressed_payload_is_allowed(u64::MAX, u64::MAX, 1.0));
         // Negative ratios must not saturate to zero and allow empty payloads.
         for ratio in [-0.1, -1.0, f64::MIN] {
             assert!(!compressed_payload_is_allowed(0, 100, ratio));
