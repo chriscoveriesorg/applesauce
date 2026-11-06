@@ -97,12 +97,15 @@ signing_preflight() {
 # compiler, SDK and generator executable used to build the signed package.
 # Package compares this witness before and after building.
 record_build_tools() {
-  printf 'cargo: '; cargo --version
-  printf 'rustc:\n'; rustc --version --verbose
-  printf 'Xcode:\n'; xcodebuild -version
-  printf 'macOS SDK: '; xcrun --sdk macosx --show-sdk-version
+  local generator
+  printf 'cargo: '; cargo --version || return 1
+  printf 'rustc:\n'; rustc --version --verbose || return 1
+  printf 'Xcode:\n'; xcodebuild -version || return 1
+  printf 'macOS SDK: '; xcrun --sdk macosx --show-sdk-version || return 1
+  generator="$(command -v xcodegen)" || return 1
+  test -f "$generator" || return 1
   printf 'XcodeGen executable SHA-256: '
-  /usr/bin/shasum -a 256 "$(command -v xcodegen)" | /usr/bin/awk '{print $1}'
+  /usr/bin/shasum -a 256 "$generator" | /usr/bin/awk '{print $1}' || return 1
 }
 verify_bundle() {
   local bundle="$1" key="$2" name="$3" out="$4" helper_root="${5:-$ROOT}"
