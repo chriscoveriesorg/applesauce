@@ -236,8 +236,8 @@ class WitnessTests(unittest.TestCase):
     def test_restored_name_requires_verified_safe_single_component(self):
         self.assertEqual(safe_restored_name(self.first), "source.lzraven")
         for name in ("", ".", "..", "../outside", "folder/child",
-                     "volume:child", "child\\\\name", "newline\\nchild",
-                     "control\\x00byte", "carriage\\rreturn"):
+                     "volume:child", "child\\\\name", "newline\nchild",
+                     "control\x00byte", "carriage\rreturn"):
             with self.subTest(name=name):
                 with self.assertRaises((WitnessError, ValueError)):
                     safe_restored_name(dict(self.first, restored_file=name))
