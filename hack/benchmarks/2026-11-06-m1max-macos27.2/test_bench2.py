@@ -204,6 +204,31 @@ class FreshOutputRootTests(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertEqual(outside.read_bytes(), b"do not benchmark outside corpus")
 
+    def test_symlinked_corpus_directory_refused_before_output(self):
+        for batch, corpus in (("main", "silesia"), ("edge", "edge"), ("big4g", "edge")):
+            with self.subTest(batch=batch), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "output"
+                data = Path(tmp) / "input"
+                data.mkdir()
+                outside = Path(tmp) / "outside-corpus"
+                outside.mkdir()
+                (outside / "fixture.bin").write_bytes(b"external synthetic fixture")
+                if batch == "main":
+                    for name in ("canterbury", "large", "enwik8", "synthetic"):
+                        (data / name).mkdir()
+                        (data / name / "fixture.bin").write_bytes(b"synthetic")
+                (data / corpus).symlink_to(outside, target_is_directory=True)
+                with patch.object(bench2, "DATA", str(data)), patch.object(
+                    bench2, "WORK", str(root / "work")
+                ), patch.object(
+                    bench2, "CSV_PATH", str(root / "results" / "runs2.csv")
+                ), patch.object(bench2.sys, "argv", ["bench2.py", batch]):
+                    with self.assertRaisesRegex(ValueError, "corpus directory must not be a symlink"):
+                        bench2.main()
+                self.assertFalse(root.exists())
+                self.assertEqual((outside / "fixture.bin").read_bytes(),
+                                 b"external synthetic fixture")
+
     def test_main_symlink_refused_without_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "output"
