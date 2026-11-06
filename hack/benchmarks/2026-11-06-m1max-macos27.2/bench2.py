@@ -248,6 +248,8 @@ def main():
         raise ValueError(f"unknown benchmark batch: {which!r}")
     if not os.path.isdir(DATA):
         raise FileNotFoundError(f"benchmark data root does not exist: {DATA}")
+    if os.path.islink(DATA):
+        raise ValueError(f"benchmark data root must not be a symlink: {DATA}")
     required = (("canterbury", "large", "silesia", "enwik8", "synthetic")
                 if which == "main" else ("edge",))
     for corpus in required:
