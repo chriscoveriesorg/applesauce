@@ -952,13 +952,9 @@ fn filesystem_block_size(path: &Path) -> u64 {
 
 fn path_from_hex(hex: &str) -> PathBuf {
     assert_eq!(hex.len() % 2, 0);
-    let bytes = hex
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let text = std::str::from_utf8(pair).unwrap();
-            u8::from_str_radix(text, 16).unwrap()
-        })
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
         .collect();
     PathBuf::from(std::ffi::OsString::from_vec(bytes))
 }
