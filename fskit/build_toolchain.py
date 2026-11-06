@@ -22,6 +22,7 @@ TOOLS = ("cargo", "rustc", "xcodegen", "xcodebuild", "xcrun", "git", "python3")
 EXACT_ENV = frozenset((
     "PATH", "HOME", "DEVELOPER_DIR", "SDKROOT", "TOOLCHAINS",
     "RUSTUP_TOOLCHAIN", "RUSTUP_HOME", "CARGO_HOME", "CARGO_TARGET_DIR",
+    "RUSTC_BOOTSTRAP",
     "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOCFLAGS",
     "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS",
     "CARGO_BUILD_TARGET", "SWIFTFLAGS", "OTHER_SWIFT_FLAGS",
@@ -30,12 +31,14 @@ EXACT_ENV = frozenset((
     "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "DYLD_LIBRARY_PATH",
     "DYLD_INSERT_LIBRARIES", "PKG_CONFIG_PATH",
 ))
-ENV_PREFIXES = ("CARGO_TARGET_", "CARGO_PROFILE_", "CARGO_ENCODED_", "RUSTFLAGS_")
+ENV_PREFIXES = ("CARGO_TARGET_", "CARGO_PROFILE_", "CARGO_ENCODED_",
+                "CARGO_BUILD_", "RUSTFLAGS_")
 # The environment's hash alone does not pin executable bytes. Compiler,
 # linker and Cargo wrapper overrides must also be inspected individually.
 EXECUTABLE_OVERRIDES = frozenset((
     "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOC",
     "CARGO_BUILD_RUSTC", "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTDOC",
     "CC", "CXX", "LD", "AR", "PKG_CONFIG", "SWIFT_EXEC",
 ))
 
@@ -285,6 +288,41 @@ class ToolchainTests(unittest.TestCase):
                          changed["build_environment_sha256"])
         self.assertNotEqual(original["executables_sha256"]["override:RUSTC_WRAPPER"],
                             changed["executables_sha256"]["override:RUSTC_WRAPPER"])
+
+    def test_cargo_workspace_wrapper_and_rustdoc_binary_changes_are_pinned(self):
+        # Cargo accepts build.* environment aliases independently of RUSTC_*.
+        # A wrapper can be replaced in place without changing env or Git HEAD.
+        key = "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+        rustdoc_key = "CARGO_BUILD_RUSTDOC"
+        wrapper = Path(self.temporary.name) / "workspace-wrapper"
+        wrapper.write_bytes(b"#!/bin/sh\\nexit 0\\n")
+        wrapper.chmod(0o700)
+        env = {key: str(wrapper), rustdoc_key: str(self.binary)}
+        before = record(("cargo",), lambda name: str(self.binary), environ=env)
+        self.assertIn("override:" + key, before["executables_sha256"])
+        self.assertIn("override:" + rustdoc_key, before["executables_sha256"])
+        wrapper.write_bytes(b"#!/bin/sh\\nexit 1\\n")
+        after = record(("cargo",), lambda name: str(self.binary), environ=env)
+        self.assertEqual(before["build_environment_sha256"],
+                         after["build_environment_sha256"])
+        self.assertNotEqual(before["executables_sha256"]["override:" + key],
+                            after["executables_sha256"]["override:" + key])
+        with self.assertRaisesRegex(ToolchainError, "ambiguous executable override"):
+            record(("cargo",), lambda name: str(self.binary),
+                   environ={rustdoc_key: "python3 dynamic-rustdoc.py"})
+
+    def test_cargo_build_flags_and_rustc_bootstrap_change_environment_witness(self):
+        # Cargo's build.* overrides and rustc bootstrap can affect artifacts.
+        base = {"PATH": "/bin", "CARGO_BUILD_RUSTFLAGS": "-C opt-level=2"}
+        changed = dict(base, CARGO_BUILD_RUSTFLAGS="-C opt-level=3")
+        self.assertNotEqual(capture_environment(base)[1],
+                            capture_environment(changed)[1])
+        self.assertNotEqual(capture_environment(base)[1],
+                            capture_environment(dict(base, RUSTC_BOOTSTRAP="1"))[1])
+        self.assertIn("RUSTC_BOOTSTRAP",
+                      capture_environment({"RUSTC_BOOTSTRAP": "1"})[0])
+        self.assertIn("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+                      capture_environment({"CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER": "tool"})[0])
 
     def test_target_linker_is_pinned_and_ambiguous_commands_rejected(self):
         key = "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
