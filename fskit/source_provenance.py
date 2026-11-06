@@ -224,9 +224,9 @@ class SourceProvenanceTests(unittest.TestCase):
         cargo = self.root / ".cargo"
         cargo.mkdir()
         (self.root / ".git" / "info" / "exclude").write_text(
-            ".cargo/config.toml\\n")
+            ".cargo/config.toml\n")
         (cargo / "config.toml").write_text(
-            '[build]\\nrustflags = ["--cfg", "unreviewed_code"]\\n')
+            '[build]\nrustflags = ["--cfg", "unreviewed_code"]\n')
         self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
         with self.assertRaisesRegex(SourceProvenanceError, "ignored build input"):
             source_commit(self.root, self.original)
@@ -235,9 +235,9 @@ class SourceProvenanceTests(unittest.TestCase):
         # An ignored rust-toolchain.toml can silently change the compiler
         # used for an otherwise identical source SHA.
         (self.root / ".git" / "info" / "exclude").write_text(
-            "rust-toolchain.toml\\n")
+            "rust-toolchain.toml\n")
         (self.root / "rust-toolchain.toml").write_text(
-            '[toolchain]\\nchannel = "nightly"\\n')
+            '[toolchain]\nchannel = "nightly"\n')
         self.assertEqual(self.gitcmd("status", "--porcelain=v1"), "")
         with self.assertRaisesRegex(SourceProvenanceError, "ignored build input"):
             source_commit(self.root, self.original)
