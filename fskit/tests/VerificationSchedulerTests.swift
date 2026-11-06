@@ -20,6 +20,20 @@ final class ASCFVerificationSchedulerEvents: @unchecked Sendable {
 @main
 struct ASCFVerificationSchedulerTests {
     static func main() {
+        // Finder may probe thousands of unrelated URLs. They must be rejected
+        // before the bounded verification queue and security-scope acquisition,
+        // while selected archives remain eligible regardless of name casing.
+        for filename in ["notes.jsonl", "notes.ascf.tmp", "readme", ".ascf-backup",
+                         "notes.ASCF.backup", "notes.txt", "folder.ascf/file"] {
+            let url = URL(fileURLWithPath: "/tmp/" + filename)
+            precondition(!ASCFProbeAdmission.shouldProbe(url),
+                         "unrelated Finder resource entered ASCF verifier: \\(filename)")
+        }
+        for filename in ["notes.ascf", "notes.ASCF", "mixed.AsCf", ".ascf"] {
+            let url = URL(fileURLWithPath: "/tmp/" + filename)
+            precondition(ASCFProbeAdmission.shouldProbe(url),
+                         "legitimate ASCF resource was not probed: \\(filename)")
+        }
         let scheduler = ASCFVerificationScheduler(maxPendingProbes: 8)
         let started = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
