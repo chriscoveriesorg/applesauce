@@ -4,8 +4,11 @@
 The host script verifies the code signature and CMS envelope before calling
 this helper. This preflight does not establish that a volume was mounted.
 """
+import contextlib
 import datetime
 import hashlib
+import io
+from pathlib import Path
 import plistlib
 import re
 import ssl
@@ -119,6 +122,183 @@ def check(signed, profile, entitlement, name, team, bundle_id, now=None):
     print(f"{name}: restricted FSKit grant, signing team, bundle ID and unexpired profile checked")
 
 
+
+# Automatic Xcode signing does not establish that the restricted FSKit
+# capabilities have been granted. Check both installed profile grants before
+# spending time compiling Rust and the host. This is only a pre-build gate;
+# signed bundle entitlements and real mounted acceptance are checked later.
+FSKIT_TARGETS = (
+    ("host", "org.chriscoveries.applesauce.ascfhost",
+     "com.apple.developer.fskit.mount"),
+    ("extension", "org.chriscoveries.applesauce.ascfhost.ascfextension",
+     "com.apple.developer.fskit.fsmodule"),
+)
+
+
+def covered_targets(profiles, team, now=None):
+    """Return targets authorized by unexpired, team-matched local profiles."""
+    covered = set()
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        allowed = profile.get("Entitlements", {})
+        if not isinstance(allowed, dict):
+            continue
+        # A usable provisioning profile must identify which app it grants.
+        # The signed-binary validation separately authenticates its actual ID.
+        if not any(isinstance(allowed.get(key), str)
+                   for key in ("com.apple.application-identifier",
+                               "application-identifier")):
+            continue
+        for name, bundle_id, entitlement in FSKIT_TARGETS:
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    check({entitlement: True,
+                           "com.apple.application-identifier": team + "." + bundle_id},
+                          profile, entitlement, name, team, bundle_id, now=now)
+            except SigningProfileError:
+                continue
+            covered.add(name)
+    return covered
+
+
+def local_profile_paths(home):
+    """Search both legacy and newer Xcode provisioning-profile locations."""
+    roots = (
+        home / "Library/MobileDevice/Provisioning Profiles",
+        home / "Library/Developer/Xcode/UserData/Provisioning Profiles",
+    )
+    found = []
+    for root in roots:
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for path in sorted(root.glob("*.mobileprovision")):
+            if path.is_file() and not path.is_symlink():
+                found.append(path)
+    return found
+
+
+def preflight_profiles(team, home=None, decode=None):
+    """Fail early with a precise missing grant; never print private profile data.
+
+    Xcode-managed signing may download profiles during an interactive setup.
+    If so, provision them in Xcode first, then rerun this read-only preflight.
+    """
+    if not re.fullmatch(r"[A-Z0-9]{10}", team):
+        print("ASCF profile preflight: invalid developer team ID", file=sys.stderr)
+        return 1
+    if home is None:
+        home = Path.home()
+    if decode is None:
+        def decode(path):
+            return subprocess.run(
+                ["/usr/bin/security", "cms", "-D", "-i", str(path)],
+                check=True, capture_output=True).stdout
+    decoded = []
+    paths = local_profile_paths(home)
+    for path in paths:
+        try:
+            # A malformed or unrelated local profile must not prevent a valid
+            # profile later in the scan from satisfying either FSKit target.
+            profile = plistlib.loads(decode(path))
+        except (OSError, ValueError, plistlib.InvalidFileException,
+                subprocess.CalledProcessError):
+            continue
+        decoded.append(profile)
+    covered = covered_targets(decoded, team)
+    missing = sorted({target[0] for target in FSKIT_TARGETS} - covered)
+    if missing:
+        for name in missing:
+            bundle_id = next(target[1] for target in FSKIT_TARGETS if target[0] == name)
+            entitlement = next(target[2] for target in FSKIT_TARGETS if target[0] == name)
+            print(f"ASCF profile preflight: missing unexpired {name} provisioning "
+                  f"profile for {bundle_id} granting {entitlement}", file=sys.stderr)
+        print("Provision both restricted FSKit app IDs in Xcode and install "
+              "their profiles before signed-build. This checks local grants, "
+              "not Apple approval or a successful mount.", file=sys.stderr)
+        return 1
+    print("FSKit local profile preflight: both restricted app/extension "
+          "grants found for the selected team; signed-build will verify "
+          "the actual code signatures and embedded profiles.")
+    return 0
+
+
+class ProfileCoverageTests(unittest.TestCase):
+    team = "ABCDEF1234"
+
+    def profile(self, target, wildcard=False):
+        name, bundle, entitlement = target
+        return {
+            "TeamIdentifier": [self.team],
+            "ExpirationDate": datetime.datetime(2028, 1, 1),
+            "Entitlements": {
+                entitlement: True,
+                "com.apple.application-identifier": self.team + "." +
+                    ("*" if wildcard else bundle),
+            },
+        }
+
+    def test_both_profiles_are_required(self):
+        host, extension = FSKIT_TARGETS
+        self.assertEqual(covered_targets([self.profile(host)],
+                         self.team, datetime.datetime(2026, 11, 6)),
+                         {"host"})
+        self.assertEqual(covered_targets([self.profile(host),
+                                         self.profile(extension)], self.team,
+                         datetime.datetime(2026, 11, 6)), {"host", "extension"})
+
+    def test_wrong_team_expiry_and_wrong_app_are_refused(self):
+        host = FSKIT_TARGETS[0]
+        for field in ("team", "expiry", "app", "grant"):
+            with self.subTest(field=field):
+                profile = self.profile(host)
+                if field == "team":
+                    profile["TeamIdentifier"] = ["OTHER12345"]
+                elif field == "expiry":
+                    profile["ExpirationDate"] = datetime.datetime(2020, 1, 1)
+                elif field == "app":
+                    profile["Entitlements"]["com.apple.application-identifier"] = (
+                        self.team + ".unrelated.app")
+                else:
+                    profile["Entitlements"][host[2]] = False
+                self.assertEqual(covered_targets([profile], self.team,
+                                 datetime.datetime(2026, 11, 6)), set())
+
+    def test_profile_without_application_identity_is_refused(self):
+        profile = self.profile(FSKIT_TARGETS[0])
+        del profile["Entitlements"]["com.apple.application-identifier"]
+        self.assertFalse(covered_targets([profile], self.team))
+
+    def test_corrupt_files_do_not_mask_valid_grants(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            folder = home / "Library/MobileDevice/Provisioning Profiles"
+            folder.mkdir(parents=True)
+            for name in ("bad", "host", "extension"):
+                (folder / (name + ".mobileprovision")).write_bytes(b"dummy")
+            payloads = {
+                "bad": b"not a plist",
+                "host": plistlib.dumps(self.profile(FSKIT_TARGETS[0])),
+                "extension": plistlib.dumps(self.profile(FSKIT_TARGETS[1])),
+            }
+            decoder = lambda path: payloads[path.stem]
+            self.assertEqual(preflight_profiles(self.team, home, decoder), 0)
+            (folder / "extension.mobileprovision").unlink()
+            self.assertEqual(preflight_profiles(self.team, home, decoder), 1)
+
+    def test_symlinked_profile_is_ignored(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            folder = home / "Library/Developer/Xcode/UserData/Provisioning Profiles"
+            folder.mkdir(parents=True)
+            elsewhere = home / "elsewhere.mobileprovision"
+            elsewhere.write_bytes(b"outside")
+            (folder / "fake.mobileprovision").symlink_to(elsewhere)
+            self.assertEqual(local_profile_paths(home), [])
+
+
 class SigningProfileTests(unittest.TestCase):
     team = "ABCDEF1234"
     bundle_id = "org.chriscoveries.applesauce.ascfhost"
@@ -217,6 +397,8 @@ def main():
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
     if len(sys.argv) == 3 and sys.argv[1] == "--preflight-identity":
         return preflight_identity(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] == "--preflight-profiles":
+        return preflight_profiles(sys.argv[2])
     if len(sys.argv) != 7:
         sys.exit("usage: signing_profile.py ENTITLEMENTS.plist PROFILE.plist FSKit_KEY NAME TEAM_ID BUNDLE_ID")
     try:
