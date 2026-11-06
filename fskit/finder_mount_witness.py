@@ -27,6 +27,20 @@ def require(condition, explanation):
         raise WitnessError(explanation)
 
 
+def _unique_json_object(pairs):
+    """Reject ambiguous evidence: consumers must see the same JSON fields."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise WitnessError(f"duplicate JSON evidence field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value):
+    raise WitnessError(f"non-finite JSON evidence number: {value}")
+
+
 def load_report(path, include_identity=False):
     # A substituted FIFO must fail before reading: a blocking open here can
     # indefinitely stall the signed physical acceptance ceremony.
@@ -47,7 +61,9 @@ def load_report(path, include_identity=False):
         require(all(getattr(before, key) == getattr(after, key) for key in fields)
                 and len(raw) == before.st_size,
                 "readback report changed or was truncated during inspection")
-        report = json.loads(raw)
+        report = json.loads(raw, object_pairs_hook=_unique_json_object,
+                            parse_constant=_reject_nonfinite)
+        require(isinstance(report, dict), "readback evidence must be a JSON object")
         identity = (before.st_dev, before.st_ino, before.st_mtime_ns)
         return (report, identity) if include_identity else report
 
@@ -275,6 +291,27 @@ class WitnessTests(unittest.TestCase):
         os.mkfifo(self.copy)
         with self.assertRaisesRegex(WitnessError, "regular file"):
             copy_identity(self.copy)
+
+    def test_duplicate_json_fields_and_nonfinite_numbers_are_refused(self):
+        # Different parsers must not disagree over which success field wins.
+        self.before.write_text('{"result":"fail","result":"pass"}')
+        with self.assertRaisesRegex(WitnessError, "duplicate JSON"):
+            load_report(self.before)
+        self.before.write_text('{"result":"pass","logical_bytes":NaN}')
+        with self.assertRaisesRegex(WitnessError, "non-finite"):
+            load_report(self.before)
+        self.before.write_text('["pass"]')
+        with self.assertRaisesRegex(WitnessError, "JSON object"):
+            load_report(self.before)
+
+    def test_oversized_or_symlinked_report_is_refused(self):
+        self.after.write_bytes(b" " * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(WitnessError, "bounded regular file"):
+            load_report(self.after)
+        self.after.unlink()
+        self.after.symlink_to(self.before)
+        with self.assertRaises(OSError):
+            load_report(self.after)
 
     def test_readback_files_are_opened_nofollow_and_nonblocking(self):
         real_open = os.open
