@@ -254,7 +254,13 @@ fixtures fail CLI verification. It writes an isolated directory with
 The manifest includes all acceptance scripts, the Finder AppleScript, the recorded macOS build, authenticated operator instructions and every fixture,
 plus the exact signed host and extension executables, their Info.plists,
 code-signing resource seals and embedded provisioning profiles. The bundle
-records the source commit in `source-provenance.txt`. Packaging now
+records the source commit in `source-provenance.txt` as exactly two lines:
+`repository=chriscoveriesorg/applesauce` and `commit=<full 40-hex SHA>`.
+The final acceptance validator refuses a different repository, shortened SHA,
+non-hex revision or additional metadata even if operator evidence is otherwise
+self-consistent. The manifest hashes this record. An independent reviewer must
+still compare its full commit against the branch HEAD and signed host build.
+Packaging now
 requires a clean checkout, including no untracked source inputs, before
 signing. The attestation compares every tracked file's actual on-disk bytes
 with its staged Git blob using `git hash-object --no-filters`. This rejects
@@ -447,7 +453,7 @@ not been exercised on a provisioned Mac.
 The command rechecks the SHA-256 manifest, signing identities, the archived
 source and both readback JSON reports, the intervening unmount, kernel-level
 read-only VFS flags, random/EOF evidence and the typed corruption-refusal
-diagnostic. It emits a JSON summary with hashes of all four evidence files.
+diagnostic. It emits a JSON summary with hashes of all five evidence files for each codec.
 Its success establishes **internal consistency of operator-supplied evidence**, including the staged archive-replacement refusal;
 the captured host diagnostic is not a signed machine attestation. Independent
 review of the authorized Mac's actual installed extension and mounted
