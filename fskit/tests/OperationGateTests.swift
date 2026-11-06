@@ -173,6 +173,38 @@ struct OperationGateTests {
             .map { String(format: "%02x", $0) }.joined()
         precondition(try! ASCFCorruptFixtureProof.sha256(fixture) == expectedLarge)
         precondition(expectedLarge != known)
+
+        // Model broken virtual-file reads independently of the kernel. An
+        // early nil/empty EOF or extra bytes must not produce a valid witness,
+        // even when an otherwise trustworthy stat promises a different size.
+        func streamDigest(_ chunks: [Data], size: Int64) throws -> String {
+            var cursor = 0
+            return try ASCFCorruptFixtureProof.hashStream(expectedSize: size) {
+                guard cursor < chunks.count else { return nil }
+                defer { cursor += 1 }
+                return chunks[cursor]
+            }
+        }
+        let pieces = [Data("ab".utf8), Data("c".utf8)]
+        precondition(try! streamDigest(pieces, size: 3) == known)
+        precondition(try! streamDigest([], size: 0) ==
+                     SHA256.hash(data: Data()).map { String(format: "%02x", $0) }.joined())
+        for (chunks, expectedLength) in [
+            (pieces, Int64(4)),          // Unexpected EOF from a truncated virtual read
+            (pieces, Int64(2)),          // Decoder delivered more than stat promised
+            ([Data("ab".utf8), Data()], Int64(3)), // Empty result before EOF
+            ([Data("ab".utf8)], Int64(-1)), // Invalid stat length
+        ] {
+            do {
+                _ = try streamDigest(chunks, size: expectedLength)
+                preconditionFailure("incomplete or oversized digest stream accepted")
+            } catch {
+                precondition((error as NSError).code == Int(EIO),
+                             "expected a fail-closed digest I/O error")
+            }
+        }
+        print("PASS: corruption fixture digest requires exact stat-sized streams")
+
         // A same-byte atomic pathname replacement must not pass the host's
         // pre-/post-FSClient comparison merely because SHA-256 is unchanged.
         let originalFingerprint = try! ASCFCorruptFixtureProof.fingerprint(fixture)
