@@ -129,6 +129,16 @@ class NativeSizeInspectionTests(unittest.TestCase):
 
 
 class FreshOutputRootTests(unittest.TestCase):
+    def test_unknown_batch_fails_before_creating_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "output"
+            with patch.object(bench2, "WORK", str(root / "work")), patch.object(
+                bench2, "CSV_PATH", str(root / "results" / "runs2.csv")
+            ), patch.object(bench2.sys, "argv", ["bench2.py", "typo"]):
+                with self.assertRaisesRegex(ValueError, "unknown benchmark batch"):
+                    bench2.main()
+            self.assertFalse((root / "results" / "runs2.csv").exists())
+
     def test_main_creates_results_directory_for_fresh_output_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "fresh-benchmark-output"
