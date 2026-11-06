@@ -4,6 +4,17 @@
 import Foundation
 import Dispatch
 
+// Automatic Finder discovery only needs to inspect selected .ascf files.
+// Without this admission check, every unrelated file probe reserves a slot
+// in the single full-file SHA-256 verifier, can exhaust Finder's probe queue,
+// and can delay an explicit user mount. A manually selected FSPathURLResource
+// remains independently verified by loadResource regardless of its suffix.
+enum ASCFProbeAdmission {
+    static func shouldProbe(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "ascf"
+    }
+}
+
 // The load lifecycle can invalidate a queued mount while another archive is
 // being verified. Read this token without acquiring the FSKit lifecycle lock,
 // so stale work can be reclaimed without lock inversion or sandbox access.
