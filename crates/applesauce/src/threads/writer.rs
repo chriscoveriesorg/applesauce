@@ -1,5 +1,5 @@
 use crate::threads::{BgWork, Context, Mode, WorkHandler};
-use crate::{seq_queue, set_flags, times, xattr};
+use crate::{compressed_payload_is_allowed, seq_queue, set_flags, times, xattr};
 use applesauce_core::compressor::Kind;
 use applesauce_core::decmpfs;
 use resource_fork::ResourceFork;
@@ -70,12 +70,13 @@ impl Handler {
             } => minimum_compression_ratio,
             _ => unreachable!("write_blocks called in non-compress mode"),
         };
-        let max_compressed_size =
-            (context.orig_metadata.len() as f64 * minimum_compression_ratio) as u64;
-
         chunks.try_for_each(|chunk| {
             total_compressed_size += u64::try_from(chunk.block.len()).unwrap();
-            if total_compressed_size > max_compressed_size {
+            if !compressed_payload_is_allowed(
+                total_compressed_size,
+                context.orig_metadata.len(),
+                minimum_compression_ratio,
+            ) {
                 context.progress.not_compressible_enough(&context.path);
                 return Err(io::Error::other(format!(
                     "did not compress to at least {}% of original size",

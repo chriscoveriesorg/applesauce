@@ -161,6 +161,94 @@ For example, to compress a file named `example.txt` using the ZLIB compression a
 applesauce compress -c ZLIB example.txt
 ```
 
+### Read-only compression projection
+
+`compress --dry-run PATH...` performs the same full 64 KiB block encoding and
+native `decmpfs` writer finalization as a real compression, but uses a
+memory-only counting/seek sink. It does not sample and does not create writer
+temporary files, xattrs, flags, trace files, or timestamp resetters. It reports
+each path, each directory subtree, and the combined total. Overlapping roots are
+deduplicated. A symlink supplied as a root or directory entry is skipped.
+Regular files and directories are opened with Darwin `O_NOFOLLOW_ANY`, which
+atomically rejects a symlink in any pathname component; opened directories are
+identity-checked and enumerated through their descriptor. A symlink in a
+supplied root's ancestors, including compatibility aliases such as `/tmp`, is an
+error. Pathname classification can still race, but no file content is encoded
+and no directory is traversed unless that no-follow descriptor open succeeds.
+
+```console
+applesauce compress --dry-run -c lzfse PATH...
+applesauce compress --dry-run --json -c zlib PATH...
+```
+
+`--json` is valid only with `--dry-run`. `--chrome-tracing` is rejected before
+its output file is opened. Dry-run supports the normal stable native codecs
+`zlib`, `lzvn`, and `lzfse`; opt-in `lzbitmap` appears only in builds with that
+feature and a supported host. Raven and Mesh are buffer/archive codecs and are
+never emitted as native `decmpfs` projections. Non-finite ratio values (`NaN`
+and infinities) are rejected before output or tracing setup; finite values at or
+below zero and above one retain the normal compressor semantics.
+
+The JSON contract has `schema_version: 1`. Byte counts are integer bytes:
+
+The top-level keys are `schema_version`, `complete`, `codec`,
+`minimum_compression_ratio`, `full_encoding`, `paths`, `directories`, `totals`,
+and `allocation_estimate_limitations`. `full_encoding` is always `true`;
+`codec` is the selected lowercase encoder name, including on skipped paths.
+Each directory has `path`, `totals`, and nullable `error` fields.
+
+- `paths[]` contains regular files plus skipped/error non-regular inputs.
+  `path.display` is for people; `path.bytes_hex` is the authoritative,
+  lossless lowercase encoding of Unix pathname bytes, including non-UTF-8
+  names. `entry_type` is `file`, `symlink`, `other`, or `unknown`.
+- `codec`, `would_compress`, and stable `reason` describe the decision.
+  Reasons are `compress`, `below_minimum_ratio`, `already_compressed`,
+  `empty_file`, `too_large`, `filesystem_unsupported`,
+  `required_compression_xattr`, `hard_link`, `symlink`,
+  `not_regular_file`, or `error`.
+- `logical_size_bytes` is `st_size`; `current_allocation_bytes` is exactly
+  `st_blocks * 512`. `allocation_block_bytes` is the real allocation unit from
+  `fstatfs().f_bsize`, not the preferred-I/O `st_blksize`.
+- `raw_compressed_bytes` is the sum of all encoded block payloads and is the
+  value used by the shared minimum-ratio gate. `decmpfs_xattr_bytes` and
+  `resource_fork_bytes` include the finalized native framing. `storage` is
+  `inline_xattr` or `resource_fork`.
+- `projected_native_allocation_bytes` rounds the finalized resource-fork
+  framing and carries forward allocation already attributable to non-data
+  metadata. Inline `decmpfs` and preserved xattr bytes are measured but do not
+  assume a separate extent.
+  `projected_native_allocation_upper_bound_bytes` is an independently-rounded
+  accounting upper estimate for the measured resource fork and xattrs. It is
+  always at least the central projection, but is not a filesystem-wide physical
+  allocation guarantee. `savings_bytes` is signed `current - projected`, so a
+  negative number means growth.
+- `directories[]` gives descendant totals for every traversed directory;
+  `totals` combines the deduplicated input roots. Skipped files retain their
+  current allocation in projected totals. Hard-linked files are reported but
+  excluded entirely from logical/allocation totals because replacing one name
+  would break link identity; `hard_links_excluded` counts those names.
+  Each totals object has `complete`, `files_included`, `files_would_compress`,
+  `files_skipped`, `hard_links_excluded`, `logical_size_bytes`,
+  `current_allocation_bytes`, `projected_native_allocation_bytes`,
+  `projected_native_allocation_upper_bound_bytes`, and `savings_bytes`.
+  Included-file counts exclude symlinks, other non-regular entries, and hard
+  links; `files_skipped` counts included files with `would_compress: false`.
+- Any unavailable/unknown numeric value is JSON `null`, never zero. An error is
+  attached to its path with stable `kind` plus a human message, makes affected
+  directory and overall totals incomplete/null, sets `complete: false`, and
+  causes a nonzero exit. This makes the schema fail closed for automation.
+  Error kinds are `not_found`, `permission_denied`, `invalid_input`,
+  `invalid_data`, `unexpected_eof`, `unsupported`, `would_block`, or `io_error`.
+
+Allocation remains an estimate because APFS/HFS+ can place small xattrs inline
+and cloning, sparse extents, filesystem metadata, and compression-attribute
+placement are not exactly observable without performing a write. The report's
+`allocation_estimate_limitations` repeats these constraints for machine
+consumers. The central projection is intended for projected-versus-actual
+comparisons. The synthetic accuracy test checks actual allocation against the
+accounting upper estimate, but APFS/HFS+ placement outside these measured
+components can differ, so neither estimate is a general capacity guarantee.
+
 ## Experimental macOS 27 codec investigation
 
 The [codec workflow](.github/workflows/modern-compression-probe.yml) runs

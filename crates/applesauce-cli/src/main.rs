@@ -5,7 +5,7 @@ use cfg_if::cfg_if;
 use clap::Parser;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{BufWriter, LineWriter};
+use std::io::{BufWriter, LineWriter, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -117,7 +117,12 @@ struct Compress {
     /// A value of 1.0 will only skip files which cannot be compressed at all
     /// Values greater than 1.0 are valid, and will allow forcing compression to
     /// be used even if it results in a larger file
-    #[arg(short = 'r', long, default_value_t = 0.95)]
+    #[arg(
+        short = 'r',
+        long,
+        default_value_t = 0.95,
+        value_parser = parse_finite_ratio
+    )]
     minimum_compression_ratio: f64,
 
     /// The type of compression to use
@@ -130,6 +135,17 @@ struct Compress {
     /// original file.
     #[arg(long)]
     verify: bool,
+
+    /// Fully encode input without modifying it and report projected native allocation
+    ///
+    /// Dry-run never creates compression temp files, attributes, flags, trace files,
+    /// or timestamp resetters. Every eligible regular file is encoded in full.
+    #[arg(long, conflicts_with = "verify")]
+    dry_run: bool,
+
+    /// Emit the versioned dry-run JSON schema
+    #[arg(long, requires = "dry_run")]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -201,8 +217,56 @@ fn chrome_tracing_file(path: Option<&Path>) -> Option<impl io::Write> {
     Some(BufWriter::new(file))
 }
 
+fn parse_finite_ratio(value: &str) -> Result<f64, String> {
+    let ratio = value
+        .parse::<f64>()
+        .map_err(|error| format!("invalid compression ratio: {error}"))?;
+    if ratio.is_finite() {
+        Ok(ratio)
+    } else {
+        Err("compression ratio must be finite".to_owned())
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    if let Commands::Compress(args) = &cli.command {
+        if args.dry_run {
+            if cli.chrome_tracing.is_some() {
+                eprintln!("applesauce: --chrome-tracing is not supported with --dry-run");
+                std::process::exit(1);
+            }
+            let kind: Kind = args.compression.into();
+            if !kind.supported() {
+                eprintln!("applesauce: {kind} is unavailable in this build or on this host");
+                std::process::exit(1);
+            }
+            let report = applesauce::dry_run::analyze(
+                &args.paths,
+                kind,
+                args.minimum_compression_ratio,
+                args.level,
+            );
+            if args.json {
+                let stdout = io::stdout();
+                let mut output = stdout.lock();
+                if let Err(error) = serde_json::to_writer_pretty(&mut output, &report)
+                    .map_err(io::Error::other)
+                    .and_then(|()| writeln!(output))
+                {
+                    eprintln!("applesauce: unable to write dry-run report: {error}");
+                    std::process::exit(1);
+                }
+            } else {
+                display_dry_run(&report);
+            }
+            if !report.complete {
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
 
     // Diagnostics never start the file-mutating pipeline or create trace files.
     let diagnostic = match &cli.command {
@@ -269,6 +333,8 @@ fn main() {
             minimum_compression_ratio,
             level,
             verify,
+            dry_run: false,
+            json: _,
         }) => {
             let kind: Kind = compression.into();
             if !kind.supported() {
@@ -299,6 +365,9 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 display_stats(&stats, true);
             }
+        }
+        Commands::Compress(Compress { dry_run: true, .. }) => {
+            unreachable!("dry-run handled before tracing")
         }
         Commands::Decompress(Decompress {
             paths,
@@ -410,6 +479,85 @@ fn main() {
             }
         }
     }
+}
+
+fn display_dry_run(report: &applesauce::dry_run::Report) {
+    for path in &report.paths {
+        let logical = optional_bytes(path.logical_size_bytes);
+        let current = optional_bytes(path.current_allocation_bytes);
+        let projected = optional_bytes(path.projected_native_allocation_bytes);
+        let upper = optional_bytes(path.projected_native_allocation_upper_bound_bytes);
+        let raw = optional_bytes(path.raw_compressed_bytes);
+        let decmpfs = optional_bytes(path.decmpfs_xattr_bytes);
+        let resource_fork = optional_bytes(path.resource_fork_bytes);
+        let allocation_block = optional_bytes(path.allocation_block_bytes);
+        let storage = path.storage.unwrap_or("none");
+        let savings = path
+            .savings_bytes
+            .map_or_else(|| "unknown".to_owned(), |value| format!("{value:+}"));
+        println!(
+            "{}: codec={} would_compress={} reason={} logical={} current_allocation={} allocation_block={} raw_compressed={} decmpfs_xattr={} resource_fork={} storage={} projected_native_allocation={} conservative_bound={} savings_bytes={}",
+            path.path.display,
+            path.codec,
+            path.would_compress,
+            path.reason,
+            logical,
+            current,
+            allocation_block,
+            raw,
+            decmpfs,
+            resource_fork,
+            storage,
+            projected,
+            upper,
+            savings,
+        );
+        if let Some(error) = &path.error {
+            println!("  error[{}]: {}", error.kind, error.message);
+        }
+    }
+    for directory in &report.directories {
+        println!(
+            "{}: directory logical={} current_allocation={} projected_native_allocation={} conservative_bound={} savings_bytes={} files={} would_compress={} skipped={} hard_links_excluded={} complete={}",
+            directory.path.display,
+            optional_bytes(directory.totals.logical_size_bytes),
+            optional_bytes(directory.totals.current_allocation_bytes),
+            optional_bytes(directory.totals.projected_native_allocation_bytes),
+            optional_bytes(directory.totals.projected_native_allocation_upper_bound_bytes),
+            directory
+                .totals
+                .savings_bytes
+                .map_or_else(|| "unknown".to_owned(), |value| format!("{value:+}")),
+            directory.totals.files_included,
+            directory.totals.files_would_compress,
+            directory.totals.files_skipped,
+            directory.totals.hard_links_excluded,
+            directory.totals.complete,
+        );
+        if let Some(error) = &directory.error {
+            println!("  error[{}]: {}", error.kind, error.message);
+        }
+    }
+    println!(
+        "TOTAL: logical={} current_allocation={} projected_native_allocation={} conservative_bound={} savings_bytes={} files={} would_compress={} skipped={} hard_links_excluded={} complete={}",
+        optional_bytes(report.totals.logical_size_bytes),
+        optional_bytes(report.totals.current_allocation_bytes),
+        optional_bytes(report.totals.projected_native_allocation_bytes),
+        optional_bytes(report.totals.projected_native_allocation_upper_bound_bytes),
+        report
+            .totals
+            .savings_bytes
+            .map_or_else(|| "unknown".to_owned(), |value| format!("{value:+}")),
+        report.totals.files_included,
+        report.totals.files_would_compress,
+        report.totals.files_skipped,
+        report.totals.hard_links_excluded,
+        report.complete,
+    );
+}
+
+fn optional_bytes(value: Option<u64>) -> String {
+    value.map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
 }
 
 pub fn display_stats(stats: &Stats, compress_mode: bool) {
@@ -549,4 +697,14 @@ fn truncate_single_segment() {
 fn command_check() {
     use clap::CommandFactory;
     Cli::command().debug_assert()
+}
+
+#[test]
+fn compression_ratio_parser_accepts_only_finite_values() {
+    assert_eq!(parse_finite_ratio("-1").unwrap(), -1.0);
+    assert_eq!(parse_finite_ratio("0").unwrap(), 0.0);
+    assert_eq!(parse_finite_ratio("1.5").unwrap(), 1.5);
+    for value in ["NaN", "nan", "inf", "+inf", "-inf"] {
+        assert!(parse_finite_ratio(value).is_err(), "accepted {value}");
+    }
 }

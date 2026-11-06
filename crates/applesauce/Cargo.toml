@@ -36,6 +36,7 @@ oneshot = { version = "0.2.1", features = ["std"] }
 tempfile = "3.27.0"
 tracing = "0.1.44"
 dashmap = "6.2.1"
+serde = { version = "1.0", features = ["derive"] }
 
 jwalk = "0.8"
 
