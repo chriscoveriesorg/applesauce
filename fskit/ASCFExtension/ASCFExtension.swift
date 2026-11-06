@@ -13,10 +13,10 @@ struct ASCFExtension: UnaryFileSystemExtension {
 }
 
 final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
-    // Full archive SHA-256 verification can be lengthy. Keep it off FSKit's
-    // callback thread and serialize probes/loads to bound scratch memory.
-    private static let verificationQueue = DispatchQueue(
-        label: "org.chriscoveries.applesauce.ascf.verification", qos: .userInitiated)
+    // A user-requested mount must not sit behind Finder's queued probes.
+    // One worker still bounds decoder scratch, with at most eight queued
+    // probes retaining security-scoped access.
+    private static let verificationScheduler = ASCFVerificationScheduler()
 
     // FSKit may issue overlapping load/unload callbacks. All lifecycle
     // state, including the in-flight verification ticket, is lock-protected.
@@ -117,7 +117,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             }
             return
         }
-        Self.verificationQueue.async {
+        let accepted = Self.verificationScheduler.submit(.probe) {
             do {
                 defer { url.stopAccessingSecurityScopedResource() }
                 // Do not advertise a malformed or corrupted archive as mountable.
@@ -147,6 +147,17 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                     // probe misses, avoiding claimed support for random files.
                     replyHandler(.notRecognized, nil)
                 }
+            }
+        }
+        if !accepted {
+            // FSKit can rapidly probe thousands of candidates in Finder.
+            // Bound pending security scopes and make an ASCF overflow visible
+            // as resource pressure rather than an unsupported format.
+            url.stopAccessingSecurityScopedResource()
+            if url.pathExtension.lowercased() == "ascf" {
+                replyHandler(nil, Self.error(EBUSY))
+            } else {
+                replyHandler(.notRecognized, nil)
             }
         }
     }
@@ -180,7 +191,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             replyHandler(nil, Self.error(EACCES))
             return
         }
-        Self.verificationQueue.async { [self] in
+        Self.verificationScheduler.submit(.mount) { [self] in
             // A probe can occupy the single verifier while unload cancels
             // this request. Avoid decoding an archive whose ticket is stale.
             lifecycleLock.lock()
