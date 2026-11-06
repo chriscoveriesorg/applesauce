@@ -24,15 +24,15 @@ struct ASCFVerificationSchedulerTests {
         // before the bounded verification queue and security-scope acquisition,
         // while selected archives remain eligible regardless of name casing.
         for filename in ["notes.jsonl", "notes.ascf.tmp", "readme", ".ascf-backup",
-                         "notes.ASCF.backup", "notes.txt", "folder.ascf/file"] {
+                         "notes.ASCF.backup", "notes.txt", "folder.ascf/file", ".ascf"] {
             let url = URL(fileURLWithPath: "/tmp/" + filename)
             precondition(!ASCFProbeAdmission.shouldProbe(url),
-                         "unrelated Finder resource entered ASCF verifier: \\(filename)")
+                         "unrelated Finder resource entered ASCF verifier: \(filename)")
         }
-        for filename in ["notes.ascf", "notes.ASCF", "mixed.AsCf", ".ascf"] {
+        for filename in ["notes.ascf", "notes.ASCF", "mixed.AsCf"] {
             let url = URL(fileURLWithPath: "/tmp/" + filename)
             precondition(ASCFProbeAdmission.shouldProbe(url),
-                         "legitimate ASCF resource was not probed: \\(filename)")
+                         "legitimate ASCF resource was not probed: \(filename)")
         }
         let scheduler = ASCFVerificationScheduler(maxPendingProbes: 8)
         let started = DispatchSemaphore(value: 0)
