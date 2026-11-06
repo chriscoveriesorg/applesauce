@@ -266,9 +266,11 @@ same exact HEAD and raw source bytes after the build and after manifest
 generation to prevent a concurrent source change from receiving a misleading
 signed-package provenance stamp. The package also hashes the resolved
 Cargo/Rust, Xcode, Swift, Clang and XcodeGen executables before and after the
-signed build. Inherited Rust compiler wrappers, CC/CXX/linkers and
-`CARGO_TARGET_*_LINKER` overrides are fingerprinted by executable bytes,
-not merely their environment strings. Ambiguous shell-command overrides
+signed build. Inherited Rust compiler wrappers, CC/CXX/linkers,
+`CARGO_TARGET_*_LINKER` overrides, Cargo's `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`
+and `CARGO_BUILD_RUSTDOC` aliases are fingerprinted by executable bytes,
+not merely their environment strings. All `CARGO_BUILD_*` overrides and
+`RUSTC_BOOTSTRAP` are included in the privacy-preserving environment witness. Ambiguous shell-command overrides
 fail closed: provide a single executable path or unset the override before
 signing. This detects a swapped compiler wrapper even when the checkout,
 override value and nominal tool versions are unchanged. The XcodeGen-generated
