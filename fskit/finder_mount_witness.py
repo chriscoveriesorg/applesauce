@@ -14,6 +14,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 
 
@@ -281,7 +282,7 @@ class WitnessTests(unittest.TestCase):
                 self.assertTrue(flags & os.O_NOFOLLOW)
                 self.assertTrue(flags & os.O_NONBLOCK)
             return real_open(path, flags, *args, **kwargs)
-        with unittest.mock.patch("os.open", side_effect=inspect_open):
+        with mock.patch("os.open", side_effect=inspect_open):
             report = stamp(self.before, self.after, self.copy)
         self.assertTrue(report["finder_copy_verified"])
         self.assertEqual(set(seen), watched)
