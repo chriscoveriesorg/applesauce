@@ -20,7 +20,7 @@ import unittest
 
 TOOLS = ("cargo", "rustc", "xcodegen", "xcodebuild", "xcrun", "git", "python3")
 EXACT_ENV = frozenset((
-    "PATH", "DEVELOPER_DIR", "SDKROOT", "TOOLCHAINS",
+    "PATH", "HOME", "DEVELOPER_DIR", "SDKROOT", "TOOLCHAINS",
     "RUSTUP_TOOLCHAIN", "RUSTUP_HOME", "CARGO_HOME", "CARGO_TARGET_DIR",
     "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOCFLAGS",
     "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS",
@@ -71,6 +71,56 @@ def executable_fingerprint(path):
             os.close(fd)
     except (OSError, RuntimeError) as error:
         raise ToolchainError("cannot fingerprint required build tool") from error
+
+
+def fingerprint_optional_regular_file(path):
+    """Pin optional Cargo configuration without disclosing its contents/path.
+
+    A missing config is a distinct witness: adding one during a signed build
+    must change the post-build record. Refuse symlinks and nonregular inputs.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return "absent"
+    except OSError as error:
+        raise ToolchainError("cannot inspect Cargo home configuration") from error
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ToolchainError("Cargo home configuration is not a regular file")
+        # On platforms without O_NOFOLLOW, reject a final-component symlink.
+        if Path(path).is_symlink():
+            raise ToolchainError("symlinked Cargo home configuration")
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+        after = os.fstat(fd)
+        observed = os.stat(path, follow_symlinks=False)
+        identity = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if identity(before) != identity(after) or identity(before) != identity(observed):
+            raise ToolchainError("Cargo home configuration changed during fingerprint")
+        return digest.hexdigest()
+    except OSError as error:
+        raise ToolchainError("cannot fingerprint Cargo home configuration") from error
+    finally:
+        os.close(fd)
+
+
+def cargo_home_config_fingerprints(environ=None):
+    """Capture Cargo's legacy and TOML home configuration as signing inputs."""
+    environ = os.environ if environ is None else environ
+    home = Path(environ.get("CARGO_HOME") or Path(environ.get("HOME") or str(Path.home())) / ".cargo")
+    if not home.is_absolute():
+        raise ToolchainError("CARGO_HOME must be absolute for signed builds")
+    return {
+        "cargo-home:" + name: fingerprint_optional_regular_file(home / name)
+        for name in ("config", "config.toml")
+    }
 
 
 def capture_environment(environ=None):
@@ -139,6 +189,7 @@ def record(tool_names=TOOLS, finder=shutil.which, xcrun=None,
     return {
         "schema": "ascf-build-toolchain-v1",
         "executables_sha256": dict(sorted(tool_hashes.items())),
+        "cargo_home_config_sha256": cargo_home_config_fingerprints(environ),
         "build_environment_keys": env_keys,
         "build_environment_sha256": env_sha,
     }
@@ -231,6 +282,43 @@ class ToolchainTests(unittest.TestCase):
     def test_missing_tool_fails(self):
         with self.assertRaises(ToolchainError):
             record(("cargo",), lambda name: None, environ={})
+
+    def test_cargo_home_config_mutation_is_visible_to_signed_build(self):
+        cargo_home = Path(self.temporary.name) / "cargo-home"
+        cargo_home.mkdir()
+        env = {"CARGO_HOME": str(cargo_home), "HOME": self.temporary.name}
+        first = record(("cargo",), lambda name: str(self.binary), environ=env)
+        self.assertEqual(first["cargo_home_config_sha256"],
+                         {"cargo-home:config": "absent",
+                          "cargo-home:config.toml": "absent"})
+        config = cargo_home / "config.toml"
+        config.write_text('[build]\\nrustflags = ["--cfg", "trusted"]\\n')
+        changed = record(("cargo",), lambda name: str(self.binary), environ=env)
+        self.assertNotEqual(first["cargo_home_config_sha256"],
+                            changed["cargo_home_config_sha256"])
+        self.assertEqual(first["build_environment_sha256"],
+                         changed["build_environment_sha256"])
+        config.write_text('[build]\\nrustflags = ["--cfg", "modified"]\\n')
+        changed_again = record(("cargo",), lambda name: str(self.binary), environ=env)
+        self.assertNotEqual(changed["cargo_home_config_sha256"],
+                            changed_again["cargo_home_config_sha256"])
+        config.unlink()
+        self.assertEqual(first["cargo_home_config_sha256"],
+                         cargo_home_config_fingerprints(env))
+
+    def test_cargo_home_symlink_and_nonregular_config_rejected(self):
+        cargo_home = Path(self.temporary.name) / "cargo-home"
+        cargo_home.mkdir()
+        config = cargo_home / "config"
+        config.symlink_to(self.binary)
+        with self.assertRaises(ToolchainError):
+            cargo_home_config_fingerprints({"CARGO_HOME": str(cargo_home)})
+        config.unlink()
+        config.mkdir()
+        with self.assertRaises(ToolchainError):
+            cargo_home_config_fingerprints({"CARGO_HOME": str(cargo_home)})
+        with self.assertRaisesRegex(ToolchainError, "must be absolute"):
+            cargo_home_config_fingerprints({"CARGO_HOME": "./relative"})
 
     def test_self_test_runner_propagates_failures_and_errors(self):
         # A formerly used unittest.main(exit=False) discarded the failure
