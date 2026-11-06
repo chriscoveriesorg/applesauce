@@ -21,6 +21,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from finder_mount_witness import load_report
+
 
 CODECS = ("lzraven", "lzmesh")
 EXPECTED_ERRORS = {errno.ESTALE, errno.EIO, errno.ENODEV}
@@ -93,7 +95,13 @@ def validate_stage(directory):
             "stage directory must belong to this user and be mode 0700")
     metadata_file = directory / "stage.json"
     require(metadata_file.is_file() and not metadata_file.is_symlink(), "stage metadata missing")
-    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    # Even a private operator stage can be stale or edited between steps.
+    # Use the same bounded, no-follow, duplicate-key-refusing JSON reader as
+    # the mounted readback and lifecycle acceptance tools.
+    try:
+        metadata = load_report(metadata_file)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"unsafe replacement stage metadata: {error}") from error
     codec = metadata.get("codec")
     nonce = metadata.get("stage_nonce")
     require(codec in CODECS and isinstance(nonce, str)
@@ -261,6 +269,19 @@ class ReplacementTests(unittest.TestCase):
             check(self.stage_dir, "/Volumes/ASCF", self.bundle / "source.lzmesh.jsonl")
         self.assertTrue(bad.exists(), "must refuse before replacing the staged good archive")
         self.assertEqual(good.read_bytes(), b"ASCF0001valid")
+
+    def test_stage_rejects_ambiguous_and_oversized_metadata(self):
+        self.prepare()
+        metadata_path = self.stage_dir / "stage.json"
+        metadata_path.write_text('{"codec":"lzmesh","codec":"lzraven"}')
+        with self.assertRaisesRegex(ValueError, "duplicate JSON"):
+            validate_stage(self.stage_dir)
+        metadata_path.write_text('{"codec":NaN}')
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            validate_stage(self.stage_dir)
+        metadata_path.write_bytes(b" " * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, "bounded regular file"):
+            validate_stage(self.stage_dir)
 
     def test_stage_bundle_provenance_is_required(self):
         self.prepare()
