@@ -172,9 +172,26 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
             and type(replaced.get("active_ascf_mounts")) is int
             and replaced["active_ascf_mounts"] == 1,
             "replaced-source refusal lacks read-only ASCF VFS proof")
-    require(replaced.get("restored_file") == "source." + codec
+    # The replacement stage has its own unpredictable archive basename.
+    # The FSKit logical entry must carry that basename, so a mount of the
+    # otherwise byte-identical signed bundle fixture cannot count as the
+    # independent staged replacement. A plain source.<codec> is insufficient.
+    nonce = replaced.get("stage_nonce")
+    require(isinstance(nonce, str) and
+            re.fullmatch(r"[0-9a-f]{16}", nonce) is not None,
+            "replacement evidence lacks a valid stage nonce")
+    staged_name = f"source.{codec}.{nonce}.ascf"
+    stage_path = replaced.get("stage")
+    archive_path = replaced.get("archive")
+    require(isinstance(stage_path, str)
+            and re.fullmatch(r"/(?:private/)?tmp/ascf-replacement-[A-Za-z0-9_]+",
+                             stage_path) is not None
+            and isinstance(archive_path, str)
+            and archive_path == str(Path(stage_path) / staged_name)
+            and replaced.get("staged_archive_name") == staged_name
+            and replaced.get("restored_file") == f"source.{codec}.{nonce}"
             and replaced.get("mount") == reports[1]["mount"],
-            "replaced-source refusal refers to a different mounted file")
+            "replaced-source refusal is not bound to its unique staged archive")
     require(replaced.get("macos_build") == reports[1]["macos_build"],
             "replaced-source refusal has different macOS build")
     require(replaced.get("original_sha256") == digest
@@ -331,7 +348,12 @@ class EvidenceTests(unittest.TestCase):
             + "FSKitErrorDomain resourceDamaged code 17: fixture damage")
         self.items[4].write_text(json.dumps({
             "result": "pass", "codec": "lzmesh", "filesystem_type": "ascf",
-            "kernel_readonly": True, "restored_file": "source.lzmesh",
+            "kernel_readonly": True,
+            "stage_nonce": "0123456789abcdef",
+            "staged_archive_name": "source.lzmesh.0123456789abcdef.ascf",
+            "stage": "/private/tmp/ascf-replacement-fixture",
+            "archive": "/private/tmp/ascf-replacement-fixture/source.lzmesh.0123456789abcdef.ascf",
+            "restored_file": "source.lzmesh.0123456789abcdef",
             "unique_ascf_mount_verified": True, "active_ascf_mounts": 1,
             "mount": "/Volumes/Applesauce ASCF", "macos_build": "fixture",
             "original_sha256": self.sha, "before_replacement_sha256": self.sha,
@@ -371,7 +393,9 @@ class EvidenceTests(unittest.TestCase):
             + "FSKitErrorDomain resourceDamaged code 17: fixture damage")
         replacement = load_json(self.items[4])
         replacement["codec"] = codec
-        replacement["restored_file"] = "source.lzraven"
+        replacement["restored_file"] = "source.lzraven.0123456789abcdef"
+        replacement["staged_archive_name"] = "source.lzraven.0123456789abcdef.ascf"
+        replacement["archive"] = "/private/tmp/ascf-replacement-fixture/source.lzraven.0123456789abcdef.ascf"
         replacement["source_archive_sha256"] = hashlib.sha256(valid).hexdigest()
         replacement["replacement_sha256"] = hashlib.sha256(damaged).hexdigest()
         paths[4].write_text(json.dumps(replacement))
@@ -485,6 +509,27 @@ class EvidenceTests(unittest.TestCase):
         self.items[0].write_text(json.dumps(report))
         with self.assertRaisesRegex(EvidenceError, "invalid mount location"):
             self.check()
+    def test_replacement_from_regular_bundle_mount_is_rejected(self):
+        report = load_json(self.items[4])
+        report["restored_file"] = "source.lzmesh"
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "unique staged archive"):
+            self.check()
+
+    def test_replacement_stale_stage_nonce_is_rejected(self):
+        report = load_json(self.items[4])
+        report["stage_nonce"] = "bad"
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "valid stage nonce"):
+            self.check()
+
+    def test_replacement_stage_path_mismatch_is_rejected(self):
+        report = load_json(self.items[4])
+        report["archive"] = "/private/tmp/another-folder/source.lzmesh.0123456789abcdef.ascf"
+        self.items[4].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "unique staged archive"):
+            self.check()
+
     def test_replaced_source_wrong_digest(self):
         report = load_json(self.items[4])
         report["replacement_sha256"] = "0" * 64
