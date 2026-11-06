@@ -121,6 +121,9 @@ Run `bash fskit/signed_acceptance.sh preflight` before compiling. It checks
 an unlocked Apple Development identity and locally installed, unexpired
 provisioning profiles that authorize **both** exact ASCF app IDs, including
 profiles stored in Xcode's newer `UserData/Provisioning Profiles` directory.
+The restricted FSKit grant checker requires an explicit identifier for each
+signed bundle. Wildcard App ID profiles such as `TEAM.*` are rejected as
+insufficient proof of authorization, even when they contain a grant key.
 It accepts macOS `.provisionprofile` and `.mobileprovision` files. If Xcode
 uses managed signing, open Xcode to create/download the two profiles first.
 The preflight reads CMS profiles without installing or modifying them.
