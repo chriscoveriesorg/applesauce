@@ -38,6 +38,22 @@ def load_json(path):
         return json.load(stream)
 
 
+def signed_source_commit(bundle):
+    """Require the exact Git identity recorded by the signed packager.
+
+    Both the repository name and full commit SHA are covered by SHA256SUMS.
+    A malformed record must never pass as a claimed provenance identity.
+    """
+    raw = (Path(bundle) / "source-provenance.txt").read_text(encoding="utf-8")
+    match = re.fullmatch(
+        r"repository=chriscoveriesorg/applesauce\ncommit=([0-9a-f]{40})\n",
+        raw,
+    )
+    require(match is not None,
+            "signed source provenance must identify chriscoveriesorg/applesauce and an exact 40-hex commit")
+    return match.group(1)
+
+
 def evidence_time(report, stage):
     """Require an unambiguous UTC event time for a witnessed mount lifecycle."""
     raw = report.get("verified_at_utc")
@@ -212,8 +228,7 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
         "codec": codec,
         "logical_bytes": len(reference),
         "sha256": digest,
-        "source_commit": (Path(bundle) / "source-provenance.txt").read_text(
-            encoding="utf-8").strip(),
+        "source_commit": signed_source_commit(bundle),
         "first_mount": reports[0]["mount"],
         "remounted": reports[1]["mount"],
         "macos_build": reports[0]["macos_build"],
@@ -270,7 +285,8 @@ class EvidenceTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         (self.base / "source.lzmesh.jsonl").write_bytes(b"test\n" * 20)
-        (self.base / "source-provenance.txt").write_text("commit=example\n")
+        (self.base / "source-provenance.txt").write_text(
+            "repository=chriscoveriesorg/applesauce\ncommit=" + "a" * 40 + "\n")
         self.sha = hashlib.sha256((self.base / "source.lzmesh.jsonl").read_bytes()).hexdigest()
         self.items = [
             self.base / "first.json", self.base / "off.json",
@@ -360,6 +376,31 @@ class EvidenceTests(unittest.TestCase):
         replacement["replacement_sha256"] = hashlib.sha256(damaged).hexdigest()
         paths[4].write_text(json.dumps(replacement))
         return paths
+
+    def test_canonical_manifest_source_commit_is_reported(self):
+        self.assertEqual(self.check()["source_commit"], "a" * 40)
+
+    def test_source_commit_rejects_wrong_repository(self):
+        (self.base / "source-provenance.txt").write_text(
+            "repository=other/applesauce\ncommit=" + "a" * 40 + "\n")
+        with self.assertRaisesRegex(EvidenceError, "signed source provenance"):
+            self.check()
+
+    def test_source_commit_rejects_abbreviated_or_untrusted_sha(self):
+        for commit in ("a" * 7, "G" * 40, "a" * 39 + "z", "a" * 41):
+            with self.subTest(commit=commit):
+                (self.base / "source-provenance.txt").write_text(
+                    "repository=chriscoveriesorg/applesauce\ncommit=" + commit + "\n")
+                with self.assertRaisesRegex(EvidenceError, "signed source provenance"):
+                    self.check()
+
+    def test_source_commit_rejects_appended_or_duplicate_metadata(self):
+        base = "repository=chriscoveriesorg/applesauce\ncommit=" + "a" * 40 + "\n"
+        for extra in ("commit=" + "b" * 40 + "\n", "owner=other\n", "\n"):
+            with self.subTest(extra=extra):
+                (self.base / "source-provenance.txt").write_text(base + extra)
+                with self.assertRaisesRegex(EvidenceError, "signed source provenance"):
+                    self.check()
 
     def test_both_codec_lifecycles_pass_together(self):
         other = self.other_codec()
