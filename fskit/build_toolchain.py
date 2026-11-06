@@ -295,13 +295,13 @@ class ToolchainTests(unittest.TestCase):
         key = "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
         rustdoc_key = "CARGO_BUILD_RUSTDOC"
         wrapper = Path(self.temporary.name) / "workspace-wrapper"
-        wrapper.write_bytes(b"#!/bin/sh\\nexit 0\\n")
+        wrapper.write_bytes(b"#!/bin/sh\nexit 0\n")
         wrapper.chmod(0o700)
         env = {key: str(wrapper), rustdoc_key: str(self.binary)}
         before = record(("cargo",), lambda name: str(self.binary), environ=env)
         self.assertIn("override:" + key, before["executables_sha256"])
         self.assertIn("override:" + rustdoc_key, before["executables_sha256"])
-        wrapper.write_bytes(b"#!/bin/sh\\nexit 1\\n")
+        wrapper.write_bytes(b"#!/bin/sh\nexit 1\n")
         after = record(("cargo",), lambda name: str(self.binary), environ=env)
         self.assertEqual(before["build_environment_sha256"],
                          after["build_environment_sha256"])
