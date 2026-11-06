@@ -1723,6 +1723,36 @@ class SyntheticAcceptanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(MountCheckError, "invalid SHA-256 seed"):
                     sampled_offsets(size, invalid)
 
+    def test_seed_only_unaligned_read_detects_mounted_corruption(self):
+        # The original fixed-boundary schedule does not visit this offset.
+        # A mounted decoder returning wrong bytes only for a digest-derived
+        # unaligned pread must still fail physical acceptance.
+        size = self.original.stat().st_size
+        reference_sha = hashlib.sha256(self.original.read_bytes()).hexdigest()
+        fixed = set(sampled_offsets(size))
+        extra = [n for n in sampled_offsets(size, reference_sha)
+                 if n not in fixed and n % 4096 not in (0, 1, 4095)]
+        self.assertTrue(extra, "fixture needs a distinct seeded unaligned read")
+        target = extra[0]
+        inode = self.restored.stat().st_ino
+        real_pread = os.pread
+        corrupted = False
+
+        def bad_seeded_pread(fd, count, offset):
+            nonlocal corrupted
+            data = real_pread(fd, count, offset)
+            if os.fstat(fd).st_ino == inode and offset == target and data:
+                corrupted = True
+                return bytes([data[0] ^ 1]) + data[1:]
+            return data
+
+        self.real_open = os.open
+        with mock.patch("os.open", side_effect=self.readonly_open), mock.patch(
+                "os.pread", side_effect=bad_seeded_pread):
+            with self.assertRaisesRegex(MountCheckError, "random read disagrees"):
+                verify_mount(self.mount, self.original, require_real_mount=False)
+        self.assertTrue(corrupted, "digest-seeded corruption must be probed")
+
     def test_corrupted_random_read_is_rejected_after_matching_digest(self):
         # A correct whole-file digest does not excuse a broken random-read
         # implementation. Inject corruption only into the mounted pread path,
