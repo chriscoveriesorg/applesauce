@@ -138,7 +138,7 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
         require(report.get("macos_version") and report.get("macos_build"),
                 stage + ": missing host OS provenance")
         offsets = report.get("random_read_offsets")
-        require(offsets == sampled_offsets(len(reference)),
+        require(offsets == sampled_offsets(len(reference), digest),
                 stage + ": complete deterministic random/EOF read evidence missing")
     require(reports[0]["macos_build"] == reports[1]["macos_build"],
             "first mount and remount have different macOS build provenance")
@@ -327,7 +327,7 @@ class EvidenceTests(unittest.TestCase):
             "mount_device": 12, "mount_inode": 34,
             "logical_bytes": 100, "sha256": self.sha,
             "mount": "/Volumes/Applesauce ASCF", "macos_version": "27.0",
-            "macos_build": "fixture", "random_read_offsets": sampled_offsets(100)
+            "macos_build": "fixture", "random_read_offsets": sampled_offsets(100, self.sha)
         }
         for label, item, instant in zip(
             ("first", "second"), (self.items[0], self.items[2]),
@@ -609,6 +609,18 @@ class EvidenceTests(unittest.TestCase):
         report = load_json(self.items[0])
         recorded = report["random_read_offsets"]
         report["random_read_offsets"] = recorded[:20] + [100]
+        self.items[0].write_text(json.dumps(report))
+        with self.assertRaisesRegex(EvidenceError, "complete deterministic"):
+            self.check()
+
+    def test_random_read_report_rejects_foreign_same_size_digest_schedule(self):
+        # An otherwise authentic same-length report must carry the exact
+        # digest-seeded read schedule for the bundled cleartext.
+        report = load_json(self.items[0])
+        report["random_read_offsets"] = sampled_offsets(
+            100, hashlib.sha256(b"different source, same length").hexdigest())
+        self.assertNotEqual(report["random_read_offsets"],
+                            sampled_offsets(100, self.sha))
         self.items[0].write_text(json.dumps(report))
         with self.assertRaisesRegex(EvidenceError, "complete deterministic"):
             self.check()
