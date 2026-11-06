@@ -24,6 +24,31 @@ fn arg(value: &str) -> &OsStr {
     OsStr::new(value)
 }
 
+/// The stable codecs this build was compiled with (CI also tests `--no-default-features --features zlib`).
+fn enabled_codecs() -> Vec<&'static str> {
+    let mut codecs = Vec::new();
+    if cfg!(feature = "zlib") {
+        codecs.push("zlib");
+    }
+    if cfg!(feature = "lzvn") {
+        codecs.push("lzvn");
+    }
+    if cfg!(feature = "lzfse") {
+        codecs.push("lzfse");
+    }
+    codecs
+}
+
+/// One codec every build has: lzfse when compiled in, otherwise the first enabled stable codec.
+fn any_codec() -> &'static str {
+    let codecs = enabled_codecs();
+    if codecs.contains(&"lzfse") {
+        "lzfse"
+    } else {
+        codecs[0]
+    }
+}
+
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap()
 }
@@ -591,10 +616,10 @@ fn json_dry_run(root: &Path, codec: &str, extra: &[&OsStr]) -> (Output, Value) {
 fn dry_run_is_structurally_read_only_and_schema_is_fail_closed() {
     let temp = tempdir();
     let root = temp.path().join("tree");
-    create_fixture(&root, "lzfse");
+    create_fixture(&root, any_codec());
     let before = snapshot(&root);
 
-    let (output, json) = json_dry_run(&root, "lzfse", &[root.join("nested").as_os_str()]);
+    let (output, json) = json_dry_run(&root, any_codec(), &[root.join("nested").as_os_str()]);
     assert_success(&output);
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["complete"], true);
@@ -628,7 +653,7 @@ fn dry_run_is_structurally_read_only_and_schema_is_fail_closed() {
         arg("compress"),
         arg("--dry-run"),
         arg("--compression"),
-        arg("lzfse"),
+        arg(any_codec()),
         root.as_os_str(),
     ]);
     assert_success(&text);
@@ -643,7 +668,7 @@ fn dry_run_is_structurally_read_only_and_schema_is_fail_closed() {
     );
 
     let missing_non_utf8 = root.join(OsStr::from_bytes(b"missing-non-utf8-\xff"));
-    let (output, non_utf8_json) = json_dry_run(&missing_non_utf8, "lzfse", &[]);
+    let (output, non_utf8_json) = json_dry_run(&missing_non_utf8, any_codec(), &[]);
     assert!(!output.status.success());
     assert_eq!(non_utf8_json["complete"], false);
     assert_eq!(
@@ -677,14 +702,14 @@ fn symlinks_are_never_followed_and_errors_make_totals_null() {
     fs::write(target.join("secret"), b"must not be encoded").unwrap();
     let root_link = temp.path().join("root-link");
     symlink(&target, &root_link).unwrap();
-    let (output, json) = json_dry_run(&root_link, "lzfse", &[]);
+    let (output, json) = json_dry_run(&root_link, any_codec(), &[]);
     assert_success(&output);
     assert_eq!(json["paths"].as_array().unwrap().len(), 1);
     assert_eq!(json["paths"][0]["reason"], "symlink");
 
     let ancestor = temp.path().join("ancestor-link");
     symlink(&target, &ancestor).unwrap();
-    let (output, json) = json_dry_run(&ancestor.join("secret"), "lzfse", &[]);
+    let (output, json) = json_dry_run(&ancestor.join("secret"), any_codec(), &[]);
     assert!(!output.status.success());
     assert_eq!(json["complete"], false);
     assert!(json["totals"]["logical_size_bytes"].is_null());
@@ -701,7 +726,7 @@ fn symlinks_are_never_followed_and_errors_make_totals_null() {
     let original = fs::metadata(&denied_parent).unwrap().permissions();
     fs::set_permissions(&denied_parent, Permissions::from_mode(0o0)).unwrap();
     let denied_before = restricted_snapshot(&mut denied_descriptor, &denied_parent_before);
-    let (output, json) = json_dry_run(&denied, "lzfse", &[]);
+    let (output, json) = json_dry_run(&denied, any_codec(), &[]);
     assert!(!output.status.success());
     assert_eq!(json["complete"], false);
     assert_eq!(json["paths"][0]["error"]["kind"], "permission_denied");
@@ -721,7 +746,7 @@ fn ratio_edges_nonfinite_values_and_non_native_codecs_are_stable() {
 
     let (zero_output, zero) = json_dry_run(
         &file,
-        "lzfse",
+        any_codec(),
         &[arg("--minimum-compression-ratio"), arg("0")],
     );
     assert_success(&zero_output);
@@ -731,7 +756,7 @@ fn ratio_edges_nonfinite_values_and_non_native_codecs_are_stable() {
 
     let (forced_output, forced) = json_dry_run(
         &file,
-        "lzfse",
+        any_codec(),
         &[arg("--minimum-compression-ratio"), arg("2")],
     );
     assert_success(&forced_output);
@@ -794,7 +819,7 @@ fn accuracy_all_stable_codecs_projection_table() {
     println!(
         "codec\tpath\tblock\tprojected\tupper\tactual\terror\tcompressed\n-----\t----\t-----\t---------\t-----\t------\t-----\t----------"
     );
-    for codec in ["zlib", "lzvn", "lzfse"] {
+    for codec in enabled_codecs() {
         let temp = tempdir();
         let source = temp.path().join("source");
         let copy = temp.path().join("copy");
