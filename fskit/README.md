@@ -28,6 +28,13 @@ identity at probe and load, and remounting the same archive preserves its
 identity. Distinct Raven and Mesh archives remain distinguishable even when
 they restore identical logical bytes. Unload resets the container readiness.
 
+Automatic Finder probes admit only case-insensitive `.ascf` filenames.
+Unrelated resources return `notRecognized` before reserving a verifier slot,
+requesting security-scoped access or reading any bytes. This avoids exhausting
+the bounded SHA-256 verification queue when Finder scans large directories.
+The host's explicitly selected `FSClient.mountSingleVolume` path still validates
+archive magic and every chunk, independent of its filename.
+
 Probe and load run full archive verification on one dedicated worker
 rather than blocking FSKit's callback thread. Explicit mount loads overtake
 queued Finder probes and preempt a currently verifying probe at the next
