@@ -145,7 +145,9 @@ class FreshOutputRootTests(unittest.TestCase):
             csv_path = root / "results" / "runs2.csv"
             with patch.object(bench2, "WORK", str(root / "work")), patch.object(
                 bench2, "CSV_PATH", str(csv_path)
-            ), patch.object(bench2.sys, "argv", ["bench2.py", "no-op"]):
+            ), patch.object(bench2.sys, "argv", ["bench2.py", "main"]), patch.object(
+                bench2, "files_in", return_value=[]
+            ), patch.object(bench2, "batch_header"):
                 bench2.main()
             self.assertTrue((root / "work").is_dir())
             with csv_path.open(newline="") as handle:
