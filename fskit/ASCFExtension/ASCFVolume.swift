@@ -40,12 +40,11 @@ final class ASCFVolume: FSVolume {
         self.handle = handle
         self.selectedArchiveURL = selectedArchiveURL
         self.sourceIdentity = sourceIdentity
-        let safeName = archiveName.isEmpty || archiveName == "." || archiveName == ".."
-            ? "restored" : archiveName
         root = ASCFItem(name: FSFileName(string: "/"),
                         fileID: .rootDirectory, parentID: .parentOfRoot,
                         type: .directory, size: 1)
-        file = ASCFItem(name: FSFileName(string: safeName),
+        // The filesystem validated archiveName before this volume was published.
+        file = ASCFItem(name: FSFileName(string: archiveName),
                         fileID: FSItem.Identifier(rawValue: FSItem.Identifier.rootDirectory.rawValue + 1) ?? .invalid,
                         parentID: .rootDirectory, type: .file, size: info.logical_size)
         super.init(volumeID: FSVolume.Identifier(uuid: identifier),
