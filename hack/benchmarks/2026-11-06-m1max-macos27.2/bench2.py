@@ -246,6 +246,8 @@ def main():
     which = sys.argv[1] if len(sys.argv) > 1 else "main"
     if which not in ("main", "edge", "big4g"):
         raise ValueError(f"unknown benchmark batch: {which!r}")
+    if not os.path.isdir(DATA):
+        raise FileNotFoundError(f"benchmark data root does not exist: {DATA}")
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
     write_header = not os.path.exists(CSV_PATH)
