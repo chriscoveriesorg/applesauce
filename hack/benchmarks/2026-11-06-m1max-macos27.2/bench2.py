@@ -130,6 +130,7 @@ def bench_file(batch, corpus, path, codecs, reps_map, writer, fh):
                         dv = run_timed([BIN, "archive", "verify", outp])
                         row["verify_s"] = f"{dv['real']:.4f}"
                         if dv["rc"] != 0:
+                            row["status"] = "error"
                             note.append(f"verify rc={dv['rc']}: {dv['err']}")
                         d = run_timed([BIN, "archive", "extract", outp, rest])
                         metrics(d, "d_", row)
