@@ -127,6 +127,10 @@ jobs:
               host_os.write_bytes(b"tampered OS provenance")
               assert authenticate().returncode != 0, "altered macOS provenance accepted"
               host_os.write_bytes(b"synthetic:macos.txt")
+              build_tools = root / "build-tools.txt"
+              build_tools.write_bytes(b"tampered compiler and SDK provenance")
+              assert authenticate().returncode != 0, "altered build toolchain provenance accepted"
+              build_tools.write_bytes(b"synthetic:build-tools.txt")
               (root / "ASCFHost.app/Contents/embedded.provisionprofile").unlink()
               assert authenticate().returncode != 0, "missing provisioning profile accepted"
           PY
