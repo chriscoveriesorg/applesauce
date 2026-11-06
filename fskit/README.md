@@ -35,20 +35,25 @@ authenticated chunk boundary, using the bridge's atomic cancellation flag.
 A preempted probe reports EBUSY so FSKit can retry it later; its security scope
 is released and no incomplete verification can be advertised as usable.
 The handle lifetime is guarded against concurrent unregister/close. At most
-eight pending probes may retain security-scoped access; a ninth selected ASCF
-probe reports EBUSY until the queue drains. Across separate FSKit instances,
-up to sixteen selected mounts can wait for the worker; additional requests
-return EBUSY and release their security scope and lifecycle reservation.
+eight pending probes and sixteen pending mounts can wait for the worker
+across FSKit instances. Their queued closures retain the selected URL but
+acquire **no security scope** until the verification worker begins. A
+ninth selected ASCF probe or seventeenth pending mount returns EBUSY
+without opening the archive. Refused mounts release their lifecycle
+reservation.
 Once the queue drains a mount can be retried. The scheduler never runs two
 decoders concurrently, so scratch memory remains bounded. An unload
 invalidates a queued load ticket, allowing the worker to skip decoding that archive. An unload also sets a Rust atomic
 cancellation flag for in-flight verification, stopping work at the next
 chunk boundary. A cancelled load returns ECANCELED and cannot publish the
 volume. The lifecycle lock prevents freeing a verification handle during
-cancellation. Each security-scoped source is released on failure and held
-by the published volume until unload. The SDK compiler and
-portable cancellation tests cover these paths; actual signed mounts remain a
-separate acceptance requirement.
+cancellation. Probe scopes close as soon as their worker returns, including
+verification failure or preemption. Mount scopes start on the admitted
+worker and remain held by the published volume until unload; failed or
+cancelled mounts release them on that worker. The SDK compiler and
+portable scheduling/cancellation tests cover these paths; physical
+security-scope activation from an FSKit worker still requires signed
+mount acceptance on the provisioned Mac.
 
 The module's built `Info.plist` includes the FSKit activation, check, and
 format **option syntax metadata** from Apple's extension template. Those
