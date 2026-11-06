@@ -70,6 +70,18 @@ type-checks the extension but does not install, approve, or mount it. End-to-end
 mounted readback needs an authorized disposable macOS host. The ASCF format
 is experimental and must not be the only copy of important files.
 
+Signed package provenance now records executable fingerprints and inherited
+build flags, including Cargo configuration files in `CARGO_HOME` and the
+`.cargo/config` / `.cargo/config.toml` search path from the checkout through
+its parent directories. These configuration files can change compiler and
+linker behaviour even when the Git working tree is clean. The manifest-covered
+`build-tools.txt` records their SHA-256 values or explicit absence, without
+publishing local paths or file contents. The package command compares this
+witness before and after the signed build, refusing altered, symlinked or
+nonregular configuration files. The toolchain `--self-test` command returns
+a failing process status when tests fail, so CI can enforce these checks.
+This evidence covers build inputs and does not establish signed mount acceptance.
+
 References: Apple's "Building a passthrough file system" sample and
 https://developer.apple.com/documentation/fskit/fsunaryfilesystemoperations .
 
