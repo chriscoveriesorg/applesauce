@@ -294,8 +294,11 @@ class ToolchainTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolchainError, "ambiguous executable override"):
             record(("cargo",), lambda name: str(self.binary),
                    environ={"RUSTC_WRAPPER": "ccache rustc"})
-        with self.assertRaisesRegex(ToolchainError, "unresolved executable override"):
-            record(("cargo",), lambda name: None,
+        # The required Cargo binary must resolve first. Otherwise this test
+        # fails on the Cargo preflight and never exercises the override gate.
+        with self.assertRaisesRegex(ToolchainError, "unresolved executable override: RUSTC_WRAPPER"):
+            record(("cargo",),
+                   lambda name: str(self.binary) if name == "cargo" else None,
                    environ={"RUSTC_WRAPPER": "missing-wrapper"})
 
     def test_missing_tool_fails(self):
