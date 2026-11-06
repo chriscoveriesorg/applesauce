@@ -311,13 +311,13 @@ class ToolchainTests(unittest.TestCase):
                          {"cargo-home:config": "absent",
                           "cargo-home:config.toml": "absent"})
         config = cargo_home / "config.toml"
-        config.write_text('[build]\\nrustflags = ["--cfg", "trusted"]\\n')
+        config.write_text('[build]\nrustflags = ["--cfg", "trusted"]\n')
         changed = record(("cargo",), lambda name: str(self.binary), environ=env)
         self.assertNotEqual(first["cargo_home_config_sha256"],
                             changed["cargo_home_config_sha256"])
         self.assertEqual(first["build_environment_sha256"],
                          changed["build_environment_sha256"])
-        config.write_text('[build]\\nrustflags = ["--cfg", "modified"]\\n')
+        config.write_text('[build]\nrustflags = ["--cfg", "modified"]\n')
         changed_again = record(("cargo",), lambda name: str(self.binary), environ=env)
         self.assertNotEqual(changed["cargo_home_config_sha256"],
                             changed_again["cargo_home_config_sha256"])
@@ -334,11 +334,11 @@ class ToolchainTests(unittest.TestCase):
         cargo_dir = outer / ".cargo"
         cargo_dir.mkdir()
         config = cargo_dir / "config.toml"
-        config.write_text('[build]\\nrustflags = ["--cfg", "outside"]\\n')
+        config.write_text('[build]\nrustflags = ["--cfg", "outside"]\n')
         after = cargo_directory_config_fingerprints(current)
         self.assertNotEqual(before["cargo-parent:2:config.toml"],
                             after["cargo-parent:2:config.toml"])
-        config.write_text('[build]\\nrustflags = ["--cfg", "changed"]\\n')
+        config.write_text('[build]\nrustflags = ["--cfg", "changed"]\n')
         again = cargo_directory_config_fingerprints(current)
         self.assertNotEqual(after["cargo-parent:2:config.toml"],
                             again["cargo-parent:2:config.toml"])
