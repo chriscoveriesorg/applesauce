@@ -219,7 +219,8 @@ jobs:
       - name: Verify host/extension signing-profile compatibility gate
         run: python3 fskit/signing_profile.py --self-test
       - name: Verify immutable signed package source provenance
-        run: python3 fskit/source_provenance.py --self-test
+        run: |
+          python3 fskit/source_provenance.py --self-test
           python3 fskit/build_toolchain.py --self-test
       - name: Verify disposable ASCF archive-replacement refusal acceptance
         run: python3 fskit/replacement_acceptance.py --self-test
