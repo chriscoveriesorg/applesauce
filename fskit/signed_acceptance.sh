@@ -106,6 +106,10 @@ record_build_tools() {
   test -f "$generator" || return 1
   printf 'XcodeGen executable SHA-256: '
   /usr/bin/shasum -a 256 "$generator" | /usr/bin/awk '{print $1}' || return 1
+  # Include exact compiler bytes, PATH resolution and inherited build flags.
+  # Environment VALUES are hashed to avoid leaking local paths in the bundle.
+  printf 'Resolved compiler and build environment witness:\n'
+  /usr/bin/python3 "$ROOT/fskit/build_toolchain.py" --record || return 1
 }
 verify_bundle() {
   local bundle="$1" key="$2" name="$3" out="$4" helper_root="${5:-$ROOT}"
@@ -196,6 +200,7 @@ fskit/unmount_acceptance.py
 fskit/acceptance_evidence.py
 fskit/signing_profile.py
 fskit/source_provenance.py
+fskit/build_toolchain.py
 fskit/replacement_acceptance.py
 fskit/finder_readback.applescript
 ASCFHost.app/Contents/Info.plist
@@ -432,6 +437,7 @@ PY
     /bin/cp "$ROOT/fskit/acceptance_evidence.py" "$out/fskit/acceptance_evidence.py"
     /bin/cp "$ROOT/fskit/signing_profile.py" "$out/fskit/signing_profile.py"
     /bin/cp "$ROOT/fskit/source_provenance.py" "$out/fskit/source_provenance.py"
+    /bin/cp "$ROOT/fskit/build_toolchain.py" "$out/fskit/build_toolchain.py"
     /bin/cp "$ROOT/fskit/replacement_acceptance.py" "$out/fskit/replacement_acceptance.py"
     /bin/cp "$ROOT/fskit/finder_readback.applescript" "$out/fskit/finder_readback.applescript"
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
@@ -452,6 +458,9 @@ PY
     /usr/bin/python3 "$out/fskit/source_provenance.py" --self-test \
       > "$out/source-provenance-tests.log" 2>&1 \
       || die "packaged source-provenance tests failed; see $out/source-provenance-tests.log"
+    /usr/bin/python3 "$out/fskit/build_toolchain.py" --self-test \
+      > "$out/build-toolchain-tests.log" 2>&1 \
+      || die "packaged build-toolchain tests failed; see $out/build-toolchain-tests.log"
     /usr/bin/python3 "$out/fskit/replacement_acceptance.py" --self-test \
       > "$out/replacement-tests.log" 2>&1 \
       || die "packaged replacement-control tests failed; see $out/replacement-tests.log"
