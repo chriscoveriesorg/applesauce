@@ -245,6 +245,16 @@ export ASCFSKIT_TEAM_ID=YOUR_10_CHARACTER_TEAM_ID
 bash fskit/signed_acceptance.sh package
 ```
 
+The standalone `signed-build` command now checks the clean, byte-exact Git
+source tree and snapshots compiler/toolchain identity before Rust or Xcode
+runs. After both builds, it rejects a changed HEAD, tracked-source bytes,
+Cargo configuration, compiler wrappers or build environment before releasing
+its signed host path. Its evidence folder includes `source-provenance.txt`,
+`build-tools.txt`, `build-tools-after.txt` and `source-check-after-build.txt`.
+The `package` command repeats these checks across fixture generation and final
+manifest creation. Portable CI checks their ordering; only an authorized Mac
+with signing grants can exercise the actual signed path.
+
 The `package` command builds and verifies a signed host and extension,
 generates matching synthetic cleartext plus LZRaven/LZMesh archives, creates
 one payload-corrupted ASCF fixture per codec, and confirms both corrupted
