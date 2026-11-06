@@ -252,7 +252,14 @@ signing Mac; a checkout with automatic line-ending conversion must be
 re-created with the source bytes preserved before packaging. It rechecks the
 same exact HEAD and raw source bytes after the build and after manifest
 generation to prevent a concurrent source change from receiving a misleading
-signed-package provenance stamp. The XcodeGen-generated
+signed-package provenance stamp. The package also hashes the resolved
+Cargo/Rust, Xcode, Swift, Clang and XcodeGen executables before and after the
+signed build. Inherited Rust compiler wrappers, CC/CXX/linkers and
+`CARGO_TARGET_*_LINKER` overrides are fingerprinted by executable bytes,
+not merely their environment strings. Ambiguous shell-command overrides
+fail closed: provide a single executable path or unset the override before
+signing. This detects a swapped compiler wrapper even when the checkout,
+override value and nominal tool versions are unchanged. The XcodeGen-generated
 `fskit/ApplesauceASCF.xcodeproj` and Rust `target` are ignored build products.
 The generated `source-check-final.txt` and bundled
 `source-provenance-tests.log` provide separate audit evidence. Run
