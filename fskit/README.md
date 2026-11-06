@@ -30,7 +30,11 @@ they restore identical logical bytes. Unload resets the container readiness.
 
 Probe and load run full archive verification on one dedicated worker
 rather than blocking FSKit's callback thread. Explicit mount loads overtake
-queued Finder probes, while the active verification finishes normally. At most
+queued Finder probes and preempt a currently verifying probe at the next
+authenticated chunk boundary, using the bridge's atomic cancellation flag.
+A preempted probe reports EBUSY so FSKit can retry it later; its security scope
+is released and no incomplete verification can be advertised as usable.
+The handle lifetime is guarded against concurrent unregister/close. At most
 eight pending probes may retain security-scoped access; a ninth selected ASCF
 probe reports EBUSY until the queue drains. The scheduler never runs two
 decoders concurrently, so scratch memory remains bounded. An unload
