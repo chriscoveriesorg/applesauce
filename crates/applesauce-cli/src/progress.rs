@@ -2,8 +2,8 @@ use applesauce::progress::{Progress, SkipReason, Task};
 use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use std::fmt;
 use std::io::Write;
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Initial delay to wait before checking the expected remaining time
@@ -30,9 +30,14 @@ pub struct ProgressBars {
     total_bar: ProgressBar,
     bars: MultiProgress,
     verbosity: Verbosity,
+    errors: Arc<Mutex<Vec<(PathBuf, String)>>>,
 }
 
 impl ProgressBars {
+    pub fn errors(&self) -> Vec<(PathBuf, String)> {
+        self.errors.lock().unwrap().clone()
+    }
+
     pub fn finish(&self) {
         let _ = self.bars.clear();
         self.total_bar.finish();
@@ -79,6 +84,7 @@ impl ProgressBars {
             total_bar,
             bars,
             verbosity,
+            errors: Arc::default(),
         }
     }
 
@@ -102,6 +108,8 @@ enum State {
 }
 
 pub struct ProgressWithTotal {
+    errors: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    path: PathBuf,
     total: ProgressBar,
     single: ProgressBar,
     state: Mutex<State>,
@@ -137,11 +145,21 @@ impl Progress for ProgressBars {
     type Task = ProgressWithTotal;
 
     fn error(&self, path: &Path, message: &str) {
+        self.errors
+            .lock()
+            .unwrap()
+            .push((path.to_owned(), message.to_owned()));
         self.total_bar
             .println(format!("{}: error: {message}", path.display()))
     }
 
     fn file_skipped(&self, path: &Path, why: SkipReason) {
+        if let SkipReason::ReadError(error) = &why {
+            self.errors
+                .lock()
+                .unwrap()
+                .push((path.to_owned(), error.to_string()));
+        }
         let required_verbosity = match why {
             SkipReason::NotFile
             | SkipReason::AlreadyCompressed
@@ -171,6 +189,8 @@ impl Progress for ProgressBars {
         single.set_length(size);
         total.inc_length(size);
         ProgressWithTotal {
+            errors: Arc::clone(&self.errors),
+            path: path.to_owned(),
             total,
             single,
             state: Mutex::new(State::Unattached {
@@ -190,6 +210,10 @@ impl Task for ProgressWithTotal {
     }
 
     fn error(&self, message: &str) {
+        self.errors
+            .lock()
+            .unwrap()
+            .push((self.path.clone(), message.to_owned()));
         self.total.println(message);
     }
 

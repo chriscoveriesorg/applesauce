@@ -1,6 +1,6 @@
 use crate::progress::{ProgressBarWriter, ProgressBars, Verbosity};
 use applesauce::compressor::Kind;
-use applesauce::{info, Stats};
+use applesauce::Stats;
 use cfg_if::cfg_if;
 use clap::Parser;
 use std::ffi::OsStr;
@@ -20,6 +20,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 mod archive;
 mod codecs;
 mod progress;
+mod size_report;
 
 #[derive(Debug, clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -130,6 +131,10 @@ struct Compress {
     /// original file.
     #[arg(long)]
     verify: bool,
+
+    /// Emit the versioned actual-storage JSON report after compression
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -139,6 +144,10 @@ struct Info {
     /// Info will be reported for each path
     #[arg(required = true)]
     paths: Vec<PathBuf>,
+
+    /// Emit the versioned actual-storage JSON report
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum, PartialEq, Eq)]
@@ -203,6 +212,23 @@ fn chrome_tracing_file(path: Option<&Path>) -> Option<impl io::Write> {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Info is read-only, including when tracing was requested globally.
+    if let Commands::Info(args) = &cli.command {
+        if cli.chrome_tracing.is_some() {
+            eprintln!("applesauce: --chrome-tracing is not supported with info");
+            std::process::exit(1);
+        }
+        let report = size_report::analyze(&args.paths);
+        if let Err(error) = size_report::display(&report, args.json) {
+            eprintln!("applesauce: unable to write size report: {error}");
+            std::process::exit(1);
+        }
+        if !report.complete {
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Diagnostics never start the file-mutating pipeline or create trace files.
     let diagnostic = match &cli.command {
@@ -269,6 +295,7 @@ fn main() {
             minimum_compression_ratio,
             level,
             verify,
+            json,
         }) => {
             let kind: Kind = compression.into();
             if !kind.supported() {
@@ -283,7 +310,7 @@ fn main() {
             }
 
             let mut compressor = applesauce::FileCompressor::new();
-            let stats = compressor.recursive_compress(
+            let _stats = compressor.recursive_compress(
                 paths.iter().map(Path::new),
                 kind,
                 minimum_compression_ratio,
@@ -292,12 +319,16 @@ fn main() {
                 verify,
             );
             progress_bars.finish();
-            drop(progress_bars);
-            tracing::info!("Finished compressing");
-            if verbosity >= Verbosity::Normal {
-                // It seems dropping the progress bars may not be synchronous, so wait a little bit
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                display_stats(&stats, true);
+            let mut report = size_report::analyze(&paths);
+            report.operation_errors(progress_bars.errors());
+            if json || verbosity >= Verbosity::Normal {
+                if let Err(error) = size_report::display(&report, json) {
+                    eprintln!("applesauce: unable to write size report: {error}");
+                    std::process::exit(1);
+                }
+            }
+            if !report.complete {
+                std::process::exit(1);
             }
         }
         Commands::Decompress(Decompress {
@@ -318,97 +349,7 @@ fn main() {
                 display_stats(&stats, false);
             }
         }
-        Commands::Info(info) => {
-            for path in info.paths {
-                if path.is_dir() {
-                    let info = info::get_recursive(&path);
-                    let info = match info {
-                        Ok(info) => info,
-                        Err(e) => {
-                            tracing::error!(
-                                "error reading compression info for {}: {}",
-                                path.display(),
-                                e,
-                            );
-                            continue;
-                        }
-                    };
-                    println!("\n{}:", path.display());
-
-                    println!("Number of compressed files: {}", info.num_compressed_files);
-                    println!("Total number of files: {}", info.num_files);
-                    println!("Total number of folders: {}", info.num_folders);
-                    println!(
-                        "Total uncompressed size: {} ({})",
-                        format_bytes(info.total_uncompressed_size),
-                        info.total_uncompressed_size
-                    );
-                    println!(
-                        "Total compressed size: {} ({})",
-                        format_bytes(info.total_compressed_size),
-                        info.total_compressed_size
-                    );
-                    println!(
-                        "Compression Savings: {:.1}%",
-                        info.compression_savings_fraction() * 100.0,
-                    );
-                } else {
-                    let info = info::get(&path);
-                    let info = match info {
-                        Ok(info) => info,
-                        Err(e) => {
-                            tracing::error!(
-                                "error reading compression info for {}: {}",
-                                path.display(),
-                                e,
-                            );
-                            continue;
-                        }
-                    };
-                    if info.is_compressed {
-                        println!("{} is compressed", path.display());
-                    } else {
-                        println!("{} is not compressed", path.display());
-                    }
-
-                    match &info.decmpfs_info {
-                        Some(Ok(decmpfs_info)) => {
-                            println!("Compression type: {}", decmpfs_info.compression_type);
-                            println!(
-                                "Uncompressed size in decmpfs xattr: {}",
-                                decmpfs_info.orig_file_size
-                            );
-                        }
-                        Some(Err(decmpfs_err)) => {
-                            if info.is_compressed {
-                                tracing::error!(
-                                    "compressed file has issue with decompfs xattr: {}",
-                                    decmpfs_err
-                                );
-                            }
-                        }
-                        None => {
-                            if info.is_compressed {
-                                tracing::error!("compressed file has no decmpfs xattr");
-                            }
-                        }
-                    }
-                    println!("Uncompressed size: {}", info.stat_size);
-                    if info.is_compressed {
-                        println!("Compressed size: {}", info.on_disk_size);
-                        println!(
-                            "Compression savings: {:0.2}%",
-                            (1.0 - info.compressed_fraction()) * 100.0
-                        );
-                    }
-                    println!("Number of extended attributes: {}", info.xattr_count);
-                    println!(
-                        "Size of extended attributes: {} bytes",
-                        info.total_xattr_size
-                    );
-                }
-            }
-        }
+        Commands::Info(_) => unreachable!("info handled before tracing"),
     }
 }
 

@@ -161,6 +161,88 @@ For example, to compress a file named `example.txt` using the ZLIB compression a
 applesauce compress -c ZLIB example.txt
 ```
 
+### Actual size and storage reports
+
+`info PATH...` and `compress PATH...` use the same actual-storage report.
+`info --json PATH...` and `compress --json PATH...` emit one JSON document on
+stdout with `schema_version: 1` and `report_kind: "actual_storage"`. Compression
+reports the files as they exist after the operation; running `info` immediately
+afterward gives the same measurements. Progress and diagnostics use stderr.
+`info` opens inputs for reading only and rejects `--chrome-tracing` before opening
+its output. Symlinks and other non-regular entries are listed and excluded from
+byte totals. An unavailable input or malformed storage metadata makes the report
+incomplete and exits nonzero.
+
+```console
+applesauce info --json example.txt directory cold.ascf
+applesauce compress --json -c zlib example.txt
+```
+
+The size vocabulary matches compression projections. All byte counts are integer
+bytes; fields that are unknown or inapplicable are JSON `null`.
+
+| Field | Definition |
+| --- | --- |
+| `logical_size_bytes` | File content length (`st_size`); for ASCF, the logical length declared in its validated header. |
+| `current_allocation_bytes` | Exactly `st_blocks * 512`, including allocation charged to the file by the filesystem. No additional rounding by preferred I/O block size is applied. |
+| `raw_compressed_bytes` | Native encoded block payloads, excluding decmpfs/resource-fork framing; for ASCF, the sum of indexed encoded chunk lengths. Null for an ordinary file or an unknown native type. |
+| `decmpfs_xattr_bytes` | Entire `com.apple.decmpfs` attribute, including its 16-byte header; zero when absent. |
+| `resource_fork_bytes` | Entire resource fork, including native framing when present; zero when absent. A fork may also contain ordinary application data. |
+| `archive_bytes` | Entire ASCF file length (`st_size`), including its header, index and encoded chunks. Null for other files. |
+| `entry_count` | ASCF indexed chunk count, not a count of archived files. Null for other files. |
+| `savings_bytes` | Signed `logical_size_bytes - current_allocation_bytes`, as stated in `savings_basis`. Negative values mean allocation exceeds logical content length. |
+| `savings_fraction` | `savings_bytes / logical_size_bytes`; zero for zero logical bytes. Negative values remain negative. |
+
+`source` is `none`, `decmpfs`, or `ascf`. `codec` is the lowercase mapped codec
+name, `none` for ordinary files, or `unknown` for an unrecognized type.
+`decmpfs_type` preserves the raw native type number. Known mappings are zlib
+(3/4), lzvn (7/8), lzfse (11/12), and lzbitmap (13/14); reporting a mapping does
+not enable its encoder or decoder. `storage` is `inline_xattr` or `resource_fork`
+for recognized native compression and null otherwise. Unknown native types are
+never guessed from payload contents. ASCF inspection validates its header and
+index using `ArchiveReader::open`; it does not extract, decode, or authenticate
+payloads. A damaged payload can still have readable metadata. Unknown ASCF codec
+selectors fail closed with `codec: "unknown"` and an attached error.
+
+Do not add payload, xattr, resource-fork or archive bytes to allocation: these are
+views of storage already represented by `current_allocation_bytes`. An inline
+native payload is contained in `decmpfs_xattr_bytes`; a resource-fork payload is
+contained in `resource_fork_bytes`; an ASCF payload is contained in `archive_bytes`.
+The actual report's savings basis is logical versus allocated bytes. A compression
+projection's `savings_bytes` has the explicitly different current-versus-projected
+allocation basis; it measures the expected operation delta, not content savings.
+
+`paths[]` lists each encountered name with `path.display` for people and
+`path.bytes_hex` as the authoritative lowercase hex encoding of Unix pathname
+bytes. A second hard-link name has `duplicate_of` pointing to the first listed
+name. `directories[]` contains descendant totals for each directory; `roots[]`
+contains independent totals for each supplied root; `totals` covers their union.
+Each total counts an inode once by `(st_dev, st_ino)`, including hard-linked files
+that the compressor skips. Overlapping roots are counted once in combined totals.
+Directory inodes themselves are excluded. Sum distinct inode contributions to
+reconcile totals; do not sum every name, overlapping root, or nested directory.
+Total payload/framing/archive fields use zero for inapplicable files and null if
+an included value is unknown. `codecs` and `storage_forms` list the distinct forms
+observed in each total. `files_included` counts successfully measured unique
+regular files, even when other paths failed.
+
+Errors have stable `kind` and human `message` fields. An inspection error makes
+affected directory/root/combined byte totals null and `complete: false`.
+Notified compression errors appear in `operation_errors`, make the overall report
+incomplete and exit nonzero; readable post-operation measurements remain available.
+Completeness describes inspection and notified errors, not a promise that every
+file was compressed: eligibility skips and minimum-ratio refusals remain normal
+compressor behavior. The report is not an atomic filesystem snapshot. Concurrent
+metadata changes detected during inspection are errors.
+
+`allocation_measurement` states `st_blocks * 512`, and
+`allocation_estimate_limitations` records that clone-shared extents and snapshots
+are not deduplicated and directory/filesystem metadata is excluded. Sparse files
+can have zero allocation; small compressed xattrs can also be inline with zero
+charged blocks. Allocation is neither exclusive physical usage nor a prediction
+of space reclaimed by deletion. The library's legacy `total_compressed_size`
+field now uses this same allocation definition and deduplicates hard links.
+
 ## Experimental macOS 27 codec investigation
 
 The [codec workflow](.github/workflows/modern-compression-probe.yml) runs
