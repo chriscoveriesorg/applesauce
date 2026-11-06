@@ -127,5 +127,20 @@ class NativeSizeInspectionTests(unittest.TestCase):
             self.assertIn("info failed", row["note"])
 
 
+
+class FreshOutputRootTests(unittest.TestCase):
+    def test_main_creates_results_directory_for_fresh_output_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "fresh-benchmark-output"
+            csv_path = root / "results" / "runs2.csv"
+            with patch.object(bench2, "WORK", str(root / "work")), patch.object(
+                bench2, "CSV_PATH", str(csv_path)
+            ), patch.object(bench2.sys, "argv", ["bench2.py", "no-op"]):
+                bench2.main()
+            self.assertTrue((root / "work").is_dir())
+            with csv_path.open(newline="") as handle:
+                self.assertEqual(next(csv.reader(handle)), bench2.FIELDS)
+
+
 if __name__ == "__main__":
     unittest.main()
