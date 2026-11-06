@@ -30,7 +30,8 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
     }
 
     // Returning false means the bounded probe or mount backlog is full.
-    // A rejected caller must release its security scope and reservation.
+    // Callers cancel rejected load tickets; they must acquire security
+    // scopes only after their admitted worker begins.
     @discardableResult
     func submit(_ priority: Priority, onPreempt: (@Sendable () -> Void)? = nil,
                 _ work: @escaping @Sendable () -> Void) -> Bool {
