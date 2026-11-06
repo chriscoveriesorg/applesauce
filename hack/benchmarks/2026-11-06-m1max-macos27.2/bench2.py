@@ -164,6 +164,8 @@ def bench_file(batch, corpus, path, codecs, reps_map, writer, fh):
                             row["comp_bytes"] = orig
                             row["status"] = "skipped-ratio"; note.append(inote)
                             row["sha_ok"] = sha256(copy) == src_sha
+                            if not row["sha_ok"]:
+                                row["status"] = "SHA-MISMATCH"
                         else:
                             row["comp_bytes"] = csize
                             d = run_timed([BIN, "decompress", "-q", copy])
