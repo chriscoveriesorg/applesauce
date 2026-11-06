@@ -53,6 +53,33 @@ jobs:
           python3 fskit/source_provenance.py --self-test
           python3 fskit/build_toolchain.py --self-test
           python3 fskit/replacement_acceptance.py --self-test
+      - name: Preserve standalone signed-build provenance boundaries
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          script = Path("fskit/signed_acceptance.sh").read_text()
+          assert "set -euo pipefail" in script
+          signed = script.split("\n  signed-build)\n", 1)[1].split("\n  fixture)\n", 1)[0]
+          # A direct signed-build must refuse checkout/compiler drift, even
+          # when package was never invoked. The second snapshot follows BOTH
+          # compilers but precedes verification/publication of the signed app.
+          ordered = (
+              '--check "$ROOT")"',
+              'record_build_tools > "$out/build-tools.txt"',
+              'cargo build --locked --release -p applesauce-fskit-bridge',
+              'xcodegen generate --spec fskit/project.yml',
+              'xcodebuild -project fskit/ApplesauceASCF.xcodeproj',
+              '--expected-sha "$source_sha"',
+              'record_build_tools > "$out/build-tools-after.txt"',
+              '/usr/bin/cmp -s "$out/build-tools.txt" "$out/build-tools-after.txt"',
+              'verify_host "$built" "$out"',
+              'printf \'Signed host: %s',
+          )
+          offsets = [signed.index(value) for value in ordered]
+          assert offsets == sorted(offsets), "signed-build attestation order changed"
+          assert 'source-provenance.txt' in signed
+          assert 'source-check-after-build.txt' in signed
+          PY
       - name: Guard signed bundle Finder and unmount helper provenance
         run: |
           python3 - <<'PY'
