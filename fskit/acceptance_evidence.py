@@ -481,7 +481,7 @@ class EvidenceTests(unittest.TestCase):
     def test_both_codec_rejects_missing_one_codec(self):
         other = self.other_codec()
         other[4].unlink()
-        with self.assertRaises(OSError):
+        with self.assertRaisesRegex(EvidenceError, "unsafe signed acceptance evidence"):
             validate_both(self.base, other, self.items)
 
     def test_valid_chain(self):
