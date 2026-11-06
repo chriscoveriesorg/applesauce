@@ -26,18 +26,37 @@ def require(condition, explanation):
         raise WitnessError(explanation)
 
 
-def load_report(path):
-    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+def load_report(path, include_identity=False):
+    # A substituted FIFO must fail before reading: a blocking open here can
+    # indefinitely stall the signed physical acceptance ceremony.
+    require(bool(getattr(os, "O_NOFOLLOW", 0)) and
+            bool(getattr(os, "O_NONBLOCK", 0)),
+            "safe nonblocking no-follow report open is unavailable")
+    flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+             getattr(os, "O_CLOEXEC", 0))
     fd = os.open(path, flags)
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        require(stat.S_ISREG(info.st_mode) and info.st_size <= 1024 * 1024,
+    with os.fdopen(fd, "rb", buffering=0) as stream:
+        before = os.fstat(stream.fileno())
+        require(stat.S_ISREG(before.st_mode) and
+                0 <= before.st_size <= 1024 * 1024,
                 "readback report must be a bounded regular file")
-        return json.load(stream)
+        raw = stream.read(1024 * 1024 + 1)
+        after = os.fstat(stream.fileno())
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        require(all(getattr(before, key) == getattr(after, key) for key in fields)
+                and len(raw) == before.st_size,
+                "readback report changed or was truncated during inspection")
+        report = json.loads(raw)
+        identity = (before.st_dev, before.st_ino, before.st_mtime_ns)
+        return (report, identity) if include_identity else report
 
 
 def copy_identity(path):
-    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    require(bool(getattr(os, "O_NOFOLLOW", 0)) and
+            bool(getattr(os, "O_NONBLOCK", 0)),
+            "safe nonblocking no-follow Finder copy open is unavailable")
+    flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+             getattr(os, "O_CLOEXEC", 0))
     fd = os.open(path, flags)
     with os.fdopen(fd, "rb", buffering=0) as stream:
         before = os.fstat(stream.fileno())
@@ -112,8 +131,15 @@ def validate(first, after, copied):
 
 
 def stamp(first_path, after_path, copied):
-    before = load_report(first_path)
-    after = load_report(after_path)
+    before, first_identity = load_report(first_path, include_identity=True)
+    after, second_identity = load_report(after_path, include_identity=True)
+    # The post-Finder report must be a fresh filesystem observation. The
+    # first report reused as "after", including through a hard link, cannot
+    # establish that the original ASCF mount survived Finder copy-out.
+    require(first_identity[:2] != second_identity[:2],
+            "pre- and post-Finder reports must be separate regular files")
+    require(first_identity[2] < second_identity[2],
+            "post-Finder report must be newer than initial mounted readback")
     digest = validate(before, after, copied)
     before["finder_copy_verified"] = True
     before["finder_copy_sha256"] = digest
