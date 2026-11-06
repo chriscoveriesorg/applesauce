@@ -117,17 +117,31 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             }
             return
         }
-        let accepted = Self.verificationScheduler.submit(.probe) {
+        // If an explicit load arrives while this probe verifies a large
+        // archive, stop at the next authenticated chunk. Serial scheduling
+        // then serves the mount before other pending Finder probes.
+        let cancellation = ASCFProbeCancellation(cancelHandle: { handle in
+            ascf_cancel_verification(handle)
+        })
+        let accepted = Self.verificationScheduler.submit(.probe, onPreempt: {
+            cancellation.cancel()
+        }) {
             do {
                 defer { url.stopAccessingSecurityScopedResource() }
                 // Do not advertise a malformed or corrupted archive as mountable.
                 // The mount path independently verifies again before publication.
-                let (handle, info, _) = try Self.openArchive(url, verify: true)
+                let (handle, info, _) = try Self.openArchive(
+                    url, verify: true,
+                    onVerificationHandle: { cancellation.register($0) })
                 defer { ascf_close(handle) }
                 replyHandler(.usable(name: "Applesauce ASCF", containerID: FSContainerIdentifier(uuid: Self.identifier(for: info, archiveURL: url))), nil)
             } catch {
                 let nsError = error as NSError
-                if nsError.domain == FSKitErrorDomain
+                if cancellation.isCancelled {
+                    // A competing explicit mount interrupted this probe.
+                    // Signal transient resource pressure so FSKit can retry.
+                    replyHandler(nil, Self.error(EBUSY))
+                } else if nsError.domain == FSKitErrorDomain
                     && nsError.code == FSError.Code.resourceDamaged.rawValue {
                     // A recognized ASCF payload failed codec or SHA-256 verification.
                     // Preserve the typed failure for the host's negative control.
