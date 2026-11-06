@@ -539,8 +539,17 @@ STEPS
   signed-build)
     test "$#" -eq 1 || die "signed-build takes no arguments"
     signing_preflight
+    # A standalone signed-build must meet the same source/toolchain integrity
+    # contract as package. Otherwise its printed "Signed host" path could be
+    # mistaken for a reproducible artifact built from uncommitted local bytes.
+    source_sha="$(/usr/bin/python3 "$ROOT/fskit/source_provenance.py" --check "$ROOT")" \
+      || die "signed-build requires a clean, fully tracked source checkout"
     team="${ASCFSKIT_TEAM_ID}"
     out="$(mktemp -d /tmp/ascf-signed.XXXXXXXX)"
+    printf 'repository=chriscoveriesorg/applesauce\ncommit=%s\n' \
+      "$source_sha" > "$out/source-provenance.txt"
+    record_build_tools > "$out/build-tools.txt" \
+      || die "cannot attest signed-build tools and compiler environment"
     cargo build --locked --release -p applesauce-fskit-bridge
     xcodegen generate --spec fskit/project.yml
     xcodebuild -project fskit/ApplesauceASCF.xcodeproj \
@@ -550,10 +559,20 @@ STEPS
       CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Automatic \
       DEVELOPMENT_TEAM="$team" CODE_SIGN_IDENTITY='Apple Development' \
       build 2>&1 | tee "$out/xcodebuild.log"
+    # Reinspect after BOTH Rust and Xcode generation/compilation. Package
+    # later repeats this at its own final manifest boundary.
+    /usr/bin/python3 "$ROOT/fskit/source_provenance.py" --check "$ROOT" \
+      --expected-sha "$source_sha" > "$out/source-check-after-build.txt" \
+      || die "source changed during standalone signed-build; see $out"
+    record_build_tools > "$out/build-tools-after.txt" \
+      || die "cannot recheck signed-build toolchain"
+    /usr/bin/cmp -s "$out/build-tools.txt" "$out/build-tools-after.txt" \
+      || die "signed-build toolchain or compiler environment changed; see $out"
     built="$out/DerivedData/Build/Products/Release/ASCFHost.app"
     verify_host "$built" "$out"
     /usr/bin/ditto "$built" "$out/ASCFHost.app"
-    printf 'Signed host: %s\nEvidence: %s\n' "$out/ASCFHost.app" "$out"
+    printf 'Signed host: %s\nSource SHA: %s\nEvidence: %s\n' \
+      "$out/ASCFHost.app" "$source_sha" "$out"
     printf 'Install on disposable Mac; enable File System Extensions in Settings.\n'
     ;;
   fixture)
