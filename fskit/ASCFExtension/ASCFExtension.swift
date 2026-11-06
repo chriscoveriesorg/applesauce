@@ -107,16 +107,10 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             return
         }
         let url = path.url
-        guard url.startAccessingSecurityScopedResource() else {
-            // Report access failures for selected ASCF candidates, but do
-            // not claim errors while probing unrelated unreadable formats.
-            if url.pathExtension.lowercased() == "ascf" {
-                replyHandler(nil, Self.error(EACCES))
-            } else {
-                replyHandler(.notRecognized, nil)
-            }
-            return
-        }
+        // Queue probes without acquiring a file-access capability: Finder can
+        // submit many probes while one full SHA-256 verification is active.
+        // Security scope is acquired only by the admitted worker, and only for
+        // the duration of its archive I/O.
         // If an explicit load arrives while this probe verifies a large
         // archive, stop at the next authenticated chunk. Serial scheduling
         // then serves the mount before other pending Finder probes.
@@ -126,8 +120,22 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         let accepted = Self.verificationScheduler.submit(.probe, onPreempt: {
             cancellation.cancel()
         }) {
+            if cancellation.isCancelled {
+                replyHandler(nil, Self.error(EBUSY))
+                return
+            }
+            guard url.startAccessingSecurityScopedResource() else {
+                // A selected ASCF probe should surface sandbox denial;
+                // other inaccessible formats are ordinary probe misses.
+                if url.pathExtension.lowercased() == "ascf" {
+                    replyHandler(nil, Self.error(EACCES))
+                } else {
+                    replyHandler(.notRecognized, nil)
+                }
+                return
+            }
+            defer { url.stopAccessingSecurityScopedResource() }
             do {
-                defer { url.stopAccessingSecurityScopedResource() }
                 // Do not advertise a malformed or corrupted archive as mountable.
                 // The mount path independently verifies again before publication.
                 let (handle, info, _) = try Self.openArchive(
@@ -165,9 +173,8 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         if !accepted {
             // FSKit can rapidly probe thousands of candidates in Finder.
-            // Bound pending security scopes and make an ASCF overflow visible
-            // as resource pressure rather than an unsupported format.
-            url.stopAccessingSecurityScopedResource()
+            // Admission refused before starting a scope, keeping queued or
+            // rejected probes from consuming the host's sandbox resources.
             if url.pathExtension.lowercased() == "ascf" {
                 replyHandler(nil, Self.error(EBUSY))
             } else {
@@ -198,13 +205,6 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
 
         let url = path.url
-        guard url.startAccessingSecurityScopedResource() else {
-            lifecycleLock.lock()
-            loadGate.cancel(ticket)
-            lifecycleLock.unlock()
-            replyHandler(nil, Self.error(EACCES))
-            return
-        }
         let accepted = Self.verificationScheduler.submit(.mount) { [self] in
             // A probe can occupy the single verifier while unload cancels
             // this request. Avoid decoding an archive whose ticket is stale.
@@ -212,6 +212,23 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             let stillPending = loadGate.isPending(ticket)
             lifecycleLock.unlock()
             guard stillPending else {
+                replyHandler(nil, Self.error(ENODEV))
+                return
+            }
+            // A queued request should retain its ticket and URL, not a live
+            // security scope. This is also the sole access-acquisition point
+            // for admitted mounts; rejected or unloaded tickets consume none.
+            guard url.startAccessingSecurityScopedResource() else {
+                lifecycleLock.lock()
+                loadGate.cancel(ticket)
+                lifecycleLock.unlock()
+                replyHandler(nil, Self.error(EACCES))
+                return
+            }
+            lifecycleLock.lock()
+            let stillCurrent = loadGate.isPending(ticket)
+            lifecycleLock.unlock()
+            guard stillCurrent else {
                 url.stopAccessingSecurityScopedResource()
                 replyHandler(nil, Self.error(ENODEV))
                 return
@@ -265,12 +282,11 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             }
         }
         if !accepted {
-            // Other FSKit instances may hold queued mounts. Release our
-            // rejected ticket and scope so refused requests retain nothing.
+            // Refused mounts never acquired a sandbox scope. Release only
+            // their per-instance reservation before replying.
             lifecycleLock.lock()
             loadGate.cancel(ticket)
             lifecycleLock.unlock()
-            url.stopAccessingSecurityScopedResource()
             replyHandler(nil, Self.error(EBUSY))
         }
     }
