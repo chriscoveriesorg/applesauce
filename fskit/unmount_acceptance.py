@@ -16,6 +16,8 @@ import re
 import sys
 import unittest
 
+from finder_mount_witness import load_report
+
 
 class UnmountError(ValueError):
     pass
@@ -61,8 +63,10 @@ def verify(mount, first_readback, *, bundle=None, mounts=None, is_mount=None):
             os.path.normpath(mount) == mount,
             "unmount witness requires one direct /Volumes mountpoint")
     require(not os.path.islink(mount), "mountpoint became a symlink")
-    with open(first_readback, encoding="utf-8") as stream:
-        previous = json.load(stream)
+    try:
+        previous = load_report(first_readback)
+    except (OSError, ValueError) as error:
+        raise UnmountError(f"unsafe previous mounted readback: {error}") from error
     require(previous.get("result") == "pass" and
             previous.get("filesystem_type") == "ascf" and
             previous.get("kernel_readonly") is True and
@@ -215,6 +219,28 @@ class UnmountTests(unittest.TestCase):
         self.payload["active_ascf_mounts"] = 2
         self.save()
         with self.assertRaisesRegex(UnmountError, "unique kernel ASCF"):
+            self.check()
+
+    def test_ambiguous_json_and_blocking_evidence_are_refused(self):
+        self.report.write_text('{"result":"fail","result":"pass"}')
+        with self.assertRaisesRegex(UnmountError, "duplicate JSON"):
+            self.check()
+        self.report.write_text('{"result":"pass","mount_flags":NaN}')
+        with self.assertRaisesRegex(UnmountError, "non-finite"):
+            self.check()
+        self.report.unlink()
+        os.mkfifo(self.report)
+        with self.assertRaisesRegex(UnmountError, "bounded regular file"):
+            self.check()
+
+    def test_symlinked_or_oversized_unmount_evidence_is_refused(self):
+        self.report.write_bytes(b" " * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(UnmountError, "bounded regular file"):
+            self.check()
+        target = self.report.with_suffix(".original")
+        self.report.rename(target)
+        self.report.symlink_to(target)
+        with self.assertRaisesRegex(UnmountError, "unsafe previous"):
             self.check()
 
     def test_normal_unmount(self):
