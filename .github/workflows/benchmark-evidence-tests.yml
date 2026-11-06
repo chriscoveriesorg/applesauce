@@ -1,0 +1,29 @@
+name: Benchmark evidence harness regressions
+
+on:
+  pull_request:
+    paths:
+      - 'hack/benchmarks/2026-11-06-m1max-macos27.2/*.py'
+      - '.github/workflows/benchmark-evidence-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'hack/benchmarks/2026-11-06-m1max-macos27.2/*.py'
+      - '.github/workflows/benchmark-evidence-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compile benchmark scripts
+        run: python3 -m compileall -q hack/benchmarks/2026-11-06-m1max-macos27.2
+      - name: Verify benchmark fail-closed controls
+        run: |
+          python3 -m unittest discover \
+            -s hack/benchmarks/2026-11-06-m1max-macos27.2 \
+            -p 'test_*.py' -v
