@@ -229,7 +229,13 @@ plus the exact signed host and extension executables, their Info.plists,
 code-signing resource seals and embedded provisioning profiles. The bundle
 records the source commit in `source-provenance.txt`. Packaging now
 requires a clean checkout, including no untracked source inputs, before
-signing. It rechecks the same exact HEAD after the build and after manifest
+signing. The attestation compares every tracked file's actual on-disk bytes
+with its staged Git blob using `git hash-object --no-filters`. This rejects
+modified Swift/Rust source concealed by user-configured Git clean filters,
+index flags or newline conversion. Prepare a byte-identical checkout on the
+signing Mac; a checkout with automatic line-ending conversion must be
+re-created with the source bytes preserved before packaging. It rechecks the
+same exact HEAD and raw source bytes after the build and after manifest
 generation to prevent a concurrent source change from receiving a misleading
 signed-package provenance stamp. The XcodeGen-generated
 `fskit/ApplesauceASCF.xcodeproj` and Rust `target` are ignored build products.
