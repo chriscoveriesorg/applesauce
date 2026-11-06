@@ -63,6 +63,41 @@ struct ASCFVerificationSchedulerTests {
         let reused = DispatchSemaphore(value: 0)
         precondition(scheduler.submit(.probe) { reused.signal() })
         precondition(reused.wait(timeout: .now() + 10) == .success)
-        print("ASCF verification scheduler: priority, bounded admission and reuse passed")
+        // A user-requested mount preempts only the currently verifying
+        // Finder probe. Pending probes remain queued, then run afterwards.
+        let scheduler2 = ASCFVerificationScheduler(maxPendingProbes: 2)
+        let activeStarted = DispatchSemaphore(value: 0)
+        let activeReleased = DispatchSemaphore(value: 0)
+        let probePreempted = DispatchSemaphore(value: 0)
+        let probeEvents = ASCFVerificationSchedulerEvents()
+        let probeGroup = DispatchGroup()
+        probeGroup.enter()
+        precondition(scheduler2.submit(.probe, onPreempt: {
+            probePreempted.signal()
+        }) {
+            probeEvents.add("active-probe")
+            activeStarted.signal()
+            precondition(activeReleased.wait(timeout: .now() + 10) == .success)
+            probeGroup.leave()
+        })
+        precondition(activeStarted.wait(timeout: .now() + 10) == .success)
+        probeGroup.enter()
+        precondition(scheduler2.submit(.probe) {
+            probeEvents.add("queued-probe")
+            probeGroup.leave()
+        })
+        probeGroup.enter()
+        precondition(scheduler2.submit(.mount) {
+            probeEvents.add("requested-mount")
+            probeGroup.leave()
+        })
+        precondition(probePreempted.wait(timeout: .now() + 10) == .success,
+                     "mount did not preempt the running probe")
+        activeReleased.signal()
+        precondition(probeGroup.wait(timeout: .now() + 10) == .success)
+        precondition(probeEvents.snapshot() ==
+                     ["active-probe", "requested-mount", "queued-probe"],
+                     "preemption did not preserve mount priority")
+        print("ASCF verification scheduler: priority, bounded admission, preemption and reuse passed")
     }
 }
