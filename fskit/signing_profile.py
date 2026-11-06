@@ -98,9 +98,15 @@ def check(signed, profile, entitlement, name, team, bundle_id, now=None):
     require(expiry > current,
             f"{name}: embedded provisioning profile expired on {expiry.isoformat()}")
 
-    # A wildcard provisioning profile may authorize several apps. A signed
-    # application identifier, when present, must name this exact bundle.
-    for key in ("com.apple.application-identifier", "application-identifier"):
+    # FSKit's restricted grant must belong to the signed host/extension.
+    # macOS code signatures may omit application-identifier, but the embedded
+    # provisioning profile must bind its restricted grant to the selected
+    # bundle. Otherwise an unrelated valid profile could be accepted.
+    identity_keys = ("com.apple.application-identifier", "application-identifier")
+    require(any(key in authorized for key in identity_keys),
+            f"{name}: provisioning profile lacks an application identifier")
+    # Check every supplied alias. Conflicting aliases are not interchangeable.
+    for key in identity_keys:
         signed_id = signed.get(key)
         if signed_id is not None:
             require(signed_id == f"{team}.{bundle_id}",
@@ -335,10 +341,28 @@ class SigningProfileTests(unittest.TestCase):
             self.team + "." + self.bundle_id)
         self.verify()
 
-    def test_optional_application_id(self):
+    def test_signed_application_id_may_be_absent(self):
+        # A macOS binary may omit this entitlement. The profile still binds
+        # its restricted FSKit grant to the exact installed bundle.
         self.signed.pop("com.apple.application-identifier")
-        self.profile["Entitlements"].pop("com.apple.application-identifier")
         self.verify()
+
+    def test_profile_application_id_is_mandatory(self):
+        self.profile["Entitlements"].pop("com.apple.application-identifier")
+        with self.assertRaisesRegex(SigningProfileError, "lacks an application identifier"):
+            self.verify()
+
+    def test_conflicting_application_id_aliases_are_rejected(self):
+        # Neither a second, contradictory provisioned ID nor an incorrect
+        # signed alias can override the otherwise valid primary identity.
+        self.profile["Entitlements"]["application-identifier"] = (
+            self.team + ".different.app")
+        with self.assertRaisesRegex(SigningProfileError, "does not authorize"):
+            self.verify()
+        self.profile["Entitlements"].pop("application-identifier")
+        self.signed["application-identifier"] = self.team + ".different.app"
+        with self.assertRaisesRegex(SigningProfileError, "does not match"):
+            self.verify()
 
     def test_wrong_team(self):
         self.profile["TeamIdentifier"] = ["OTHER12345"]
