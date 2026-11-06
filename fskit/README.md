@@ -28,10 +28,13 @@ identity at probe and load, and remounting the same archive preserves its
 identity. Distinct Raven and Mesh archives remain distinguishable even when
 they restore identical logical bytes. Unload resets the container readiness.
 
-Probe and load run full archive verification on one dedicated serial worker
-rather than blocking FSKit's callback thread. This limits concurrent decoder
-scratch allocations. An unload invalidates a queued load ticket, allowing the
-worker to skip decoding that archive. An unload also sets a Rust atomic
+Probe and load run full archive verification on one dedicated worker
+rather than blocking FSKit's callback thread. Explicit mount loads overtake
+queued Finder probes, while the active verification finishes normally. At most
+eight pending probes may retain security-scoped access; a ninth selected ASCF
+probe reports EBUSY until the queue drains. The scheduler never runs two
+decoders concurrently, so scratch memory remains bounded. An unload
+invalidates a queued load ticket, allowing the worker to skip decoding that archive. An unload also sets a Rust atomic
 cancellation flag for in-flight verification, stopping work at the next
 chunk boundary. A cancelled load returns ECANCELED and cannot publish the
 volume. The lifecycle lock prevents freeing a verification handle during
