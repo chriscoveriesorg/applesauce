@@ -35,6 +35,17 @@ the bounded SHA-256 verification queue when Finder scans large directories.
 The host's explicitly selected `FSClient.mountSingleVolume` path still validates
 archive magic and every chunk, independent of its filename.
 
+Both automatic probes and explicit mounts must produce a single safe
+Finder-visible restored member name before decoding or acquiring sandbox
+access. The extension derives that name from the archive's basename and
+rejects ASCII control characters, DEL, slash, colon, backslash, dot/dot-dot,
+empty names and names longer than 255 UTF-8 bytes. Explicit unsafe-name
+requests fail with EINVAL; automatic probes do not claim the resource.
+This matches `finder_mount_witness.py`'s safe-copy requirements, so the
+mounted member name cannot silently alias a different filename. Unicode
+and spaces in valid filenames remain supported. The portable Swift
+`MountedMemberNameTests.swift` suite executes in macOS FSKit CI.
+
 Probe and load run full archive verification on one dedicated worker
 rather than blocking FSKit's callback thread. Explicit mount loads overtake
 queued Finder probes and preempt a currently verifying probe at the next
