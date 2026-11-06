@@ -25,6 +25,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     // Valid only while the worker owns an open C handle. All access is
     // under lifecycleLock, including unregister-before-close.
     private var verifyingHandle: OpaquePointer?
+    private var pendingMountCancellation: ASCFVerificationCancellation?
     private var volume: ASCFVolume?
     private var scopedURL: URL?
 
@@ -142,7 +143,13 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                     url, verify: true,
                     onVerificationHandle: { cancellation.register($0) })
                 defer { ascf_close(handle) }
-                replyHandler(.usable(name: "Applesauce ASCF", containerID: FSContainerIdentifier(uuid: Self.identifier(for: info, archiveURL: url))), nil)
+                // A load can preempt in the narrow window after decode
+                // completed and before FSKit receives the probe response.
+                if cancellation.isCancelled {
+                    replyHandler(nil, Self.error(EBUSY))
+                } else {
+                    replyHandler(.usable(name: "Applesauce ASCF", containerID: FSContainerIdentifier(uuid: Self.identifier(for: info, archiveURL: url))), nil)
+                }
             } catch {
                 let nsError = error as NSError
                 if cancellation.isCancelled {
@@ -196,8 +203,10 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             replyHandler(nil, Self.error(ENOTSUP))
             return
         }
+        let cancellation = ASCFVerificationCancellation()
         lifecycleLock.lock()
         let ticket = loadGate.begin()
+        if ticket != nil { pendingMountCancellation = cancellation }
         lifecycleLock.unlock()
         guard let ticket else {
             replyHandler(nil, Self.error(EBUSY))
@@ -205,7 +214,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
 
         let url = path.url
-        let accepted = Self.verificationScheduler.submit(.mount) { [self] in
+        let accepted = Self.verificationScheduler.submit(.mount, cancellation: cancellation) { [self] in
             // A probe can occupy the single verifier while unload cancels
             // this request. Avoid decoding an archive whose ticket is stale.
             lifecycleLock.lock()
@@ -221,6 +230,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             guard url.startAccessingSecurityScopedResource() else {
                 lifecycleLock.lock()
                 loadGate.cancel(ticket)
+                if pendingMountCancellation === cancellation { pendingMountCancellation = nil }
                 lifecycleLock.unlock()
                 replyHandler(nil, Self.error(EACCES))
                 return
@@ -259,6 +269,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                 )
                 lifecycleLock.lock()
                 let published = loadGate.publish(ticket)
+                if pendingMountCancellation === cancellation { pendingMountCancellation = nil }
                 if published {
                     volume = mounted
                     scopedURL = url
@@ -276,6 +287,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             } catch {
                 lifecycleLock.lock()
                 loadGate.cancel(ticket)
+                if pendingMountCancellation === cancellation { pendingMountCancellation = nil }
                 lifecycleLock.unlock()
                 url.stopAccessingSecurityScopedResource()
                 replyHandler(nil, error)
@@ -286,6 +298,7 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             // their per-instance reservation before replying.
             lifecycleLock.lock()
             loadGate.cancel(ticket)
+            if pendingMountCancellation === cancellation { pendingMountCancellation = nil }
             lifecycleLock.unlock()
             replyHandler(nil, Self.error(EBUSY))
         }
@@ -300,6 +313,8 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // FSKit finishes active volume operations before unloading it.
         lifecycleLock.lock()
         loadGate.unload()
+        pendingMountCancellation?.cancel()
+        pendingMountCancellation = nil
         // Stop decoding future chunks without waiting for the bridge mutex.
         if let verifyingHandle { ascf_cancel_verification(verifyingHandle) }
         let oldScope = scopedURL

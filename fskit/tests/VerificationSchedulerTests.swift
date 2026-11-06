@@ -164,6 +164,69 @@ struct ASCFVerificationSchedulerTests {
         precondition(scopeGroup.wait(timeout: .now() + 10) == .success)
         precondition(scopeEvents.snapshot() == ["scope-start", "scope-stop"],
                      "admitted worker did not own the scope lifecycle")
-        print("ASCF verification scheduler: priority, bounded probe/mount admission, preemption and reuse passed")
+        // An unloaded FSKit instance must give up its queue slot while a
+        // different probe still occupies the worker. Otherwise canceled
+        // requests from many instances can block a new user mount with EBUSY.
+        let stale = ASCFVerificationScheduler(maxPendingProbes: 1, maxPendingMounts: 1)
+        let staleStarted = DispatchSemaphore(value: 0)
+        let staleRelease = DispatchSemaphore(value: 0)
+        let staleDone = DispatchGroup()
+        let staleEvents = ASCFVerificationSchedulerEvents()
+        staleDone.enter()
+        precondition(stale.submit(.probe) {
+            staleStarted.signal()
+            precondition(staleRelease.wait(timeout: .now() + 10) == .success)
+            staleDone.leave()
+        })
+        precondition(staleStarted.wait(timeout: .now() + 10) == .success)
+        let abandoned = ASCFVerificationCancellation()
+        staleDone.enter()
+        precondition(stale.submit(.mount, cancellation: abandoned) {
+            staleEvents.add("abandoned")
+            staleDone.leave()
+        })
+        abandoned.cancel()
+        precondition(abandoned.isCancelled, "unload cancellation was not recorded")
+        // The canceled closure is pruned and must never execute. Its group
+        // reservation is released in the test, just as FSKit replied on unload.
+        staleDone.leave()
+        staleDone.enter()
+        precondition(stale.submit(.mount) {
+            staleEvents.add("fresh")
+            staleDone.leave()
+        }, "stale queued mount consumed the only admission slot")
+        staleRelease.signal()
+        precondition(staleDone.wait(timeout: .now() + 10) == .success)
+        precondition(staleEvents.snapshot() == ["fresh"],
+                     "canceled queued mount still executed")
+
+        // Without another mount arriving, the worker must also skip a
+        // canceled reservation when it finally drains after the probe.
+        let skip = ASCFVerificationScheduler(maxPendingProbes: 1, maxPendingMounts: 1)
+        let skipStarted = DispatchSemaphore(value: 0)
+        let skipRelease = DispatchSemaphore(value: 0)
+        let skipDone = DispatchSemaphore(value: 0)
+        let skipEvents = ASCFVerificationSchedulerEvents()
+        precondition(skip.submit(.probe) {
+            skipStarted.signal()
+            precondition(skipRelease.wait(timeout: .now() + 10) == .success)
+            skipDone.signal()
+        })
+        precondition(skipStarted.wait(timeout: .now() + 10) == .success)
+        let canceled = ASCFVerificationCancellation()
+        precondition(skip.submit(.mount, cancellation: canceled) {
+            skipEvents.add("should-not-run")
+        })
+        canceled.cancel()
+        skipRelease.signal()
+        precondition(skipDone.wait(timeout: .now() + 10) == .success)
+        // Enqueue a sentinel and wait for the same serial worker to reach it.
+        let skipSentinel = DispatchSemaphore(value: 0)
+        precondition(skip.submit(.mount) { skipSentinel.signal() })
+        precondition(skipSentinel.wait(timeout: .now() + 10) == .success)
+        precondition(skipEvents.snapshot().isEmpty,
+                     "canceled mount was executed during drain")
+
+        print("ASCF verification scheduler: priority, bounded admission, stale unload cancellation and reuse passed")
     }
 }

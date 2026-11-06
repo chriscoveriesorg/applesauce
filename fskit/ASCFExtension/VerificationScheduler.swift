@@ -4,6 +4,26 @@
 import Foundation
 import Dispatch
 
+// The load lifecycle can invalidate a queued mount while another archive is
+// being verified. Read this token without acquiring the FSKit lifecycle lock,
+// so stale work can be reclaimed without lock inversion or sandbox access.
+final class ASCFVerificationCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+}
+
 final class ASCFVerificationScheduler: @unchecked Sendable {
     enum Priority { case mount, probe }
     private typealias Job = @Sendable () -> Void
@@ -16,7 +36,11 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
         let work: Job
         let cancel: Job?
     }
-    private var pendingMounts: [Job] = []
+    private struct ScheduledMount {
+        let work: Job
+        let cancellation: ASCFVerificationCancellation?
+    }
+    private var pendingMounts: [ScheduledMount] = []
     private var pendingProbes: [ScheduledProbe] = []
     // Only the actively executing probe may be preempted by a new mount.
     private var activeProbeCancellation: Job?
@@ -33,19 +57,24 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
     // Callers cancel rejected load tickets; they must acquire security
     // scopes only after their admitted worker begins.
     @discardableResult
-    func submit(_ priority: Priority, onPreempt: (@Sendable () -> Void)? = nil,
+    func submit(_ priority: Priority,
+                cancellation: ASCFVerificationCancellation? = nil,
+                onPreempt: (@Sendable () -> Void)? = nil,
                 _ work: @escaping @Sendable () -> Void) -> Bool {
         lock.lock()
         let interruptActiveProbe: Job?
         switch priority {
         case .mount:
-            // Many FSKit instances share this scheduler. Per-instance load
-            // gates cannot bound queued mounts or retained security scopes.
+            // An unload invalidates its token immediately, but an occupied
+            // worker may not reach that queued closure for a long time.
+            // Reclaim those stale reservations before enforcing the bound.
+            // Token lookup never calls back into a filesystem lifecycle lock.
+            pendingMounts.removeAll { $0.cancellation?.isCancelled == true }
             guard pendingMounts.count < maxPendingMounts else {
                 lock.unlock()
                 return false
             }
-            pendingMounts.append(work)
+            pendingMounts.append(ScheduledMount(work: work, cancellation: cancellation))
             interruptActiveProbe = activeProbeCancellation
         case .probe:
             guard pendingProbes.count < maxPendingProbes else {
@@ -69,14 +98,18 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
         while true {
             lock.lock()
             let next: Job
+            let cancellation: ASCFVerificationCancellation?
             let runningProbe: Bool
             if !pendingMounts.isEmpty {
-                next = pendingMounts.removeFirst()
+                let mount = pendingMounts.removeFirst()
+                next = mount.work
+                cancellation = mount.cancellation
                 activeProbeCancellation = nil
                 runningProbe = false
             } else if !pendingProbes.isEmpty {
                 let probe = pendingProbes.removeFirst()
                 next = probe.work
+                cancellation = nil
                 activeProbeCancellation = probe.cancel
                 runningProbe = true
             } else {
@@ -86,6 +119,9 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
                 return
             }
             lock.unlock()
+            // A canceled mount was dequeued between unload and the next
+            // admission, so skip it even when no new submission pruned it.
+            if cancellation?.isCancelled == true { continue }
             next()
             if runningProbe {
                 lock.lock()
