@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   fork-release-contract:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'claw-applesauce' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Ensure Python 3 is available

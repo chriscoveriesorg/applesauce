@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   fixtures:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'claw-applesauce' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Ensure Python 3 is available
@@ -58,7 +58,7 @@ jobs:
       - run: python3 -m unittest discover -s hack -p 'test_decmpfs_config_probe.py' -v
 
   macos-binaries:
-    runs-on: xcode-27
+    runs-on: macos-latest
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v6
