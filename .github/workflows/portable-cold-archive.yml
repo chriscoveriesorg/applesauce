@@ -22,8 +22,8 @@ permissions:
 jobs:
   portable:
     # GitHub-hosted PR validation keeps release-critical checks progressing when
-    # the dedicated GARM Linux runner has no capacity. Main pushes retain GARM.
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'claw-applesauce' }}
+    # dedicated self-hosted Linux capacity is unavailable.
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
