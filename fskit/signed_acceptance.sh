@@ -631,15 +631,13 @@ PY
       --mount "$3" --original "$bundle/source.$codec.jsonl" \
       > "$out/readback.json" \
       || die "FSKit bundle readback failed; see $out"
-    /usr/bin/python3 - "$out/readback.json" "$codec" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as source:
-    evidence = json.load(source)
-expected = "source." + sys.argv[2]
-if evidence.get("result") != "pass" or evidence.get("restored_file") != expected:
-    sys.exit("FSKit mounted file is not the expected archive member " + expected)
-PY
+    # Do not re-open an operator-controlled report with blocking json.load:
+    # the signed helper requires a bounded, nonblocking, no-follow regular file,
+    # verified read-only VFS identity and an exact single-component member name.
+    /usr/bin/python3 "$bundle/fskit/finder_mount_witness.py" \
+      --readback-name "$out/readback.json" --expected "source.$codec" \
+      > "$out/restored-name.txt" \
+      || die "FSKit mounted file is not the expected verified archive member"
     # Independent Finder metadata enumeration, rather than assuming a good
     # POSIX readback also means ordinary GUI applications see the volume.
     # An Apple Events permission failure blocks mounted acceptance explicitly.
@@ -677,7 +675,12 @@ PY
       > "$out/readback.json" || die "mounted readback failed; see $out"
     # The report stays provisional until Finder copies the restored file and
     # cmp verifies every logical byte. Stamp exactly once after that check.
-    restored_name="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["restored_file"])' "$out/readback.json")"
+    # This filename becomes an AppleScript Finder argument and an output path.
+    # Authenticate the actual VFS report and reject traversal, Finder separators,
+    # control characters, blocking FIFOs and substituted symlinks first.
+    restored_name="$(/usr/bin/python3 "$ROOT/fskit/finder_mount_witness.py" \
+      --readback-name "$out/readback.json")" \
+      || die "FSKit mounted restored filename failed safe readback verification"
     /bin/mkdir "$out/finder-copy"
     /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
       "$restored_name" "$(/usr/bin/stat -f %z "$4")" \
