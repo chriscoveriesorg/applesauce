@@ -316,6 +316,13 @@ jobs:
             fskit/ASCFExtension/VerificationScheduler.swift \
             fskit/tests/VerificationSchedulerTests.swift
           "$RUNNER_TEMP/ascf-verification-scheduler-tests"
+      - name: Prove preempted probe handle lifetime on macOS 27
+        run: |
+          xcrun swiftc -swift-version 5 -warnings-as-errors \
+            -o "$RUNNER_TEMP/ascf-probe-cancellation-tests" \
+            fskit/ASCFExtension/ProbeCancellation.swift \
+            fskit/tests/ProbeCancellationTests.swift
+          "$RUNNER_TEMP/ascf-probe-cancellation-tests"
       - name: Run signed-host lifecycle state-machine tests on macOS 27
         run: |
           xcrun swiftc -swift-version 5 -warnings-as-errors \
@@ -331,6 +338,7 @@ jobs:
             fskit/ASCFExtension/ReadBounds.swift \
             fskit/ASCFExtension/ResourceLoadGate.swift \
             fskit/ASCFExtension/VerificationScheduler.swift \
+            fskit/ASCFExtension/ProbeCancellation.swift \
             fskit/ASCFExtension/ASCFExtension.swift fskit/ASCFExtension/ASCFVolume.swift
       - name: Validate extension property list
         run: plutil -lint fskit/ASCFExtension/Info.plist fskit/ASCFExtension/Extension.entitlements fskit/Host/Host.entitlements
