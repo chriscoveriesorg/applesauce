@@ -181,15 +181,18 @@ struct ASCFVerificationSchedulerTests {
         precondition(staleStarted.wait(timeout: .now() + 10) == .success)
         let abandoned = ASCFVerificationCancellation()
         staleDone.enter()
-        precondition(stale.submit(.mount, cancellation: abandoned) {
-            staleEvents.add("abandoned")
+        precondition(stale.submit(.mount, cancellation: abandoned,
+                                  onCancellation: {
+            staleEvents.add("abandoned-canceled")
+            staleDone.leave()
+        }) {
+            staleEvents.add("abandoned-work")
             staleDone.leave()
         })
         abandoned.cancel()
         precondition(abandoned.isCancelled, "unload cancellation was not recorded")
-        // The canceled closure is pruned and must never execute. Its group
-        // reservation is released in the test, just as FSKit replied on unload.
-        staleDone.leave()
+        // Pruning must send the canceled mount exactly one completion while
+        // leaving the original worker unexecuted and its scope unopened.
         staleDone.enter()
         precondition(stale.submit(.mount) {
             staleEvents.add("fresh")
@@ -197,8 +200,8 @@ struct ASCFVerificationSchedulerTests {
         }, "stale queued mount consumed the only admission slot")
         staleRelease.signal()
         precondition(staleDone.wait(timeout: .now() + 10) == .success)
-        precondition(staleEvents.snapshot() == ["fresh"],
-                     "canceled queued mount still executed")
+        precondition(staleEvents.snapshot() == ["abandoned-canceled", "fresh"],
+                     "canceled queued mount lost its completion or executed work")
 
         // Without another mount arriving, the worker must also skip a
         // canceled reservation when it finally drains after the probe.
@@ -214,18 +217,25 @@ struct ASCFVerificationSchedulerTests {
         })
         precondition(skipStarted.wait(timeout: .now() + 10) == .success)
         let canceled = ASCFVerificationCancellation()
-        precondition(skip.submit(.mount, cancellation: canceled) {
+        let cancelDelivered = DispatchSemaphore(value: 0)
+        precondition(skip.submit(.mount, cancellation: canceled,
+                                 onCancellation: {
+            skipEvents.add("canceled-completion")
+            cancelDelivered.signal()
+        }) {
             skipEvents.add("should-not-run")
         })
         canceled.cancel()
         skipRelease.signal()
         precondition(skipDone.wait(timeout: .now() + 10) == .success)
+        precondition(cancelDelivered.wait(timeout: .now() + 10) == .success,
+                     "worker failed to complete a canceled mount")
         // Enqueue a sentinel and wait for the same serial worker to reach it.
         let skipSentinel = DispatchSemaphore(value: 0)
         precondition(skip.submit(.mount) { skipSentinel.signal() })
         precondition(skipSentinel.wait(timeout: .now() + 10) == .success)
-        precondition(skipEvents.snapshot().isEmpty,
-                     "canceled mount was executed during drain")
+        precondition(skipEvents.snapshot() == ["canceled-completion"],
+                     "drain lost or duplicated canceled mount completion")
 
         print("ASCF verification scheduler: priority, bounded admission, stale unload cancellation and reuse passed")
     }

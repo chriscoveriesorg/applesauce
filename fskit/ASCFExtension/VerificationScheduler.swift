@@ -39,6 +39,9 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
     private struct ScheduledMount {
         let work: Job
         let cancellation: ASCFVerificationCancellation?
+        // Every admitted FSKit load must receive exactly one reply, even
+        // when its queued worker is reclaimed before opening the archive.
+        let onCancellation: Job?
     }
     private var pendingMounts: [ScheduledMount] = []
     private var pendingProbes: [ScheduledProbe] = []
@@ -59,22 +62,30 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
     @discardableResult
     func submit(_ priority: Priority,
                 cancellation: ASCFVerificationCancellation? = nil,
+                onCancellation: (@Sendable () -> Void)? = nil,
                 onPreempt: (@Sendable () -> Void)? = nil,
                 _ work: @escaping @Sendable () -> Void) -> Bool {
         lock.lock()
         let interruptActiveProbe: Job?
+        var reclaimedMounts: [ScheduledMount] = []
         switch priority {
         case .mount:
             // An unload invalidates its token immediately, but an occupied
             // worker may not reach that queued closure for a long time.
             // Reclaim those stale reservations before enforcing the bound.
             // Token lookup never calls back into a filesystem lifecycle lock.
+            reclaimedMounts = pendingMounts.filter {
+                $0.cancellation?.isCancelled == true
+            }
             pendingMounts.removeAll { $0.cancellation?.isCancelled == true }
             guard pendingMounts.count < maxPendingMounts else {
                 lock.unlock()
                 return false
             }
-            pendingMounts.append(ScheduledMount(work: work, cancellation: cancellation))
+            pendingMounts.append(ScheduledMount(
+                work: work, cancellation: cancellation,
+                onCancellation: onCancellation
+            ))
             interruptActiveProbe = activeProbeCancellation
         case .probe:
             guard pendingProbes.count < maxPendingProbes else {
@@ -87,6 +98,13 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
         let needsWorker = !active
         if needsWorker { active = true }
         lock.unlock()
+        // Reclaimed loads still require their FSKit completion handler.
+        // Reply outside the scheduler lock to permit reentrant callbacks.
+        // The optional fallback preserves the original one-reply contract
+        // for callers whose worker itself handles a canceled reservation.
+        for mount in reclaimedMounts {
+            (mount.onCancellation ?? mount.work)()
+        }
         // Never invoke a cancellation callback while holding the scheduler
         // lock. It can synchronously acquire the probe's handle-lifetime lock.
         interruptActiveProbe?()
@@ -99,17 +117,20 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
             lock.lock()
             let next: Job
             let cancellation: ASCFVerificationCancellation?
+            let onCancellation: Job?
             let runningProbe: Bool
             if !pendingMounts.isEmpty {
                 let mount = pendingMounts.removeFirst()
                 next = mount.work
                 cancellation = mount.cancellation
+                onCancellation = mount.onCancellation
                 activeProbeCancellation = nil
                 runningProbe = false
             } else if !pendingProbes.isEmpty {
                 let probe = pendingProbes.removeFirst()
                 next = probe.work
                 cancellation = nil
+                onCancellation = nil
                 activeProbeCancellation = probe.cancel
                 runningProbe = true
             } else {
@@ -120,8 +141,11 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
             }
             lock.unlock()
             // A canceled mount was dequeued between unload and the next
-            // admission, so skip it even when no new submission pruned it.
-            if cancellation?.isCancelled == true { continue }
+            // admission. Still deliver its completion, without archive I/O.
+            if cancellation?.isCancelled == true {
+                (onCancellation ?? next)()
+                continue
+            }
             next()
             if runningProbe {
                 lock.lock()

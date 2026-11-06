@@ -214,7 +214,10 @@ final class ASCFFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
 
         let url = path.url
-        let accepted = Self.verificationScheduler.submit(.mount, cancellation: cancellation) { [self] in
+        let accepted = Self.verificationScheduler.submit(
+            .mount, cancellation: cancellation,
+            onCancellation: { replyHandler(nil, Self.error(ENODEV)) }
+        ) { [self] in
             // A probe can occupy the single verifier while unload cancels
             // this request. Avoid decoding an archive whose ticket is stale.
             lifecycleLock.lock()
