@@ -113,14 +113,13 @@ def check(signed, profile, entitlement, name, team, bundle_id, now=None):
                     f"{name}: signed {key} does not match the bundle identity")
         allowed_id = authorized.get(key)
         if allowed_id is not None:
-            prefix = team + "."
-            require(isinstance(allowed_id, str) and allowed_id.startswith(prefix),
-                    f"{name}: profile {key} has a different team prefix")
-            pattern = allowed_id[len(prefix):]
-            match = pattern == bundle_id or pattern == "*" or (
-                pattern.endswith(".*") and bundle_id.startswith(pattern[:-1]))
-            require(match,
-                    f"{name}: provisioning profile does not authorize {bundle_id}")
+            # These are restricted filesystem entitlements. For the signed
+            # acceptance gate demand an explicit provisioned App ID, rather
+            # than treating a wildcard profile as proof of the two approved
+            # FSKit capabilities. This also rejects partial wildcard aliases.
+            require(allowed_id == f"{team}.{bundle_id}",
+                    f"{name}: provisioning profile does not authorize the "
+                    f"explicit FSKit App ID {bundle_id}")
     signed_team = signed.get("com.apple.developer.team-identifier")
     if signed_team is not None:
         require(signed_team == team,
@@ -276,6 +275,17 @@ class ProfileCoverageTests(unittest.TestCase):
         del profile["Entitlements"]["com.apple.application-identifier"]
         self.assertFalse(covered_targets([profile], self.team))
 
+    def test_wildcard_profiles_do_not_satisfy_restricted_targets(self):
+        now = datetime.datetime(2026, 11, 6, tzinfo=datetime.timezone.utc)
+        host, extension = FSKIT_TARGETS
+        wildcards = [self.profile(host, wildcard=True),
+                     self.profile(extension, wildcard=True)]
+        self.assertEqual(covered_targets(wildcards, self.team, now), set())
+        # An unrelated wildcard profile must not fill the absent extension
+        # grant even when a valid explicit host profile is installed.
+        self.assertEqual(covered_targets([self.profile(host), wildcards[1]],
+                                          self.team, now), {"host"})
+
     def test_corrupt_files_do_not_mask_valid_grants(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
@@ -324,7 +334,7 @@ class SigningProfileTests(unittest.TestCase):
             "ExpirationDate": datetime.datetime(2028, 1, 1),
             "Entitlements": {
                 self.entitlement: True,
-                "com.apple.application-identifier": self.team + ".*",
+                "com.apple.application-identifier": self.team + "." + self.bundle_id,
             },
         }
 
@@ -333,7 +343,15 @@ class SigningProfileTests(unittest.TestCase):
               self.team, self.bundle_id,
               now=datetime.datetime(2026, 11, 5, tzinfo=datetime.timezone.utc))
 
-    def test_valid_wildcard(self):
+    def test_restricted_fsKit_grant_requires_explicit_app_id(self):
+        for wildcard in ("*", "org.chriscoveries.*"):
+            with self.subTest(wildcard=wildcard):
+                self.profile["Entitlements"]["com.apple.application-identifier"] = (
+                    self.team + "." + wildcard)
+                with self.assertRaisesRegex(SigningProfileError, "explicit FSKit App ID"):
+                    self.verify()
+        self.profile["Entitlements"]["com.apple.application-identifier"] = (
+            self.team + "." + self.bundle_id)
         self.verify()
 
     def test_exact_bundle_id(self):
