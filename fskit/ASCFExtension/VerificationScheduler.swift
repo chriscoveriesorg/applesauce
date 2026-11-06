@@ -85,10 +85,20 @@ final class ASCFVerificationScheduler: @unchecked Sendable {
             // worker may not reach that queued closure for a long time.
             // Reclaim those stale reservations before enforcing the bound.
             // Token lookup never calls back into a filesystem lifecycle lock.
-            reclaimedMounts = pendingMounts.filter {
-                $0.cancellation?.isCancelled == true
+            // Inspect each ticket exactly once. Cancellation may arrive from
+            // unloadResource on another thread while admission is pruning.
+            // Independent filter/removeAll passes could remove a newly
+            // cancelled mount without recording its completion callback.
+            var retainedMounts: [ScheduledMount] = []
+            retainedMounts.reserveCapacity(pendingMounts.count)
+            for mount in pendingMounts {
+                if mount.cancellation?.isCancelled == true {
+                    reclaimedMounts.append(mount)
+                } else {
+                    retainedMounts.append(mount)
+                }
             }
-            pendingMounts.removeAll { $0.cancellation?.isCancelled == true }
+            pendingMounts = retainedMounts
             guard pendingMounts.count < maxPendingMounts else {
                 lock.unlock()
                 return false
