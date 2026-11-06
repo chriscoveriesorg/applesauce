@@ -6,6 +6,7 @@ inherited build flags are hashed so portable bundles do not expose local paths.
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 import shlex
@@ -231,6 +232,31 @@ class ToolchainTests(unittest.TestCase):
         with self.assertRaises(ToolchainError):
             record(("cargo",), lambda name: None, environ={})
 
+    def test_self_test_runner_propagates_failures_and_errors(self):
+        # A formerly used unittest.main(exit=False) discarded the failure
+        # status and let GitHub Actions report a broken signing check as green.
+        class Successful(unittest.TestCase):
+            def test_pass(self):
+                self.assertTrue(True)
+
+        class Failing(unittest.TestCase):
+            def test_failure(self):
+                self.fail("intentional fixture failure")
+
+        class Crashing(unittest.TestCase):
+            def test_error(self):
+                raise RuntimeError("intentional fixture error")
+
+        for test_case, expected in ((Successful, 0), (Failing, 1), (Crashing, 1)):
+            with self.subTest(test_case=test_case.__name__):
+                self.assertEqual(run_self_tests(test_case, stream=io.StringIO()), expected)
+
+
+def run_self_tests(test_case=ToolchainTests, stream=None):
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(test_case)
+    outcome = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
+    return 0 if outcome.wasSuccessful() else 1
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -238,15 +264,17 @@ def main():
     parser.add_argument("--record", action="store_true")
     args = parser.parse_args()
     if args.self_test:
-        unittest.main(argv=[sys.argv[0]], exit=False)
-    elif args.record:
+        return run_self_tests()
+    if args.record:
         try:
-            print(json.dumps(record(xcrun=sdk_compiler, rust_binary=rust_toolchain_binary), sort_keys=True, indent=2))
+            print(json.dumps(record(xcrun=sdk_compiler, rust_binary=rust_toolchain_binary),
+                             sort_keys=True, indent=2))
         except ToolchainError as error:
-            sys.exit(str(error))
-    else:
-        parser.error("specify --record or --self-test")
+            print(str(error), file=sys.stderr)
+            return 1
+        return 0
+    parser.error("specify --record or --self-test")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
