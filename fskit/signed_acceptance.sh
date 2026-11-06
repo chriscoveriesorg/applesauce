@@ -752,14 +752,18 @@ PY
     # The staged copy records the exact signed package that generated it.
     # Authenticate that package before replacing even a synthetic archive.
     # Running a different checkout's verifier would undermine the evidence.
-    bundle="$(/usr/bin/python3 - "$2" <<'PY'
-import json
+    # Read the unsigned stage pointer through the same nonblocking, bounded,
+    # no-follow JSON parser used by the signed mount evidence consumers. Never
+    # let a substituted FIFO hang the operator before bundle authentication.
+    bundle="$(/usr/bin/python3 - "$2" "$ROOT/fskit" <<'PY'
 from pathlib import Path
 import sys
 
+sys.path.insert(0, sys.argv[2])
+from finder_mount_witness import load_report
+
 stage = Path(sys.argv[1])
-with (stage / "stage.json").open(encoding="utf-8") as stream:
-    data = json.load(stream)
+data = load_report(stage / "stage.json")
 bundle = data.get("bundle")
 if not isinstance(bundle, str) or not bundle.startswith("/"):
     sys.exit("stage metadata lacks an absolute signed-bundle path")
