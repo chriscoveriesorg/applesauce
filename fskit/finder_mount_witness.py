@@ -147,6 +147,25 @@ def validate(first, after, copied):
     return copied_sha
 
 
+
+def safe_restored_name(report):
+    """Return a verified, single-component Finder/Terminal filename.
+
+    A mounted readback report is generated immediately before passing this
+    name to AppleScript and to the operator's private Finder-copy directory.
+    Refuse fabricated VFS evidence and path separators/control characters
+    rather than interpreting an untrusted JSON field as a destination path.
+    """
+    identity = validated_identity(report)
+    name = identity["restored_file"]
+    require(name not in (".", "..") and
+            not any(char in name for char in ("/", ":", "\\", "\x00")) and
+            not any(ord(char) < 32 or ord(char) == 127 for char in name),
+            "unsafe Finder mounted member filename")
+    return name
+
+
+
 def stamp(first_path, after_path, copied):
     before, first_identity = load_report(first_path, include_identity=True)
     # Preserve the explicit replay refusal even if stamping changed the first
@@ -213,6 +232,20 @@ class WitnessTests(unittest.TestCase):
         early, late = 1_700_000_000_000_000_000, 1_700_000_002_000_000_000
         os.utime(self.before, ns=(early, early))
         os.utime(self.after, ns=(late, late))
+
+    def test_restored_name_requires_verified_safe_single_component(self):
+        self.assertEqual(safe_restored_name(self.first), "source.lzraven")
+        for name in ("", ".", "..", "../outside", "folder/child",
+                     "volume:child", "child\\\\name", "newline\\nchild",
+                     "control\\x00byte", "carriage\\rreturn"):
+            with self.subTest(name=name):
+                with self.assertRaises((WitnessError, ValueError)):
+                    safe_restored_name(dict(self.first, restored_file=name))
+        for change in ({"result": "fail"}, {"kernel_readonly": False},
+                       {"active_ascf_mounts": 2}, {"sha256": "invalid"}):
+            with self.subTest(change=change):
+                with self.assertRaises(WitnessError):
+                    safe_restored_name(dict(self.first, **change))
 
     def test_stamps_only_complete_unchanged_mount(self):
         result = stamp(self.before, self.after, self.copy)
@@ -331,6 +364,9 @@ class WitnessTests(unittest.TestCase):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--readback-name", type=Path,
+                        help="Safely print the mounted member name from a verified POSIX report")
+    parser.add_argument("--expected", help="Require this exact mounted member name")
     parser.add_argument("--first", type=Path)
     parser.add_argument("--after", type=Path)
     parser.add_argument("--copy", type=Path)
@@ -339,6 +375,20 @@ def main():
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(WitnessTests)
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+    if args.readback_name is not None:
+        if args.first or args.after or args.copy:
+            parser.error("--readback-name cannot be combined with Finder stamping")
+        try:
+            name = safe_restored_name(load_report(args.readback_name))
+            if args.expected is not None:
+                require(name == args.expected, "mounted member is not the expected archive source")
+        except (OSError, ValueError, KeyError) as error:
+            print(f"FSKit mounted readback filename refused: {error}", file=sys.stderr)
+            return 1
+        print(name)
+        return 0
+    if args.expected is not None:
+        parser.error("--expected requires --readback-name")
     if not (args.first and args.after and args.copy):
         parser.error("--first, --after and --copy are required")
     try:
