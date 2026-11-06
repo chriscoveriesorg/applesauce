@@ -2,7 +2,7 @@
 
 File-level and buffer-level measurements of applesauce codecs on public
 compression corpora, plus Criterion `standard` suite results, on a shared
-host running unrelated agent builds (load averages 3-6 recorded per batch).
+host running unrelated agent builds (recorded batch load averages 7.82–14.26).
 
 ## Machine & environment
 
