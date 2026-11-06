@@ -187,6 +187,11 @@ class WitnessTests(unittest.TestCase):
     def write(self):
         self.before.write_text(json.dumps(self.first))
         self.after.write_text(json.dumps(self.first))
+        # Stable, distinct file observations avoid filesystem clock-resolution
+        # flakes in CI while exercising the same ordering as the operator.
+        early, late = 1_700_000_000_000_000_000, 1_700_000_002_000_000_000
+        os.utime(self.before, ns=(early, early))
+        os.utime(self.after, ns=(late, late))
 
     def test_stamps_only_complete_unchanged_mount(self):
         result = stamp(self.before, self.after, self.copy)
@@ -234,6 +239,52 @@ class WitnessTests(unittest.TestCase):
                 self.after.write_text(json.dumps(altered))
                 with self.assertRaises(WitnessError):
                     stamp(self.before, self.after, self.copy)
+
+    def test_same_report_and_hardlink_cannot_fake_post_finder_readback(self):
+        with self.assertRaisesRegex(WitnessError, "separate regular files"):
+            stamp(self.before, self.before, self.copy)
+        self.after.unlink()
+        os.link(self.before, self.after)
+        with self.assertRaisesRegex(WitnessError, "separate regular files"):
+            stamp(self.before, self.after, self.copy)
+        self.assertNotIn("verification_id", self.before.read_text())
+
+    def test_stale_or_equal_post_finder_timestamp_is_refused(self):
+        initial = self.before.stat().st_mtime_ns
+        for timestamp in (initial, initial - 1_000_000_000):
+            with self.subTest(timestamp=timestamp):
+                os.utime(self.after, ns=(timestamp, timestamp))
+                with self.assertRaisesRegex(WitnessError, "newer"):
+                    stamp(self.before, self.after, self.copy)
+                self.assertNotIn("verification_id", self.before.read_text())
+
+    def test_fifo_reports_and_finder_copy_fail_without_blocking(self):
+        # O_NONBLOCK must be present before fstat identifies nonregular files:
+        # opening an attacker-substituted FIFO O_RDONLY alone would hang.
+        self.after.unlink()
+        os.mkfifo(self.after)
+        with self.assertRaisesRegex(WitnessError, "bounded regular file"):
+            load_report(self.after)
+        self.after.unlink()
+        self.copy.unlink()
+        os.mkfifo(self.copy)
+        with self.assertRaisesRegex(WitnessError, "regular file"):
+            copy_identity(self.copy)
+
+    def test_readback_files_are_opened_nofollow_and_nonblocking(self):
+        real_open = os.open
+        seen = []
+        watched = {str(self.before), str(self.after), str(self.copy)}
+        def inspect_open(path, flags, *args, **kwargs):
+            if str(path) in watched:
+                seen.append(str(path))
+                self.assertTrue(flags & os.O_NOFOLLOW)
+                self.assertTrue(flags & os.O_NONBLOCK)
+            return real_open(path, flags, *args, **kwargs)
+        with unittest.mock.patch("os.open", side_effect=inspect_open):
+            report = stamp(self.before, self.after, self.copy)
+        self.assertTrue(report["finder_copy_verified"])
+        self.assertEqual(set(seen), watched)
 
 
 def main():
