@@ -103,7 +103,7 @@ def check(signed, profile, entitlement, name, team, bundle_id, now=None):
     # provisioning profile must bind its restricted grant to the selected
     # bundle. Otherwise an unrelated valid profile could be accepted.
     identity_keys = ("com.apple.application-identifier", "application-identifier")
-    require(any(key in authorized for key in identity_keys),
+    require(any(authorized.get(key) is not None for key in identity_keys),
             f"{name}: provisioning profile lacks an application identifier")
     # Check every supplied alias. Conflicting aliases are not interchangeable.
     for key in identity_keys:
@@ -349,6 +349,11 @@ class SigningProfileTests(unittest.TestCase):
 
     def test_profile_application_id_is_mandatory(self):
         self.profile["Entitlements"].pop("com.apple.application-identifier")
+        with self.assertRaisesRegex(SigningProfileError, "lacks an application identifier"):
+            self.verify()
+
+    def test_null_application_identifier_is_rejected(self):
+        self.profile["Entitlements"]["com.apple.application-identifier"] = None
         with self.assertRaisesRegex(SigningProfileError, "lacks an application identifier"):
             self.verify()
 
