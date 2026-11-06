@@ -198,17 +198,22 @@ class ToolchainTests(unittest.TestCase):
         self.assertNotIn("/bin", json.dumps(report))
 
     def test_wrapper_executable_changes_are_recorded(self):
-        env = {"RUSTC_WRAPPER": str(self.binary)}
+        wrapper = Path(self.temporary.name) / "wrapper"
+        wrapper.write_bytes(b"#!/bin/sh\nexit 0\n")
+        wrapper.chmod(0o700)
+        env = {"RUSTC_WRAPPER": str(wrapper)}
         original = record(("cargo",), lambda name: str(self.binary),
                           environ=env)
         self.assertIn("override:RUSTC_WRAPPER", original["executables_sha256"])
-        self.binary.write_bytes(b"#!/bin/sh\\nexit 1\\n")
+        wrapper.write_bytes(b"#!/bin/sh\nexit 1\n")
         changed = record(("cargo",), lambda name: str(self.binary),
                          environ=env)
+        self.assertEqual(original["executables_sha256"]["cargo"],
+                         changed["executables_sha256"]["cargo"])
         self.assertEqual(original["build_environment_sha256"],
                          changed["build_environment_sha256"])
-        self.assertNotEqual(original["executables_sha256"],
-                            changed["executables_sha256"])
+        self.assertNotEqual(original["executables_sha256"]["override:RUSTC_WRAPPER"],
+                            changed["executables_sha256"]["override:RUSTC_WRAPPER"])
 
     def test_target_linker_is_pinned_and_ambiguous_commands_rejected(self):
         key = "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
