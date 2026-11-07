@@ -46,12 +46,12 @@ class TagCliReleaseTests(unittest.TestCase):
         # any real Git ref or touching a network service.
         gitbin = bindir / "git"
         realgit = subprocess.check_output(["which", "git"], text=True).strip()
-        gitbin.write_text('#!/bin/sh\\n'
-                          'if [ "${FAIL_TAG_LOOKUP:-}" = 1 ] && [ "$1" = ls-remote ]; then\\n'
-                          '  echo "simulated remote tag lookup failure" >&2\\n'
-                          '  exit 128\\n'
-                          'fi\\n'
-                          f'exec "{realgit}" "$@"\\n')
+        gitbin.write_text('#!/bin/sh\n'
+                          'if [ "${FAIL_TAG_LOOKUP:-}" = 1 ] && [ "$1" = ls-remote ]; then\n'
+                          '  echo "simulated remote tag lookup failure" >&2\n'
+                          '  exit 128\n'
+                          'fi\n'
+                          f'exec "{realgit}" "$@"\n')
         gitbin.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         self.set_green(True)
