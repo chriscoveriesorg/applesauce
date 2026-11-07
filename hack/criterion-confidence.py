@@ -177,11 +177,8 @@ def validate_source(summary_csv: Path, manifest_csv: Path, suite: str):
 
 
 def write_confidence(summary_csv: Path, criterion: Path, output: Path,
-                     manifest: Path | None = None, suite: str | None = None):
-    if (manifest is None) != (suite is None):
-        raise ValueError("manifest and benchmark suite must be supplied together")
-    if manifest is not None:
-        validate_source(summary_csv, manifest, suite)
+                     manifest: Path, suite: str):
+    validate_source(summary_csv, manifest, suite)
     rows = confidence_rows(summary_csv, criterion)
     with output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=COLUMNS)
