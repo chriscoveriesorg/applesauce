@@ -62,7 +62,7 @@ def read_median_interval(root: Path, row: dict, operation: str):
     center = finite_positive(median["point_estimate"], f"{path}: median")
     interval = median["confidence_interval"]
     level = interval["confidence_level"]
-    if type(level) not in (int, float) or not math.isclose(level, 0.95, abs_tol=1e-12):
+    if type(level) not in (int, float) or not math.isclose(level, 0.95, rel_tol=0, abs_tol=1e-12):
         raise ValueError(f"{path}: expected a Criterion 95% confidence interval")
     low = finite_positive(interval["lower_bound"], f"{path}: lower bound")
     high = finite_positive(interval["upper_bound"], f"{path}: upper bound")
@@ -104,6 +104,19 @@ def confidence_rows(summary_csv: Path, criterion: Path):
         if size_text not in ("4096", "65536", "1048576", "8388608"):
             raise ValueError(f"invalid benchmark input size in row {index}")
         size = int(size_text)
+        if (row["schema_version"] != "1" or row["fixture_version"] != "1"
+                or row["verified_roundtrip"] != "true"):
+            raise ValueError(f"unverified or unsupported summary row {index}")
+        expected_chunk = size if row["layout"] == "whole" else 65536
+        if row["chunk_bytes"] != str(expected_chunk):
+            raise ValueError(f"wrong benchmark chunk size in row {index}")
+        encoded = int(row["encoded_bytes"])
+        payload_ratio = float(row["encoded_over_input_ratio"])
+        blocks = 1 if row["layout"] == "whole" else (size + 65535) // 65536
+        if (not 0 < encoded <= 2 * size + 65536 * blocks
+                or not math.isfinite(payload_ratio)
+                or not math.isclose(payload_ratio, encoded / size, rel_tol=0, abs_tol=1e-8)):
+            raise ValueError(f"invalid encoded payload ratio in row {index}")
         digest = row["input_sha256"]
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise ValueError(f"invalid fixture digest in row {index}")
