@@ -8,10 +8,12 @@ import contextlib
 import datetime
 import hashlib
 import io
+import os
 from pathlib import Path
 import plistlib
 import re
 import ssl
+import stat
 import subprocess
 import sys
 import unittest
@@ -186,6 +188,47 @@ def covered_targets(profiles, team, now=None):
     return covered
 
 
+MAX_PROFILE_BYTES = 8 * 1024 * 1024
+MAX_DECODED_PROFILE_BYTES = 8 * 1024 * 1024
+PROFILE_DECODE_TIMEOUT = 15
+
+
+def decode_profile_bytes(path, runner=subprocess.run):
+    """Decode a bounded, stable regular CMS profile with a finite deadline.
+
+    Both the local-grant scan and signed embedded-bundle check use this gate.
+    An unexpected file replacement or a huge decoded plist cannot qualify.
+    This is a read-only preflight; actual codesign verification stays in the
+    signed host script.
+    """
+    path = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode)
+                or not 0 < before.st_size <= MAX_PROFILE_BYTES
+                or path.is_symlink()):
+            raise SigningProfileError("profile is not a bounded regular file")
+        result = runner(
+            ["/usr/bin/security", "cms", "-D", "-i", str(path)],
+            check=True, capture_output=True, timeout=PROFILE_DECODE_TIMEOUT)
+        after = os.fstat(fd)
+        current = path.stat(follow_symlinks=False)
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns)
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise SigningProfileError("profile changed during CMS decoding")
+        if not 0 < len(result.stdout) <= MAX_DECODED_PROFILE_BYTES:
+            raise SigningProfileError("decoded profile exceeds size limit")
+        # Do not emit arbitrary CMS-decoded bytes as a trusted plist.
+        plistlib.loads(result.stdout)
+        return result.stdout
+    finally:
+        os.close(fd)
+
+
 def local_profile_paths(home):
     """Search both legacy and newer Xcode provisioning-profile locations."""
     roots = (
@@ -222,10 +265,7 @@ def preflight_profiles(team, home=None, decode=None):
     if home is None:
         home = Path.home()
     if decode is None:
-        def decode(path):
-            return subprocess.run(
-                ["/usr/bin/security", "cms", "-D", "-i", str(path)],
-                check=True, capture_output=True, timeout=15).stdout
+        decode = decode_profile_bytes
     decoded = []
     paths = local_profile_paths(home)
     for path in paths:
@@ -253,6 +293,77 @@ def preflight_profiles(team, home=None, decode=None):
           "grants found for the selected team; signed-build will verify "
           "the actual code signatures and embedded profiles.")
     return 0
+
+
+class BoundedCMSDecoderTests(unittest.TestCase):
+    def test_valid_profile_and_finite_decoder_deadline(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "host.mobileprovision"
+            path.write_bytes(b"synthetic CMS envelope")
+            decoded = plistlib.dumps({"TeamIdentifier": ["ABCDEF1234"]})
+            seen = []
+
+            def runner(argv, **kwargs):
+                seen.append((argv, kwargs))
+                return subprocess.CompletedProcess(argv, 0, decoded, b"")
+
+            self.assertEqual(decode_profile_bytes(path, runner=runner), decoded)
+            self.assertEqual(seen[0][0][-1], str(path))
+            self.assertEqual(seen[0][1]["timeout"], PROFILE_DECODE_TIMEOUT)
+            self.assertTrue(seen[0][1]["check"])
+
+    def test_refuse_symlinks_empty_and_oversized_profiles_before_decode(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.mobileprovision"
+            target.write_bytes(b"valid")
+            linked = root / "link.mobileprovision"
+            linked.symlink_to(target)
+            empty = root / "empty.mobileprovision"
+            empty.touch()
+            huge = root / "huge.mobileprovision"
+            with huge.open("wb") as fd:
+                fd.truncate(MAX_PROFILE_BYTES + 1)
+
+            def forbidden(*args, **kwargs):
+                raise AssertionError("unsafe profile reached CMS decoder")
+
+            for path in (linked, empty, huge):
+                with self.subTest(path=path.name), self.assertRaises(
+                        (SigningProfileError, OSError)):
+                    decode_profile_bytes(path, runner=forbidden)
+
+    def test_refuse_oversized_or_invalid_decoded_plist(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.mobileprovision"
+            path.write_bytes(b"synthetic CMS envelope")
+
+            def runner_with(content):
+                return lambda argv, **kwargs: subprocess.CompletedProcess(
+                    argv, 0, content, b"")
+
+            with self.assertRaisesRegex(SigningProfileError, "size limit"):
+                decode_profile_bytes(
+                    path, runner=runner_with(b"x" * (MAX_DECODED_PROFILE_BYTES + 1)))
+            with self.assertRaises((ValueError, plistlib.InvalidFileException)):
+                decode_profile_bytes(path, runner=runner_with(b"not a plist"))
+
+    def test_refuse_source_changed_during_decode(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.mobileprovision"
+            path.write_bytes(b"first CMS bytes")
+            decoded = plistlib.dumps({"TeamIdentifier": []})
+
+            def mutate(argv, **kwargs):
+                path.write_bytes(b"changed CMS bytes")
+                return subprocess.CompletedProcess(argv, 0, decoded, b"")
+
+            with self.assertRaisesRegex(SigningProfileError, "changed"):
+                decode_profile_bytes(path, runner=mutate)
 
 
 class ProfileCoverageTests(unittest.TestCase):
@@ -514,6 +625,14 @@ def main():
         return preflight_identity(sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] == "--preflight-profiles":
         return preflight_profiles(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] == "--decode-profile":
+        try:
+            sys.stdout.buffer.write(decode_profile_bytes(sys.argv[2]))
+        except (OSError, ValueError, plistlib.InvalidFileException,
+                subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            print(f"ASCF embedded profile decode refused: {error}", file=sys.stderr)
+            return 1
+        return 0
     if len(sys.argv) != 7:
         sys.exit("usage: signing_profile.py ENTITLEMENTS.plist PROFILE.plist FSKit_KEY NAME TEAM_ID BUNDLE_ID")
     try:
