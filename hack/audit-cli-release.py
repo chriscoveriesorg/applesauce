@@ -77,6 +77,10 @@ def check_macho(archive, arch):
                 name = member.name
                 if name.startswith("./"):
                     name = name[2:]
+                # A regular file ending in "/" can be interpreted as a directory
+                # by extractors; never certify ambiguous file/directory paths.
+                if member.isfile() and name.endswith("/"):
+                    raise AuditError(f"{archive.name}: regular file has directory-style path")
                 parts = name.rstrip("/").split("/")
                 if (not name or name.startswith("/") or "\\" in name
                         or any(part in ("", ".", "..") for part in parts)):
