@@ -120,6 +120,23 @@ class TagCliReleaseTests(unittest.TestCase):
             self.assertNotEqual(self.run_helper(version, sha).returncode, 0)
         self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
 
+    def test_ci_attestation_requires_matching_sha_branch_event_and_success(self):
+        valid = {"head_sha": self.sha, "head_branch": "main",
+                 "event": "push", "conclusion": "success"}
+        for field, wrong in (("head_sha", "f" * 40),
+                             ("head_branch", "feature"),
+                             ("event", "pull_request"),
+                             ("conclusion", "failure")):
+            invalid = dict(valid, **{field: wrong})
+            self.env["MOCK_CI"] = json.dumps({"workflow_runs": [invalid]})
+            result = self.run_helper("0.5.32", self.sha, "--push")
+            self.assertNotEqual(result.returncode, 0, (field, result.stdout))
+            self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+        self.env["MOCK_CI"] = json.dumps({"workflow_runs": [invalid, valid]})
+        result = self.run_helper("0.5.32", self.sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+
     def test_requires_green_main_ci_and_refuses_divergent_commit(self):
         self.set_green(False)
         self.assertNotEqual(self.run_helper("0.5.32", self.sha).returncode, 0)
