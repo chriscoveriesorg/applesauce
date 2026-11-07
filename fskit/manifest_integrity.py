@@ -80,7 +80,7 @@ def read_manifest(fd):
         raise ManifestError("manifest is not ASCII") from error
 
 
-def verify(root, manifest, expected):
+def verify(root, expected):
     """Authenticate members exactly once without path-following hash reads."""
     require(expected and len(expected) <= MAX_MEMBERS
             and len(expected) == len(set(expected)),
@@ -91,7 +91,7 @@ def verify(root, manifest, expected):
                 "unsafe required manifest member")
     root_fd = os.open(root, DIR_FLAGS)
     try:
-        manifest_fd = os.open(manifest, OPEN_FLAGS)
+        manifest_fd = safe_member(root_fd, "SHA256SUMS")
         try:
             listing = read_manifest(manifest_fd)
         finally:
@@ -138,7 +138,7 @@ class ManifestTests(unittest.TestCase):
                 path = root / member
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(member.encode())
-            manifest = root / "SHA256SUMS.checked"
+            manifest = root / "SHA256SUMS"
 
             def populate(lines=None):
                 if lines is None:
@@ -147,23 +147,23 @@ class ManifestTests(unittest.TestCase):
                 manifest.write_text("\n".join(lines) + "\n", encoding="ascii")
 
             populate()
-            self.assertEqual(verify(root, manifest, members), 3)
+            self.assertEqual(verify(root, members), 3)
             (root / "NEXT-STEPS.txt").write_text("tampered")
             with self.assertRaisesRegex(ManifestError, "SHA-256 mismatch"):
-                verify(root, manifest, members)
+                verify(root, members)
             (root / "NEXT-STEPS.txt").write_text("NEXT-STEPS.txt")
             populate()
-            self.assertEqual(verify(root, manifest, members), 3)
+            self.assertEqual(verify(root, members), 3)
             entries = manifest.read_text().splitlines()
             populate(entries + [entries[0]])
             with self.assertRaisesRegex(ManifestError, "duplicated"):
-                verify(root, manifest, members)
+                verify(root, members)
             populate()
             target = root / "NEXT-STEPS.txt"
             target.rename(root / "original")
             target.symlink_to(root / "original")
             with self.assertRaises(OSError):
-                verify(root, manifest, members)
+                verify(root, members)
             target.unlink()
             (root / "original").rename(target)
             outside = root / "ASCFHost.app/Contents/MacOS/ASCFHost"
@@ -171,39 +171,39 @@ class ManifestTests(unittest.TestCase):
             outside.parent.rmdir()
             outside.parent.symlink_to(root / "outside-parent")
             with self.assertRaises(OSError):
-                verify(root, manifest, members)
+                verify(root, members)
 
     def test_reject_special_files_and_unsafe_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "source.ascf"
             path.write_bytes(b"fixture")
-            manifest = root / "hashes"
+            manifest = root / "SHA256SUMS"
             record = hashlib.sha256(b"fixture").hexdigest() + "  source.ascf\n"
             manifest.write_text(record)
-            self.assertEqual(verify(root, manifest, ["source.ascf"]), 1)
+            self.assertEqual(verify(root, ["source.ascf"]), 1)
             for data in (record.rstrip("\n"), record + "\n",
                          record.replace("  ", " *"),
                          record + "0" * 64 + "  ../private\n"):
                 manifest.write_text(data)
                 with self.assertRaises(ManifestError):
-                    verify(root, manifest, ["source.ascf"])
+                    verify(root, ["source.ascf"])
             manifest.write_text(record)
             path.unlink()
             os.mkfifo(path)
             with self.assertRaises(ManifestError):
-                verify(root, manifest, ["source.ascf"])
+                verify(root, ["source.ascf"])
 
 
 def main():
     if sys.argv[1:] == ["--self-test"]:
         unittest.main(argv=[sys.argv[0]])
         return
-    if len(sys.argv) != 3:
-        sys.exit("usage: manifest_integrity.py ROOT SNAPSHOTTED_SHA256SUMS")
+    if len(sys.argv) != 2:
+        sys.exit("usage: manifest_integrity.py BUNDLE_ROOT")
     expected = os.environ.get("ASCF_REQUIRED_PATHS", "").splitlines()
     try:
-        print("Verified", verify(sys.argv[1], sys.argv[2], expected),
+        print("Verified", verify(sys.argv[1], expected),
               "manifest-covered regular files with no-follow SHA-256")
     except (ManifestError, OSError) as error:
         sys.exit("ASCF manifest verification refused: " + str(error))
