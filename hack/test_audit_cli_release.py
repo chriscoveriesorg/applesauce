@@ -50,7 +50,7 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                      name="applesauce-cli/applesauce", mode=0o755,
                      bad_load_size=False, extra_link=False, extra_members=(),
                      subtype=None, platform=1, build_tool_count=0,
-                     entry_offset=None, duplicate_entry=False):
+                     entry_offset=None, duplicate_entry=False, reserved=0):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
             if platform is None:
@@ -76,7 +76,7 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                                   default_subtype if subtype is None else subtype,
                                   filetype, 1 + (entry_offset is not None)
                                   + duplicate_entry,
-                                  len(command), 0, 0)
+                                  len(command), 0, reserved)
                     + command + b"\0" * 64)
             member = tarfile.TarInfo(name)
             member.mode = mode
@@ -213,6 +213,17 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         self.assertIn("duplicate Mach-O LC_MAIN", run.stderr)
         self.assertFalse(any(c[:2] == ["release", "verify-asset"]
                              for c in self.calls()))
+
+    def test_nonzero_reserved_macho_header_is_refused_before_provenance(self):
+        for reserved in (1, 0xffffffff):
+            with self.subTest(reserved=reserved):
+                self.make_archive("aarch64", ARCHES["aarch64"], reserved=reserved)
+                self.log.unlink(missing_ok=True)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("nonzero Mach-O reserved header", run.stderr)
+                self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                     for c in self.calls()))
 
     def test_dynamic_library_header_is_refused(self):
         self.make_archive("x86_64", ARCHES["x86_64"], filetype=6)
