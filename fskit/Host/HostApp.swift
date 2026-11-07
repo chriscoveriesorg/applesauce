@@ -251,9 +251,19 @@ private final class ASCFMountController: ObservableObject {
                     return
                 }
                 let moduleID = "org.chriscoveries.applesauce.ascfhost.ascfextension"
-                guard let module = modules?.first(where: { $0.bundleIdentifier == moduleID }) else {
+                let matches = modules?.filter { $0.bundleIdentifier == moduleID } ?? []
+                guard matches.count == 1, let module = matches.first else {
                     operations.finish(ticket)
-                    status = "ASCF extension is not installed. Install the signed host, then enable its extension in System Settings."
+                    status = matches.isEmpty
+                        ? "ASCF extension is not installed. Install the signed host, then enable its extension in System Settings."
+                        : "More than one ASCF extension is registered. Resolve stale installations before accepting a mount."
+                    return
+                }
+                guard ASCFInstalledExtensionOrigin.matches(
+                    moduleURL: module.url, hostBundleURL: Bundle.main.bundleURL
+                ) else {
+                    operations.finish(ticket)
+                    status = "FSKit registered the ASCF extension from a different installation (\(module.url.path)). Remove or unregister the stale copy; launch the signed installed host."
                     return
                 }
                 guard module.isEnabled else {

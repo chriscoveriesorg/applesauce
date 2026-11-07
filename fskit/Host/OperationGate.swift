@@ -74,6 +74,22 @@ struct ASCFMountPostflight {
     }
 }
 
+ // The FSKit registry can retain an older extension from a different app
+ // installation after an upgrade or a re-sign. A matching bundle identifier
+ // alone does not prove that this host will invoke its embedded extension.
+ // The caller queries FSClient's installed FSModuleIdentity.url, rather than
+ // assuming the on-disk bundle at the running host's path is selected.
+ enum ASCFInstalledExtensionOrigin {
+     static func matches(moduleURL: URL, hostBundleURL: URL) -> Bool {
+         guard moduleURL.isFileURL, hostBundleURL.isFileURL else { return false }
+         let embedded = hostBundleURL
+             .appendingPathComponent("Contents/Extensions/ASCFExtension.appex", isDirectory: true)
+             .resolvingSymlinksInPath().standardizedFileURL
+         let registered = moduleURL.resolvingSymlinksInPath().standardizedFileURL
+         return registered.path == embedded.path
+     }
+ }
+ 
 // Only accept mount locations that the signed host or disposable Terminal
  // acceptance path can create. An unrelated ASCF mount elsewhere must block
  // another mount attempt instead of being treated as an ordinary host volume.

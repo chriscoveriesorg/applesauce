@@ -156,6 +156,40 @@ struct OperationGateTests {
         }
         print("PASS: kernel mount discovery accepts only host and private acceptance paths")
 
+        // FSClient discovery can report a stale or duplicate extension after a
+        // signed build is installed. Only the exact embedded appex owned by
+        // this launched host may be used for an acceptance mount.
+        let originRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ascf-installed-origin-" + UUID().uuidString)
+        let installedHost = originRoot.appendingPathComponent("ASCFHost.app", isDirectory: true)
+        let embedded = installedHost.appendingPathComponent(
+            "Contents/Extensions/ASCFExtension.appex", isDirectory: true)
+        let otherHost = originRoot.appendingPathComponent("ASCFHost-stale.app", isDirectory: true)
+        let stale = otherHost.appendingPathComponent(
+            "Contents/Extensions/ASCFExtension.appex", isDirectory: true)
+        try! FileManager.default.createDirectory(at: embedded, withIntermediateDirectories: true)
+        try! FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: originRoot) }
+        precondition(ASCFInstalledExtensionOrigin.matches(
+            moduleURL: embedded, hostBundleURL: installedHost))
+        let hostAlias = originRoot.appendingPathComponent("host-alias.app")
+        try! FileManager.default.createSymbolicLink(
+            at: hostAlias, withDestinationURL: installedHost)
+        precondition(ASCFInstalledExtensionOrigin.matches(
+            moduleURL: embedded, hostBundleURL: hostAlias))
+        precondition(!ASCFInstalledExtensionOrigin.matches(
+            moduleURL: stale, hostBundleURL: installedHost))
+        precondition(!ASCFInstalledExtensionOrigin.matches(
+            moduleURL: stale, hostBundleURL: hostAlias))
+        precondition(!ASCFInstalledExtensionOrigin.matches(
+            moduleURL: installedHost.appendingPathComponent(
+                "Contents/Extensions/OtherExtension.appex"),
+            hostBundleURL: installedHost))
+        precondition(!ASCFInstalledExtensionOrigin.matches(
+            moduleURL: URL(string: "https://example.invalid/ASCFExtension.appex")!,
+            hostBundleURL: installedHost))
+        print("PASS: stale, differently installed or non-file FSKit modules cannot mount")
+
         // Bind the selected negative-control file to exact source bytes.
         // Both the initial and post-FSClient digest must match the package.
         let testDirectory = FileManager.default.temporaryDirectory
