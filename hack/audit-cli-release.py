@@ -194,8 +194,11 @@ def check_macho(archive, arch):
                         if offset + 8 > sizeofcmds:
                             raise AuditError(f"{archive.name}: truncated Mach-O load command")
                         command, size = struct.unpack_from(endian + "II", commands, offset)
-                        if size < 8 or offset + size > sizeofcmds:
-                            raise AuditError(f"{archive.name}: invalid Mach-O load command size")
+                        # A 64-bit Mach-O load command must be eight-byte aligned.
+                        # A command with an odd cmdsize can otherwise make the
+                        # auditor accept a binary that dyld cannot load.
+                        if size < 8 or size % 8 != 0 or offset + size > sizeofcmds:
+                            raise AuditError(f"{archive.name}: invalid Mach-O load command size or alignment")
                         # Architecture alone does not distinguish macOS from
                         # iOS/tvOS/watchOS Mach-O executables. Modern toolchains
                         # emit LC_BUILD_VERSION; older ones emit LC_VERSION_MIN_*.
