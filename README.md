@@ -79,7 +79,7 @@ applesauce archive verify chatlog.ascf
 applesauce archive extract chatlog.ascf chatlog-restored.jsonl
 applesauce archive extract chatlog.ascf chatlog-slice.jsonl --range 65535:131073
 # Or choose --codec lzmesh for the create command.
-# Explicit opt-in auto selection, with a verified bounded first-block trial:
+# Explicit opt-in auto selection, with verified bounded sampling:
 applesauce archive create chatlog.jsonl chatlog-auto.ascf --codec auto
 ```
 
@@ -93,14 +93,16 @@ unrelated chunks, so the range digest is evidence for the selected bytes.
 Run `archive verify` to authenticate the complete logical archive; that
 requires an available Raven/Mesh decoder on macOS 27+.
 
-`archive create --codec auto` encodes and decodes the first up-to-64 KiB
-of the opened source with both Apple buffer codecs. It chooses LZRAVEN only
-when its encoded sample is at least 20% smaller than LZMESH's; otherwise it
-chooses LZMESH to avoid Raven's measured encoding slowdown on mixed JSONL.
-The rule is deterministic, explicitly requested, and prints the sample sizes
-and selected codec. A heterogeneous file may compress differently after the
-sample; the final whole-file savings and SHA-256 verification checks remain
-mandatory. Explicit `--codec lzraven` retains the existing default behavior.
+`archive create --codec auto` encodes and decodes at most 64 KiB total
+from the opened source with both Apple buffer codecs. For files of 192 KiB or
+more, the sample budget is split between the beginning, middle and end, reducing
+first-block bias on mixed-content logs. Smaller files use one contiguous sample.
+Both codecs must round-trip every sampled window; their encoded lengths include
+each window's overhead. LZRAVEN is selected only when its combined sample is at
+least 20% smaller than LZMESH's; otherwise LZMESH avoids Raven's measured
+encoding slowdown. The rule is deterministic, explicitly requested, and prints
+the sample sizes, window count and selected codec. The final whole-file savings
+and SHA-256 verification checks remain mandatory. Explicit `--codec lzraven` retains the existing default behavior.
 No automatic native APFS codec selection or `decmpfs` writer is involved.
 
 The writer rereads and hashes the original, verifies every staged chunk and
