@@ -122,6 +122,10 @@ def check_macho(archive, arch):
                 # Installed regular files must not be modifiable by other users.
                 if member.isfile() and member.mode & 0o022:
                     raise AuditError(f"{archive.name}: writable archive regular file")
+                # Directory entries have no payload. Reject malformed headers
+                # rather than certifying archives with ambiguous extraction behavior.
+                if member.isdir() and member.size != 0:
+                    raise AuditError(f"{archive.name}: nonempty archive directory entry")
                 if member.size < 0 or member.size > 128 * 1024 * 1024:
                     raise AuditError(f"{archive.name}: excessive member size")
                 total_size += member.size
