@@ -3,7 +3,9 @@
 //! replace a source log, or claim transparent native APFS compression.
 
 use applesauce_core::apple_buffer::Codec;
-use applesauce_core::cold_archive::{write_archive, ArchiveReader, MAX_READ_BYTES};
+use applesauce_core::cold_archive::{
+    validate_archive_geometry, write_archive, ArchiveReader, MAX_READ_BYTES,
+};
 use clap::{Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -259,6 +261,12 @@ fn create(
     if before.len() == 0 {
         return Err(invalid("archive source must be nonempty"));
     }
+    // Validate the entire archive geometry before auto sampling invokes either
+    // expensive Apple codec. The writer uses this exact core policy again.
+    validate_archive_geometry(before.len(), chunk_bytes)?;
+    // Refuse an occupied output before codec initialization or sampling; the
+    // later staging check still protects against a pathname race.
+    unused_output(output)?;
     let codec = match requested_codec {
         Some(codec) => codec,
         None => sample_auto_codec(&mut source, before.len())?,
@@ -572,6 +580,54 @@ mod tests {
                 .sum::<usize>(),
             AUTO_SAMPLE_BYTES
         );
+    }
+
+    #[test]
+    fn auto_preflight_refuses_occupied_output_and_invalid_geometry_before_codec_work() {
+        use applesauce_core::cold_archive::{MAX_CHUNKS, MIN_CHUNK_BYTES};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("synthetic-input");
+        fs::write(&source, b"generated data for a bounded archive").unwrap();
+        let occupied = dir.path().join("occupied.ascf");
+        fs::write(&occupied, b"preserve existing output").unwrap();
+        // Must report the occupied output even on hosts where the two Apple
+        // codecs are unsupported; sampling need not be attempted at all.
+        assert_eq!(
+            create(&source, &occupied, None, MIN_CHUNK_BYTES, true)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&occupied).unwrap(), b"preserve existing output");
+
+        let output = dir.path().join("must-not-be-created.ascf");
+        for invalid_chunk_bytes in [0, MIN_CHUNK_BYTES / 2, 100_000, 16 * 1024 * 1024] {
+            assert_eq!(
+                create(&source, &output, None, invalid_chunk_bytes, true)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput,
+                "invalid chunk bytes: {invalid_chunk_bytes}"
+            );
+            assert!(!output.exists());
+        }
+
+        // A sparse synthetic file tests the maximum archive geometry without
+        // reading or allocating 4 GiB. Validation must finish before samples.
+        let oversized = dir.path().join("sparse-too-many-chunks");
+        let handle = File::create(&oversized).unwrap();
+        handle
+            .set_len(MAX_CHUNKS as u64 * MIN_CHUNK_BYTES as u64 + 1)
+            .unwrap();
+        drop(handle);
+        assert_eq!(
+            create(&oversized, &output, None, MIN_CHUNK_BYTES, true)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!output.exists());
     }
 
     #[test]
