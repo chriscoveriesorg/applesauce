@@ -22,20 +22,31 @@ binary build. A failed builder blocks artifact hosting. Inspect checksums
 afterward. A green CI job does not prove native LZRAVEN/LZMESH filesystem
 decoding.
 
-The owner can push the validated tag from a local Git checkout, after
-reviewing `main` CI and the current package version:
+Tag creation must use the **qualified CI-green source commit**, even if
+`main` has moved to a newer commit with the same CLI version. The owner runs
+the fail-closed helper from the up-to-date fork checkout. The helper fetches
+`origin/main`, checks commit ancestry and the CLI package version at that SHA,
+requires successful exact-SHA main push CI, and rejects an existing tag.
+Without `--push` it creates no tag.
+
+For **v0.5.31**, the only authorized source is
+`1585dceb6c745cebf822588526ee5005255818c9`:
 
 ```sh
-git fetch origin main --tags
-git switch main
-git pull --ff-only origin main
-git tag applesauce-cli/v<CLI-VERSION>
-git push origin applesauce-cli/v<CLI-VERSION>
+bash hack/tag-cli-release.sh 0.5.31 1585dceb6c745cebf822588526ee5005255818c9
+bash hack/tag-cli-release.sh 0.5.31 1585dceb6c745cebf822588526ee5005255818c9 --push
 ```
 
-Replace `<CLI-VERSION>` with the actual version. The `Release` GitHub Actions
-workflow builds and publishes the matching GitHub release after its gates pass.
-Do not reuse an already-published version tag or force-move one.
+The `--push` action requires the owner's GitHub authentication. Equivalently,
+after independently checking source and CI, the exact underlying operation is
+`git tag applesauce-cli/v0.5.31 1585dceb6c745cebf822588526ee5005255818c9`
+followed by `git push origin refs/tags/applesauce-cli/v0.5.31`.
+Do not tag the current `main` HEAD by default. Never force-move a tag.
+
+The `Release` GitHub Actions workflow builds and publishes the matching GitHub
+release after its gates pass. Binary downloadability, both macOS architectures,
+installability, SHA-256 and provenance must be checked against the produced
+artifacts before declaring v0.5.31 shipped.
 
 Until a version is tagged and its release artifacts pass validation, the fork
 has a **release candidate only**, regardless of how many PRs or benchmarks
