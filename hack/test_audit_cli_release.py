@@ -196,8 +196,21 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("entry offset outside executable", run.stderr)
 
+    def test_rejects_entrypoint_overlapping_macho_load_commands(self):
+        # Header (32) + LC_BUILD_VERSION (24) + LC_MAIN (24) = 80 bytes.
+        for entry_offset in (0, 32, 64, 79):
+            with self.subTest(entry_offset=entry_offset):
+                self.make_archive("aarch64", ARCHES["aarch64"],
+                                  entry_offset=entry_offset)
+                self.log.unlink(missing_ok=True)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("entry offset overlaps load commands", run.stderr)
+                self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                     for c in self.calls()))
+
     def test_accepts_in_bounds_macho_entrypoint_and_hashes_full_binary(self):
-        self.make_archive("aarch64", ARCHES["aarch64"], entry_offset=64)
+        self.make_archive("aarch64", ARCHES["aarch64"], entry_offset=96)
         run = self.run_audit()
         self.assertEqual(run.returncode, 0, run.stderr)
         asset = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
