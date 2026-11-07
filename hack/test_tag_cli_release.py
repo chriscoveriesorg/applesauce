@@ -51,6 +51,9 @@ class TagCliReleaseTests(unittest.TestCase):
                           '  echo "simulated remote tag lookup failure" >&2\n'
                           '  exit 128\n'
                           'fi\n'
+                          'if [ "${FAIL_TAG_PUSH:-}" = 1 ] && [ "$1" = push ] && [ "$2" = origin ]; then\n'
+                          '  case "${3:-}" in refs/tags/*) echo "simulated tag push failure" >&2; exit 128 ;; esac\n'
+                          'fi\n'
                           f'exec "{realgit}" "$@"\n')
         gitbin.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
@@ -84,6 +87,20 @@ class TagCliReleaseTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "applesauce-cli/v0.5.32").stdout.strip(), self.sha)
         self.assertNotEqual(self.run_helper("0.5.32", self.sha, "--push").returncode, 0)
         self.assertIn(self.sha, self.git("ls-remote", "origin", "refs/tags/applesauce-cli/v0.5.32").stdout)
+
+    def test_failed_tag_push_cleans_only_its_local_ref_and_allows_retry(self):
+        self.env["FAIL_TAG_PUSH"] = "1"
+        result = self.run_helper("0.5.32", self.sha, "--push")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("removed the local tag", result.stderr)
+        self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+        self.assertEqual(self.git("ls-remote", "--tags", "origin",
+                                  "refs/tags/applesauce-cli/v0.5.32").stdout.strip(), "")
+        del self.env["FAIL_TAG_PUSH"]
+        result = self.run_helper("0.5.32", self.sha, "--push")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", "applesauce-cli/v0.5.32").stdout.strip(),
+                         self.sha)
 
     def test_refuses_existing_remote_tag_even_if_not_present_locally(self):
         self.git("tag", "applesauce-cli/v0.5.32", self.sha)
