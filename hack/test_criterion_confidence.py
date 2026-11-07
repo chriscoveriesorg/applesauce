@@ -90,6 +90,42 @@ class ConfidenceTests(unittest.TestCase):
         self.assertEqual(row["decode_ci95_upper_mib_per_s"], "125.0000")
         self.assertEqual(row["input_sha256"], "a" * 64)
 
+    def test_parses_recorded_macos_criterion_shape(self):
+        # Use checked-in read-only macOS 27.2 Criterion evidence, not just
+        # hand-constructed JSON, to catch changes to group paths and estimates.
+        source = (
+            Path(__file__).parent / "benchmarks" /
+            "2026-11-06-m1max-macos27.2" / "criterion"
+        )
+        group = (
+            source / "apple-buffer_standard_1048576_mixed-jsonl_whole" /
+            "lzraven-reused-scratch"
+        )
+        row = dict(self.row)
+        row.update(suite="standard", input_bytes="1048576",
+                   chunk_bytes="1048576")
+        for operation in ("encode", "decode"):
+            estimate = json.loads(
+                (group / operation / "new" / "estimates.json").read_text(
+                    encoding="utf-8"
+                )
+            )["median"]
+            nanoseconds = estimate["point_estimate"]
+            row[f"{operation}_median_ns"] = f"{nanoseconds:.5f}"
+            row[f"{operation}_mib_per_s"] = f"{1e9 / nanoseconds:.4f}"
+        self.rewrite_summary([row])
+        actual = confidence.confidence_rows(self.summary, source)
+        self.assertEqual(len(actual), 1)
+        for operation in ("encode", "decode"):
+            self.assertLessEqual(
+                float(actual[0][f"{operation}_ci95_lower_ns"]),
+                float(actual[0][f"{operation}_median_ns"]),
+            )
+            self.assertLessEqual(
+                float(actual[0][f"{operation}_median_ns"]),
+                float(actual[0][f"{operation}_ci95_upper_ns"]),
+            )
+
     def test_requires_exact_95_percent_finite_ordered_intervals(self):
         for lower, median, upper, level in (
             (1_000_000, 1_500_000, 2_000_000, 0.9),
