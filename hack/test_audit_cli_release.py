@@ -113,6 +113,16 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Mach-O CPU", run.stderr)
 
+    def test_executable_at_unexpected_path_is_refused(self):
+        self.make_archive(
+            "aarch64", ARCHES["aarch64"], name="other/applesauce",
+        )
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("unexpected executable path", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
+
     def test_dynamic_library_header_is_refused(self):
         self.make_archive("x86_64", ARCHES["x86_64"], filetype=6)
         self.assertIn("expected executable", self.run_audit().stderr)
