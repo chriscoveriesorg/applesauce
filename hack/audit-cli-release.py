@@ -55,6 +55,7 @@ def check_macho(archive, arch):
     # entry before certifying it, even though this auditor never extracts files.
     found_binary = False
     total_size = 0
+    seen_paths = set()
     try:
         with tarfile.open(archive, "r:*") as tar:
             for index, member in enumerate(tar):
@@ -69,6 +70,11 @@ def check_macho(archive, arch):
                 if (not name or name.startswith("/") or "\\" in name
                         or any(part in ("", ".", "..") for part in parts)):
                     raise AuditError(f"{archive.name}: unsafe archive member path")
+                # Duplicate paths are extraction-order dependent, even when
+                # neither entry is the executable. Refuse ambiguous archives.
+                if name in seen_paths:
+                    raise AuditError(f"{archive.name}: duplicate archive member path")
+                seen_paths.add(name)
                 if not (member.isfile() or member.isdir()):
                     raise AuditError(f"{archive.name}: unsafe tar member type")
                 if member.size < 0 or member.size > 128 * 1024 * 1024:
