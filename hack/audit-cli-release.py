@@ -114,6 +114,9 @@ def check_macho(archive, arch):
                 # non-executable archive members.
                 if member.mode & 0o7000:
                     raise AuditError(f"{archive.name}: unsafe archive member permissions")
+                # Installed regular files must not be modifiable by other users.
+                if member.isfile() and member.mode & 0o022:
+                    raise AuditError(f"{archive.name}: writable archive regular file")
                 if member.size < 0 or member.size > 128 * 1024 * 1024:
                     raise AuditError(f"{archive.name}: excessive member size")
                 total_size += member.size
