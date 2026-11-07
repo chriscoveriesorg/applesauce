@@ -21,11 +21,21 @@ if [[ "$version" == '0.5.31' && "$source_sha" != '1585dceb6c745cebf822588526ee50
   exit 1
 fi
 
-remote=$(git remote get-url origin)
-if [[ ! "$remote" =~ (^|[:/])chriscoveriesorg/applesauce(\.git)?$ ]]; then
-  echo 'origin must point to chriscoveriesorg/applesauce' >&2
+# Read the configured URL rather than git remote get-url, which applies
+# insteadOf rewrites and can obscure the origin the operator selected.
+remote=$(git config --get remote.origin.url) || {
+  echo 'origin must point to chriscoveriesorg/applesauce on github.com' >&2
   exit 1
-fi
+}
+case "$remote" in
+  https://github.com/chriscoveriesorg/applesauce|\
+  https://github.com/chriscoveriesorg/applesauce.git|\
+  git@github.com:chriscoveriesorg/applesauce|\
+  git@github.com:chriscoveriesorg/applesauce.git|\
+  ssh://git@github.com/chriscoveriesorg/applesauce|\
+  ssh://git@github.com/chriscoveriesorg/applesauce.git) ;;
+  *) echo 'origin must point to chriscoveriesorg/applesauce on github.com' >&2; exit 1 ;;
+esac
 
 git fetch --no-tags origin main >&2
 git cat-file -e "${source_sha}^{commit}"
@@ -46,11 +56,19 @@ if [[ "$actual_version" != "$version" ]]; then
 fi
 
 tag="applesauce-cli/v${version}"
-if git show-ref --verify --quiet "refs/tags/$tag" || \
-    git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-  echo "Tag $tag already exists, refusing to replace it" >&2
+if git show-ref --verify --quiet "refs/tags/$tag"; then
+  echo "Tag $tag already exists locally, refusing to replace it" >&2
   exit 1
 fi
+# Git's --exit-code uses 2 for a confirmed absent remote ref, and 0 for
+# present. A transport/auth failure (normally 128) is not evidence of absence.
+remote_tag_status=0
+git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || remote_tag_status=$?
+case "$remote_tag_status" in
+  0) echo "Tag $tag already exists remotely, refusing to replace it" >&2; exit 1 ;;
+  2) ;;
+  *) echo "Unable to verify remote tag absence (git exit $remote_tag_status)" >&2; exit 1 ;;
+esac
 
 runs=$(curl --fail --silent --show-error --location --retry 3 --max-time 30 \
   --header 'Accept: application/vnd.github+json' \
