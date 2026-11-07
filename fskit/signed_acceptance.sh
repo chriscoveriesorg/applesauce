@@ -263,6 +263,15 @@ verify_registered_extension() {
   local bundle="$1" out="$2" installed member
   test -x "$bundle/fskit/installed-module-witness" \
     || die "bundle lacks executable FSKit registered-module witness"
+  /usr/bin/codesign --verify --strict "$bundle/fskit/installed-module-witness" \
+    || die "registered-module witness has no valid Apple code signature"
+  local host_team witness_team
+  host_team="$(/usr/bin/sed -n 's/^TeamIdentifier=//p' "$out/host.identity.txt" | /usr/bin/head -n 1)"
+  witness_team="$(/usr/bin/codesign -dv --verbose=4 \
+    "$bundle/fskit/installed-module-witness" 2>&1 \
+    | /usr/bin/sed -n 's/^TeamIdentifier=//p' | /usr/bin/head -n 1)"
+  test -n "$host_team" && test "$witness_team" = "$host_team" \
+    || die "registered-module witness signature team differs from signed host"
   "$bundle/fskit/installed-module-witness" --installed-host \
     > "$out/registered-module.json" 2> "$out/registered-module-error.txt" \
     || die "FSClient cannot confirm the enabled installed ASCF extension; see $out/registered-module-error.txt"
@@ -473,6 +482,14 @@ PY
       "$out/fskit/InstalledModuleWitness.swift" \
       -o "$out/fskit/installed-module-witness" \
       || die "could not compile FSKit registered-module witness"
+    witness_identity="$(/usr/bin/python3 "$ROOT/fskit/signing_profile.py" \
+      --preflight-identity "$ASCFSKIT_TEAM_ID")" \
+      || die "cannot identify Apple Development certificate for registered-module witness"
+    /usr/bin/codesign --force --sign "$witness_identity" --timestamp=none \
+      "$out/fskit/installed-module-witness" \
+      || die "cannot sign FSKit registered-module witness with developer team"
+    /usr/bin/codesign --verify --strict "$out/fskit/installed-module-witness" \
+      || die "signed FSKit registered-module witness verification failed"
     "$out/fskit/installed-module-witness" --self-test \
       > "$out/installed-module-tests.log" 2>&1 \
       || die "FSKit installed-module witness regression failed"
