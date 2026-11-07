@@ -641,7 +641,9 @@ mod tests {
         fs::rename(&replacement, &source).unwrap();
         let error = open_checked_regular(&source, &before).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("changed between preflight and open"));
+        assert!(error
+            .to_string()
+            .contains("changed between preflight and open"));
 
         // A subsequent explicit operation is free to select the new file.
         let mut opened = open_regular(&source).unwrap();
