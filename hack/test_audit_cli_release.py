@@ -149,6 +149,23 @@ class AuditReleaseAssetsTests(unittest.TestCase):
             self.assertIn("refs/tags/applesauce-cli/v0.5.31", args)
             self.assertIn("chriscoveriesorg/applesauce/.github/workflows/applesauce-cli-release.yml", args)
 
+    def test_extra_archive_filename_token_is_refused_before_provenance(self):
+        for suffix in (".tar.xz", ".tar.gz"):
+            with self.subTest(suffix=suffix):
+                original = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+                renamed = self.downloads / (
+                    "applesauce-cli-v0.5.31-unexpected-aarch64-apple-darwin" + suffix
+                )
+                original.rename(renamed)
+                try:
+                    run = self.run_audit()
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertIn("expected exactly one aarch64 Apple archive", run.stderr)
+                    self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                         for c in self.calls()))
+                finally:
+                    renamed.rename(original)
+
     def test_wrong_cpu_fails(self):
         self.make_archive("aarch64", ARCHES["x86_64"])
         run = self.run_audit()
