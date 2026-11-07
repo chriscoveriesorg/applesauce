@@ -11,6 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parent
 SCRIPT = ROOT / "audit-cli-release.py"
 ARCHES = {"aarch64": 0x0100000C, "x86_64": 0x01000007}
+SUBTYPES = {"aarch64": 0, "x86_64": 3}
 
 
 class AuditReleaseAssetsTests(unittest.TestCase):
@@ -46,13 +47,27 @@ class AuditReleaseAssetsTests(unittest.TestCase):
 
     def make_archive(self, arch, cpu, *, symlink=False, filetype=2,
                      name="applesauce-cli/applesauce", mode=0o755,
-                     bad_load_size=False, extra_link=False, extra_members=()):
+                     bad_load_size=False, extra_link=False, extra_members=(),
+                     subtype=None, platform=1):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
+            if platform is None:
+                command = struct.pack("<II", 2, 8)  # no OS marker
+            elif platform == "legacy":
+                command = struct.pack("<4I", 0x24, 16, 0x000A0F00, 0x000A0F00)
+            else:
+                command = struct.pack(
+                    "<6I", 0x32, 7 if bad_load_size else 24,
+                    platform, 0x000B0000, 0x000B0000, 0,
+                )
+            default_subtype = next(
+                (SUBTYPES[arch] for arch, target in ARCHES.items() if cpu == target), 0
+            )
             data = (b"\xcf\xfa\xed\xfe"
-                    + struct.pack("<7I", cpu, 0, filetype, 1, 8, 0, 0)
-                    + struct.pack("<II", 2, 7 if bad_load_size else 8)
-                    + b"\0" * 64)
+                    + struct.pack("<7I", cpu,
+                                  default_subtype if subtype is None else subtype,
+                                  filetype, 1, len(command), 0, 0)
+                    + command + b"\0" * 64)
             member = tarfile.TarInfo(name)
             member.mode = mode
             if symlink:
@@ -122,6 +137,32 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         self.assertIn("unexpected executable path", run.stderr)
         self.assertFalse(any(c[:2] == ["release", "verify-asset"]
                              for c in self.calls()))
+
+    def test_rejects_nonportable_macho_cpu_subtypes(self):
+        for arch, cpu, subtype in (
+            ("aarch64", ARCHES["aarch64"], 2),  # arm64e, not baseline arm64
+            ("x86_64", ARCHES["x86_64"], 8),  # x86_64h, not baseline x86_64
+            ("x86_64", ARCHES["x86_64"], 0x01000003),  # unknown feature flags
+        ):
+            with self.subTest(arch=arch, subtype=subtype):
+                self.make_archive(arch, cpu, subtype=subtype)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("Mach-O CPU subtype", run.stderr)
+
+    def test_rejects_foreign_or_missing_macos_platform_marker(self):
+        for platform in (2, 6, None):  # iOS, Catalyst, missing marker
+            with self.subTest(platform=platform):
+                self.make_archive("aarch64", ARCHES["aarch64"], platform=platform)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("Mach-O", run.stderr)
+
+    def test_accepts_legacy_macos_marker_and_baseline_cpu_capability(self):
+        self.make_archive("x86_64", ARCHES["x86_64"],
+                          subtype=0x80000003, platform="legacy")
+        run = self.run_audit()
+        self.assertEqual(run.returncode, 0, run.stderr)
 
     def test_dynamic_library_header_is_refused(self):
         self.make_archive("x86_64", ARCHES["x86_64"], filetype=6)
