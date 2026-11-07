@@ -1,4 +1,5 @@
 """Synthetic, offline release-audit tests; no real GitHub assets or Macs used."""
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -48,7 +49,8 @@ class AuditReleaseAssetsTests(unittest.TestCase):
     def make_archive(self, arch, cpu, *, symlink=False, filetype=2,
                      name="applesauce-cli/applesauce", mode=0o755,
                      bad_load_size=False, extra_link=False, extra_members=(),
-                     subtype=None, platform=1):
+                     subtype=None, platform=1, build_tool_count=0,
+                     entry_offset=None):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
             if platform is None:
@@ -58,15 +60,18 @@ class AuditReleaseAssetsTests(unittest.TestCase):
             else:
                 command = struct.pack(
                     "<6I", 0x32, 7 if bad_load_size else 24,
-                    platform, 0x000B0000, 0x000B0000, 0,
+                    platform, 0x000B0000, 0x000B0000, build_tool_count,
                 )
+            if entry_offset is not None:
+                command += struct.pack("<IIQQ", 0x80000028, 24, entry_offset, 0)
             default_subtype = next(
                 (SUBTYPES[arch] for arch, target in ARCHES.items() if cpu == target), 0
             )
             data = (b"\xcf\xfa\xed\xfe"
                     + struct.pack("<7I", cpu,
                                   default_subtype if subtype is None else subtype,
-                                  filetype, 1, len(command), 0, 0)
+                                  filetype, 1 + (entry_offset is not None),
+                                  len(command), 0, 0)
                     + command + b"\0" * 64)
             member = tarfile.TarInfo(name)
             member.mode = mode
@@ -112,6 +117,12 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         self.assertIn('"aarch64"', run.stdout)
         self.assertIn('"x86_64"', run.stdout)
         self.assertIn("source_sha", run.stdout)
+        self.assertEqual(run.stdout.count('"executable_sha256"'), 2)
+        for arch in ARCHES:
+            asset = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
+            with tarfile.open(asset, "r:xz") as tar:
+                payload = tar.extractfile("applesauce-cli/applesauce").read()
+            self.assertIn(hashlib.sha256(payload).hexdigest(), run.stdout)
         calls = self.calls()
         self.assertEqual(len(calls), 5)
         self.assertEqual(sum(c[:2] == ["release", "verify-asset"] for c in calls), 2)
@@ -163,6 +174,31 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                           subtype=0x80000003, platform="legacy")
         run = self.run_audit()
         self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_rejects_malformed_macho_build_tool_count(self):
+        # LC_BUILD_VERSION declares an array of 8-byte build_tool_version
+        # records. A nonzero ntools with only the 24-byte header is malformed.
+        self.make_archive("aarch64", ARCHES["aarch64"], build_tool_count=1)
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("inconsistent Mach-O build tool table", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
+
+    def test_rejects_out_of_bounds_macho_entrypoint(self):
+        self.make_archive("aarch64", ARCHES["aarch64"], entry_offset=10_000)
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("entry offset outside executable", run.stderr)
+
+    def test_accepts_in_bounds_macho_entrypoint_and_hashes_full_binary(self):
+        self.make_archive("aarch64", ARCHES["aarch64"], entry_offset=64)
+        run = self.run_audit()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        asset = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+        with tarfile.open(asset, "r:xz") as tar:
+            executable = tar.extractfile("applesauce-cli/applesauce").read()
+        self.assertIn(hashlib.sha256(executable).hexdigest(), run.stdout)
 
     def test_dynamic_library_header_is_refused(self):
         self.make_archive("x86_64", ARCHES["x86_64"], filetype=6)
