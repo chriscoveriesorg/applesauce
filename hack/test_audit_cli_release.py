@@ -315,7 +315,9 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 self.log.unlink(missing_ok=True)
                 run = self.run_audit()
                 self.assertNotEqual(run.returncode, 0)
-                self.assertIn("invalid or writable executable mode", run.stderr)
+                # The earlier universal regular-file permission gate now
+                # rejects this archive before executable-specific checks.
+                self.assertIn("writable archive regular file", run.stderr)
                 self.assertFalse(any(c[:2] == ["release", "verify-asset"]
                                      for c in self.calls()))
 
