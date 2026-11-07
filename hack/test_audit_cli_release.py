@@ -340,6 +340,22 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 self.assertFalse(any(c[:2] == ["release", "verify-asset"]
                                      for c in self.calls()))
 
+    def test_directory_payload_is_refused_before_provenance(self):
+        path = self.downloads / (
+            "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+        )
+        with tarfile.open(path, "w:xz") as tar:
+            directory = tarfile.TarInfo("applesauce-cli/docs")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o755
+            directory.size = 1
+            tar.addfile(directory, io.BytesIO(b"x"))
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("nonempty archive directory entry", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
+
     def test_writable_archive_directory_is_refused_before_provenance(self):
         for mode in (0o775, 0o757, 0o777):
             with self.subTest(mode=oct(mode)):
