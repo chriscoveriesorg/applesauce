@@ -113,6 +113,11 @@ fn parse_logical_range(input: &str) -> Result<(u64, u64), String> {
 }
 
 fn open_regular(path: &Path) -> io::Result<File> {
+    // Reject devices, sockets and FIFOs before open() can interact with them.
+    // Descriptor validation below remains essential if a path is swapped.
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(invalid("archive input must be a regular file"));
+    }
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
