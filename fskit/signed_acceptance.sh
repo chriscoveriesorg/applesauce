@@ -279,7 +279,7 @@ case "$1" in
     test "$#" -eq 2 || die "manifest-check requires BUNDLE_DIR"
     # SHA-256 authentication is portable. Allow independent verification of
     # a signed Mac-generated handoff on Linux, including before transfer.
-    need shasum
+    need python3
     test -d "$2" || die "missing bundle directory: $2"
     out="$(mktemp -d /tmp/ascf-manifest-check.XXXXXXXX)"
     verify_package_manifest "$(cd "$2" && pwd -P)" "$out"
@@ -287,7 +287,7 @@ case "$1" in
     ;;
   bundle-code-check)
     test "$#" -eq 2 || die "bundle-code-check requires BUNDLE_DIR"
-    need shasum
+    need python3
     test -d "$2" || die "missing bundle directory: $2"
     bundle="$(cd "$2" && pwd -P)"
     out="$(mktemp -d /tmp/ascf-bundle-code.XXXXXXXX)"
