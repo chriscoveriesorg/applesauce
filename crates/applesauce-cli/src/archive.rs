@@ -118,6 +118,12 @@ fn open_regular(path: &Path) -> io::Result<File> {
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Err(invalid("archive input must be a regular file"));
     }
+    open_checked_regular(path)
+}
+
+// Kept separate so tests can reproduce a pathname swap AFTER the first
+// metadata check. All callers must still use open_regular for preflight.
+fn open_checked_regular(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -526,6 +532,32 @@ mod tests {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"ordinary archive input");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_fifo_is_rejected_after_a_successful_regular_file_preflight() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("formerly-regular");
+        let replacement = dir.path().join("replacement-fifo");
+        fs::write(&source, b"original").unwrap();
+        assert!(fs::symlink_metadata(&source).unwrap().file_type().is_file());
+
+        let raw = CString::new(replacement.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated path is owned by this disposable tempdir.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        // Simulate replacement between the metadata preflight and open().
+        // No writer exists for this FIFO. An O_RDONLY open without O_NONBLOCK
+        // would hang here; descriptor validation must reject the substituted
+        // object without returning a File.
+        fs::rename(&replacement, &source).unwrap();
+        assert_eq!(
+            open_checked_regular(&source).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]
