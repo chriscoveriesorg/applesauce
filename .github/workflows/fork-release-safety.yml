@@ -10,6 +10,8 @@ on:
       - '.github/fork-release-build-setup.yml'
       - 'hack/verify-fork-release.sh'
       - 'hack/test_fork_release.py'
+      - 'hack/audit-cli-release.py'
+      - 'hack/test_audit_cli_release.py'
       - 'hack/tag-cli-release.sh'
       - 'hack/test_tag_cli_release.py'
       - 'crates/**/Cargo.toml'
@@ -22,6 +24,8 @@ on:
       - '.github/fork-release-build-setup.yml'
       - 'hack/verify-fork-release.sh'
       - 'hack/test_fork_release.py'
+      - 'hack/audit-cli-release.py'
+      - 'hack/test_audit_cli_release.py'
       - 'hack/tag-cli-release.sh'
       - 'hack/test_tag_cli_release.py'
       - 'crates/**/Cargo.toml'
@@ -52,3 +56,4 @@ jobs:
         run: |
           python3 -m unittest discover -s hack -p 'test_fork_release.py' -v
           python3 -m unittest discover -s hack -p 'test_tag_cli_release.py' -v
+          python3 -m unittest discover -s hack -p 'test_audit_cli_release.py' -v
