@@ -181,8 +181,8 @@ jobs:
               for name in members:
                   target = bundle / name
                   target.parent.mkdir(parents=True, exist_ok=True)
-                  if name == "fskit/signed_acceptance.sh":
-                      target.write_bytes(script.read_bytes())
+                  if name in ("fskit/signed_acceptance.sh", "fskit/manifest_integrity.py"):
+                      target.write_bytes(Path(name).read_bytes())
                   else:
                       target.write_bytes(("synthetic:" + name).encode())
 
@@ -216,6 +216,21 @@ jobs:
               assert "helper differs from signed bundle" in changed.stderr
 
               bundled_script.write_bytes(script.read_bytes())
+              manifest()
+              restored = command("bundle-code-check")
+              assert restored.returncode == 0, restored.stdout + restored.stderr
+
+              # The separately executed manifest verifier is also a critical
+              # helper. Recomputed hashes cannot authorize altered verifier
+              # code from a different source checkout.
+              packaged_verifier = bundle / "fskit/manifest_integrity.py"
+              packaged_verifier.write_bytes(packaged_verifier.read_bytes() + b"\n# drift\n")
+              manifest()
+              assert command("manifest-check").returncode == 0
+              changed = command("bundle-code-check")
+              assert changed.returncode != 0, "accepted different manifest verifier"
+              assert "helper differs from signed bundle" in changed.stderr
+              packaged_verifier.write_bytes(Path("fskit/manifest_integrity.py").read_bytes())
               manifest()
               restored = command("bundle-code-check")
               assert restored.returncode == 0, restored.stdout + restored.stderr
