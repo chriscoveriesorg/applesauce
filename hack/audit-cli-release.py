@@ -44,7 +44,10 @@ def find_archives(directory):
             p for p in directory.iterdir()
             if p.is_file() and not p.is_symlink() and p.name.endswith(SUFFIXES)
             and p.name.endswith(tuple("-" + arch + "-apple-darwin" + s for s in SUFFIXES))
-            and p.name.startswith("applesauce-cli-v0.5.31-")
+            and p.name in tuple(
+                f"applesauce-cli-v0.5.31-{arch}-apple-darwin{s}"
+                for s in SUFFIXES
+            )
         ]
         if len(candidates) != 1:
             raise AuditError(
