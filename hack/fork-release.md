@@ -27,6 +27,11 @@ Tag creation must use the **qualified CI-green source commit**, even if
 the fail-closed helper from the up-to-date fork checkout. The helper fetches
 `origin/main`, checks commit ancestry and the CLI package version at that SHA,
 requires successful exact-SHA main push CI, and rejects an existing tag.
+Before any remote operation it also rejects configured Git URL rewrites
+(`insteadOf`/`pushInsteadOf`), extra origin URLs and `pushurl` overrides,
+and checks that the effective fetch and push destinations match the approved
+GitHub origin. Remove or isolate those settings in the release checkout
+rather than circumventing the guard.
 Without `--push` it creates no tag.
 
 For **v0.5.31**, the only authorized source is
