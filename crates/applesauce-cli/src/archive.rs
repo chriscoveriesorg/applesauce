@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 const DEFAULT_CHUNK_BYTES: usize = 1024 * 1024;
+const AUTO_SAMPLE_BYTES: usize = 64 * 1024;
 const HASH_BUFFER_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, clap::Args)]
@@ -26,6 +27,8 @@ enum Action {
     Create {
         source: PathBuf,
         output: PathBuf,
+        /// Choose Raven, Mesh or explicitly sample both (--codec auto).
+        /// Auto prefers Mesh unless Raven saves at least 20% of sample bytes.
         #[arg(long, value_enum, default_value = "lzraven")]
         codec: ArchiveCodec,
         /// Power-of-two chunk size, from 65536 to 8388608 bytes
@@ -53,13 +56,15 @@ enum Action {
 enum ArchiveCodec {
     Lzraven,
     Lzmesh,
+    Auto,
 }
 
-impl From<ArchiveCodec> for Codec {
-    fn from(value: ArchiveCodec) -> Self {
-        match value {
-            ArchiveCodec::Lzraven => Self::Lzraven,
-            ArchiveCodec::Lzmesh => Self::Lzmesh,
+impl ArchiveCodec {
+    fn selected(self) -> Option<Codec> {
+        match self {
+            Self::Lzraven => Some(Codec::Lzraven),
+            Self::Lzmesh => Some(Codec::Lzmesh),
+            Self::Auto => None,
         }
     }
 }
@@ -75,7 +80,7 @@ pub fn run(args: &Args) -> io::Result<()> {
         } => create(
             source,
             output,
-            (*codec).into(),
+            codec.selected(),
             *chunk_bytes,
             *allow_expansion,
         ),
@@ -160,10 +165,56 @@ fn hash_reader(source: &mut impl Read) -> io::Result<[u8; 32]> {
     Ok(digest.finalize().into())
 }
 
+/// Explicit opt-in. The deterministic first 64 KiB trial is bounded and
+/// verified for both codecs; it never infers native APFS decoder support.
+/// Favor the much faster Mesh encoder unless Raven is at least 20% smaller
+/// on the sample. The final whole-file savings guard still applies.
+fn prefer_auto_codec(raven_bytes: usize, mesh_bytes: usize) -> Codec {
+    if raven_bytes.saturating_mul(100) <= mesh_bytes.saturating_mul(80) {
+        Codec::Lzraven
+    } else {
+        Codec::Lzmesh
+    }
+}
+
+fn sample_auto_codec(source: &mut File, source_len: u64) -> io::Result<Codec> {
+    for codec in [Codec::Lzraven, Codec::Lzmesh] {
+        if !codec.is_supported() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("auto requires both {} and lzmesh buffer APIs", codec.name()),
+            ));
+        }
+    }
+    let sample_len = source_len.min(AUTO_SAMPLE_BYTES as u64) as usize;
+    let mut sample = vec![0_u8; sample_len];
+    source.read_exact(&mut sample)?;
+    source.rewind()?;
+
+    let mut encoded_lengths = [0_usize; 2];
+    for (index, codec) in [Codec::Lzraven, Codec::Lzmesh].into_iter().enumerate() {
+        let encoded = codec.encode(&sample)?;
+        // Reject a damaged or unavailable encoder before selecting any codec.
+        if codec.decode_exact(&encoded, sample_len)? != sample {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "auto codec sample failed exact-byte round-trip",
+            ));
+        }
+        encoded_lengths[index] = encoded.len();
+    }
+    let selected = prefer_auto_codec(encoded_lengths[0], encoded_lengths[1]);
+    eprintln!(
+        "archive --codec auto: {} sampled bytes, raven {} bytes, mesh {} bytes; selected {}",
+        sample_len, encoded_lengths[0], encoded_lengths[1], selected.name()
+    );
+    Ok(selected)
+}
+
 fn create(
     source_path: &Path,
     output: &Path,
-    codec: Codec,
+    requested_codec: Option<Codec>,
     chunk_bytes: usize,
     allow_expansion: bool,
 ) -> io::Result<()> {
@@ -172,6 +223,10 @@ fn create(
     if before.len() == 0 {
         return Err(invalid("archive source must be nonempty"));
     }
+    let codec = match requested_codec {
+        Some(codec) => codec,
+        None => sample_auto_codec(&mut source, before.len())?,
+    };
     if !codec.is_supported() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -420,6 +475,46 @@ mod tests {
     }
 
     #[test]
+    fn auto_choice_is_explicit_and_uses_a_deterministic_threshold() {
+        assert!(crate::Cli::try_parse_from([
+            "applesauce", "archive", "create", "input", "output", "--codec", "auto"
+        ])
+        .is_ok());
+        assert_eq!(ArchiveCodec::Lzraven.selected(), Some(Codec::Lzraven));
+        assert_eq!(ArchiveCodec::Lzmesh.selected(), Some(Codec::Lzmesh));
+        assert_eq!(ArchiveCodec::Auto.selected(), None);
+        assert_eq!(prefer_auto_codec(80, 100), Codec::Lzraven);
+        assert_eq!(prefer_auto_codec(81, 100), Codec::Lzmesh);
+        assert_eq!(prefer_auto_codec(100, 80), Codec::Lzmesh);
+        assert_eq!(prefer_auto_codec(usize::MAX, 1), Codec::Lzmesh);
+    }
+
+    #[test]
+    fn auto_archive_roundtrips_without_touching_source() {
+        if !Codec::Lzraven.is_supported() || !Codec::Lzmesh.is_supported() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("auto-source.jsonl");
+        let archive_path = dir.path().join("auto.ascf");
+        let restore_path = dir.path().join("auto-restored");
+        let data = b"{\"role\":\"user\",\"content\":\"generated fixture\"}\n".repeat(4096);
+        fs::write(&source_path, &data).unwrap();
+        let expected = {
+            let mut source = open_regular(&source_path).unwrap();
+            sample_auto_codec(&mut source, data.len() as u64).unwrap()
+        };
+        create(&source_path, &archive_path, None, 64 * 1024, false).unwrap();
+        let archive = open_regular(&archive_path).unwrap();
+        let reader = ArchiveReader::open(archive).unwrap();
+        assert_eq!(reader.codec(), expected);
+        verify(&archive_path).unwrap();
+        extract(&archive_path, &restore_path).unwrap();
+        assert_eq!(fs::read(&source_path).unwrap(), data);
+        assert_eq!(fs::read(&restore_path).unwrap(), data);
+    }
+
+    #[test]
     fn range_parser_enforces_unsigned_bounds_and_explicit_syntax() {
         for bad in [
             "",
@@ -499,7 +594,7 @@ mod tests {
                 b"{\"role\":\"user\",\"content\":\"repeatable generated archive test\"}\n"
                     .repeat(4500);
             fs::write(&source, &payload).unwrap();
-            create(&source, &archive, codec, 64 * 1024, false).unwrap();
+            create(&source, &archive, Some(codec), 64 * 1024, false).unwrap();
             verify(&archive).unwrap();
             extract(&archive, &restored).unwrap();
             assert_eq!(fs::read(&source).unwrap(), payload);
@@ -579,10 +674,10 @@ mod tests {
         fs::write(&empty, b"").unwrap();
         for codec in [Codec::Lzraven, Codec::Lzmesh] {
             let output = dir.path().join(format!("empty-{}.ascf", codec.name()));
-            assert!(create(&empty, &output, codec, 64 * 1024, false).is_err());
+            assert!(create(&empty, &output, Some(codec), 64 * 1024, false).is_err());
             assert!(!output.exists());
             let output = dir.path().join(format!("dir-{}.ascf", codec.name()));
-            assert!(create(dir.path(), &output, codec, 64 * 1024, false).is_err());
+            assert!(create(dir.path(), &output, Some(codec), 64 * 1024, false).is_err());
             assert!(!output.exists());
         }
     }
@@ -599,7 +694,7 @@ mod tests {
             for bad in [32 * 1024usize, 100_000, 96 * 1024, 16 * 1024 * 1024] {
                 let output = dir.path().join(format!("bad-{bad}.ascf"));
                 assert!(
-                    create(&source, &output, codec, bad, false).is_err(),
+                    create(&source, &output, Some(codec), bad, false).is_err(),
                     "chunk size {bad} must be refused"
                 );
                 assert!(!output.exists());
@@ -627,10 +722,10 @@ mod tests {
             fs::write(&source, &noise).unwrap();
             let output = dir.path().join("noise.ascf");
             // An archive that cannot shrink the data is refused by default.
-            assert!(create(&source, &output, codec, 64 * 1024, false).is_err());
+            assert!(create(&source, &output, Some(codec), 64 * 1024, false).is_err());
             assert!(!output.exists());
             // The explicit opt-in flag keeps it.
-            create(&source, &output, codec, 64 * 1024, true).unwrap();
+            create(&source, &output, Some(codec), 64 * 1024, true).unwrap();
             assert!(output.exists());
         }
     }
