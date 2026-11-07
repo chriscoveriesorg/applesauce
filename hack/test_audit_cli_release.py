@@ -44,10 +44,11 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         for arch, cpu in ARCHES.items():
             self.make_archive(arch, cpu)
 
-    def make_archive(self, arch, cpu, *, symlink=False):
+    def make_archive(self, arch, cpu, *, symlink=False, filetype=2):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
-            data = b"\xcf\xfa\xed\xfe" + struct.pack("<I", cpu) + b"\0" * 64
+            data = (b"\xcf\xfa\xed\xfe" + struct.pack("<I", cpu) + b"\0" * 4
+                    + struct.pack("<I", filetype) + b"\0" * 64)
             member = tarfile.TarInfo("applesauce-cli/applesauce")
             if symlink:
                 member.type = tarfile.SYMTYPE
@@ -92,6 +93,17 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         run = self.run_audit()
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Mach-O CPU", run.stderr)
+
+    def test_dynamic_library_header_is_refused(self):
+        self.make_archive("x86_64", ARCHES["x86_64"], filetype=6)
+        self.assertIn("expected executable", self.run_audit().stderr)
+
+    def test_symlinked_download_is_refused(self):
+        target = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+        real = self.path / "outside-archive.tar.xz"
+        target.rename(real)
+        target.symlink_to(real)
+        self.assertIn("exactly one aarch64", self.run_audit().stderr)
 
     def test_missing_or_duplicated_architecture_fails(self):
         (self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz").unlink()
