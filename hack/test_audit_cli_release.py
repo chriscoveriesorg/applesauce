@@ -274,6 +274,17 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("unsafe tar member type", run.stderr)
 
+    def test_privileged_executable_mode_is_refused_before_provenance(self):
+        for mode in (0o4755, 0o2755, 0o1755):
+            with self.subTest(mode=oct(mode)):
+                self.make_archive("aarch64", ARCHES["aarch64"], mode=mode)
+                self.log.unlink(missing_ok=True)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("unsafe archive member permissions", run.stderr)
+                self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                     for c in self.calls()))
+
     def test_executable_bit_required_for_installed_binary(self):
         self.make_archive("aarch64", ARCHES["aarch64"], mode=0o644)
         self.assertIn("invalid executable size or mode", self.run_audit().stderr)
