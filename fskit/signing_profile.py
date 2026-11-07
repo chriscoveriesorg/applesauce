@@ -214,7 +214,7 @@ def decode_profile_bytes(path, runner=subprocess.run):
             ["/usr/bin/security", "cms", "-D", "-i", str(path)],
             check=True, capture_output=True, timeout=PROFILE_DECODE_TIMEOUT)
         after = os.fstat(fd)
-        current = path.stat(follow_symlinks=False)
+        current = os.stat(path, follow_symlinks=False)
         identity = lambda value: (
             value.st_dev, value.st_ino, value.st_size,
             value.st_mtime_ns, value.st_ctime_ns)
