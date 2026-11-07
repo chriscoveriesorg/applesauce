@@ -100,8 +100,8 @@ jobs:
             "$BENCH_RESULTS/summary.csv" \
             | tee "$BENCH_RESULTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
           python3 hack/criterion-confidence.py \
-            "$BENCH_RESULTS/summary.csv" target/criterion \
-            "$BENCH_RESULTS/confidence.csv" \
+            "$APPLESAUCE_BENCH_MANIFEST" "$BENCH_RESULTS/summary.csv" \
+            target/criterion "$BENCH_RESULTS/confidence.csv" "$APPLESAUCE_BENCH_SUITE" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           printf '\nRaw Criterion estimates and samples are available in the downloadable artifact.\n' \
             >> "$GITHUB_STEP_SUMMARY"
