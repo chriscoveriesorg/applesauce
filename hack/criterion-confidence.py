@@ -9,8 +9,10 @@ import csv
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 _SUMMARY_PATH = Path(__file__).with_name("summarize-benchmarks.py")
 _SPEC = importlib.util.spec_from_file_location("applesauce_summary", _SUMMARY_PATH)
@@ -178,12 +180,30 @@ def validate_source(summary_csv: Path, manifest_csv: Path, suite: str):
 
 def write_confidence(summary_csv: Path, criterion: Path, output: Path,
                      manifest: Path, suite: str):
+    # This workflow uploads its evidence directory even after a failed run.
+    # A reused runner can retain a prior confidence.csv; remove it before
+    # validation so an incomplete current run cannot publish stale evidence.
+    output.unlink(missing_ok=True)
     validate_source(summary_csv, manifest, suite)
     rows = confidence_rows(summary_csv, criterion)
-    with output.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)
+
+    # Write a sibling temporary file and publish only after all CSV rows are
+    # emitted. Disk-full/serialization failures must not leave a partial
+    # confidence.csv in the always-uploaded evidence directory.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", newline="", encoding="utf-8", dir=output.parent,
+            prefix=f".{output.name}.", suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            writer = csv.DictWriter(stream, fieldnames=COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(temporary, output)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return len(rows)
 
 
