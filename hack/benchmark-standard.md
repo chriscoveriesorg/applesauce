@@ -118,8 +118,9 @@ python3 hack/summarize-benchmarks.py \
   "$APPLESAUCE_BENCH_MANIFEST" target/criterion \
   target/applesauce-bench/summary.csv
 python3 hack/criterion-confidence.py \
-  target/applesauce-bench/summary.csv target/criterion \
-  target/applesauce-bench/confidence.csv
+  "$APPLESAUCE_BENCH_MANIFEST" target/applesauce-bench/summary.csv \
+  target/criterion target/applesauce-bench/confidence.csv \
+  "$APPLESAUCE_BENCH_SUITE"
 ```
 
 If modifying a codec or its build flags, capture exact commit/runner metadata
@@ -132,7 +133,7 @@ reproducing it on a controlled host. The public hosted workflow intentionally
 **does not fail CI on percentage speed changes**. It fails on broken builds,
 round trips, missing reports or invalid contracts.
 
-Confidence intervals are the Criterion bootstrap **95% intervals for median execution time**, not cross-host uncertainty bounds. Throughput is the reciprocal of elapsed time, so its lower bound uses the **upper time bound** and its upper bound uses the **lower time bound**. The separate exporter refuses malformed estimates, missing cases, summary/estimate disagreement and non-95% bounds. It does not claim CPU utilization, allocation counts, or a speedup from one hosted run. Those require additional instrumentation and controlled repeats.
+Confidence intervals are the Criterion bootstrap **95% intervals for median execution time**, not cross-host uncertainty bounds. Throughput is the reciprocal of elapsed time, so its lower bound uses the **upper time bound** and its upper bound uses the **lower time bound**. The separate exporter independently validates the full golden-fixture matrix and every manifest field against the summary. It then refuses malformed estimates, missing cases, summary/estimate disagreement and non-95% bounds. It does not claim CPU utilization, allocation counts, or a speedup from one hosted run. Those require additional instrumentation and controlled repeats.
 
 The everyday command `applesauce benchmark-codecs --json` remains a quick
 diagnostic and schema-v1 capability contract for `compress-agent-sessions` and
