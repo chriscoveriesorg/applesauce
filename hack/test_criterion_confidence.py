@@ -127,6 +127,26 @@ class ConfidenceTests(unittest.TestCase):
                 self.row[field] = old
         self.rewrite_summary()
 
+    def test_rejects_unverified_or_inconsistent_source_rows(self):
+        for field, bad in (
+            ("verified_roundtrip", "false"),
+            ("schema_version", "2"),
+            ("fixture_version", "2"),
+            ("chunk_bytes", "4096"),
+            ("encoded_bytes", "0"),
+            ("encoded_bytes", "9999999"),
+            ("encoded_over_input_ratio", "0.5"),
+            ("encoded_over_input_ratio", "nan"),
+        ):
+            with self.subTest(field=field, bad=bad):
+                original = self.row[field]
+                self.row[field] = bad
+                self.rewrite_summary()
+                with self.assertRaisesRegex(ValueError, "unverified|wrong|invalid"):
+                    confidence.confidence_rows(self.summary, self.criterion)
+                self.row[field] = original
+        self.rewrite_summary()
+
     def test_rejects_duplicates_traversal_invalid_hash_and_schema(self):
         self.rewrite_summary([self.row, self.row])
         with self.assertRaisesRegex(ValueError, "duplicate"):
