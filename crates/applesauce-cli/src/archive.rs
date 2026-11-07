@@ -628,6 +628,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn swapped_symlink_is_rejected_after_regular_file_preflight() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected-archive");
+        let target = dir.path().join("other-archive");
+        fs::write(&source, b"selected bytes").unwrap();
+        fs::write(&target, b"other bytes").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
+
+        // A pathname may become a symlink after the initial regular-file
+        // check. O_NOFOLLOW must still refuse it without reading its target.
+        fs::remove_file(&source).unwrap();
+        symlink(&target, &source).unwrap();
+        let error = open_checked_regular(&source, &before).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read(&target).unwrap(), b"other bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn swapped_regular_file_is_rejected_after_metadata_preflight() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("selected-input");
