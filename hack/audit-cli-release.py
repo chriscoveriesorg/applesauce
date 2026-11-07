@@ -110,6 +110,10 @@ def check_macho(archive, arch):
                     regular_files.add(mac_path)
                 if not (member.isfile() or member.isdir()):
                     raise AuditError(f"{archive.name}: unsafe tar member type")
+                # Never certify privileged or sticky extraction modes, even on
+                # non-executable archive members.
+                if member.mode & 0o7000:
+                    raise AuditError(f"{archive.name}: unsafe archive member permissions")
                 if member.size < 0 or member.size > 128 * 1024 * 1024:
                     raise AuditError(f"{archive.name}: excessive member size")
                 total_size += member.size
