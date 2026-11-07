@@ -3,8 +3,11 @@ import csv
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 MODULE = Path(__file__).with_name("criterion-confidence.py")
 SPEC = importlib.util.spec_from_file_location("criterion_confidence", MODULE)
@@ -119,6 +122,54 @@ class ConfidenceTests(unittest.TestCase):
             writer.writerows(source_rows)
         self.rewrite_summary(summary_rows)
         return manifest, summary_rows
+
+    def test_cli_success_and_failure_remove_stale_evidence(self):
+        # Run the actual CLI, not only the in-process math functions.
+        # A self-hosted macOS runner may retain previous benchmark outputs,
+        # and the workflow uploads its artifact directory even on failure.
+        manifest, rows = self.complete_smoke()
+        command = [
+            sys.executable, str(MODULE), str(manifest), str(self.summary),
+            str(self.criterion), str(self.output), "smoke",
+        ]
+        success = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertIn(f"for {len(rows)} codec cases", success.stdout)
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            output_rows = list(csv.DictReader(stream))
+        self.assertEqual(len(output_rows), len(rows))
+
+        # Deliberately invalidate the manifest after a successful export.
+        # The subsequent command must remove the previously valid artifact.
+        with manifest.open(newline="", encoding="utf-8") as stream:
+            source = list(csv.DictReader(stream))
+        source[0]["input_sha256"] = "a" * 64
+        with manifest.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=confidence._summary.FIELDS
+            )
+            writer.writeheader()
+            writer.writerows(source)
+        failure = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(failure.returncode, 1)
+        self.assertIn("invalid or incomplete", failure.stderr)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
+
+    def test_partial_csv_write_never_publishes_evidence(self):
+        manifest, _ = self.complete_smoke()
+        # Simulate a disk-full/error after the header has been written.
+        self.output.write_text("previous run", encoding="utf-8")
+        with patch.object(
+            confidence.csv.DictWriter, "writerows",
+            side_effect=OSError("simulated interrupted output"),
+        ):
+            with self.assertRaisesRegex(OSError, "simulated interrupted"):
+                confidence.write_confidence(
+                    self.summary, self.criterion, self.output, manifest, "smoke"
+                )
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
 
     def test_full_matrix_provenance_gate(self):
         manifest, rows = self.complete_smoke()
