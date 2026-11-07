@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate Criterion median 95% intervals and emit a per-case confidence CSV.
 
-Usage: criterion-confidence.py summary.csv target/criterion confidence.csv
+Usage: criterion-confidence.py manifest.csv summary.csv target/criterion confidence.csv suite
 The existing summary.csv contract is unchanged. This tool is read-only except
 for the new output CSV, and never runs a codec or touches APFS attributes.
 """
@@ -17,6 +17,12 @@ _SPEC = importlib.util.spec_from_file_location("applesauce_summary", _SUMMARY_PA
 assert _SPEC and _SPEC.loader
 _summary = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_summary)
+
+_MATRIX_PATH = Path(__file__).with_name("validate-benchmark-matrix.py")
+_MATRIX_SPEC = importlib.util.spec_from_file_location("applesauce_matrix", _MATRIX_PATH)
+assert _MATRIX_SPEC and _MATRIX_SPEC.loader
+_matrix = importlib.util.module_from_spec(_MATRIX_SPEC)
+_MATRIX_SPEC.loader.exec_module(_matrix)
 
 IDENTITY = (
     "suite", "workload", "input_bytes", "input_sha256",
@@ -149,7 +155,33 @@ def confidence_rows(summary_csv: Path, criterion: Path):
     return output
 
 
-def write_confidence(summary_csv: Path, criterion: Path, output: Path):
+def validate_source(summary_csv: Path, manifest_csv: Path, suite: str):
+    """Require the complete golden-fixture matrix and unchanged source metadata.
+
+    The summary writer preserves manifest row order. Comparing each source
+    field prevents a shortened or altered summary from gaining certification.
+    """
+    _matrix.validate(manifest_csv, suite)
+    with manifest_csv.open(newline="", encoding="utf-8") as stream:
+        original = list(csv.DictReader(stream))
+    with summary_csv.open(newline="", encoding="utf-8") as stream:
+        reported = list(csv.DictReader(stream))
+    if len(original) != len(reported):
+        raise ValueError("summary is missing benchmark cases from source manifest")
+    for index, (source, result) in enumerate(zip(original, reported), 1):
+        for field in _summary.FIELDS:
+            if result.get(field) != source.get(field):
+                raise ValueError(
+                    f"summary row {index} differs from verified source manifest: {field}"
+                )
+
+
+def write_confidence(summary_csv: Path, criterion: Path, output: Path,
+                     manifest: Path | None = None, suite: str | None = None):
+    if (manifest is None) != (suite is None):
+        raise ValueError("manifest and benchmark suite must be supplied together")
+    if manifest is not None:
+        validate_source(summary_csv, manifest, suite)
     rows = confidence_rows(summary_csv, criterion)
     with output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=COLUMNS)
@@ -159,11 +191,14 @@ def write_confidence(summary_csv: Path, criterion: Path, output: Path):
 
 
 def main():
-    if len(sys.argv) != 4:
+    if len(sys.argv) != 6:
         print(__doc__, file=sys.stderr)
         return 2
     try:
-        count = write_confidence(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
+        count = write_confidence(
+            Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]),
+            Path(sys.argv[1]), sys.argv[5],
+        )
     except (OSError, ValueError, KeyError, TypeError, OverflowError, json.JSONDecodeError) as exc:
         print(f"invalid or incomplete Criterion confidence evidence: {exc}", file=sys.stderr)
         return 1
