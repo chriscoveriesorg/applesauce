@@ -146,6 +146,18 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 self.assertNotEqual(run.returncode, 0)
                 self.assertIn("unsafe archive member path", run.stderr)
 
+    def test_duplicate_nonbinary_archive_path_is_refused(self):
+        path = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+        with tarfile.open(path, "w:xz") as tar:
+            for content in (b"first", b"second"):
+                member = tarfile.TarInfo("applesauce-cli/README")
+                member.size = len(content)
+                tar.addfile(member, io.BytesIO(content))
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("duplicate archive member path", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"] for c in self.calls()))
+
     def test_secondary_symlink_in_archive_is_refused(self):
         self.make_archive("aarch64", ARCHES["aarch64"], extra_link=True)
         run = self.run_audit()
