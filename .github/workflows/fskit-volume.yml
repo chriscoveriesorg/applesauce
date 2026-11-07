@@ -281,6 +281,12 @@ jobs:
           assert kind and info.f_bsize > 0, "fstatfs returned invalid VFS identity"
           print("Darwin descriptor-bound VFS inspection:", kind, "block size", info.f_bsize)
           PY
+      - name: Compile authoritative installed-module witness without provisioning
+        run: |
+          xcrun swiftc -parse-as-library -swift-version 5 -warnings-as-errors \
+            fskit/InstalledModuleWitness.swift \
+            -o "$RUNNER_TEMP/ascf-installed-module-witness"
+          "$RUNNER_TEMP/ascf-installed-module-witness" --self-test
       - name: Validate signed FSKit handoff and Finder acceptance scripts
         run: |
           bash -n fskit/signed_acceptance.sh

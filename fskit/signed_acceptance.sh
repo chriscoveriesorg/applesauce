@@ -204,6 +204,8 @@ build-tools.txt
 NEXT-STEPS.txt
 fskit/signed_acceptance.sh
 fskit/manifest_integrity.py
+fskit/InstalledModuleWitness.swift
+fskit/installed-module-witness
 fskit/verify_mount.py
 fskit/finder_mount_witness.py
 fskit/unmount_acceptance.py
@@ -252,6 +254,67 @@ require_matching_bundle_helper() {
     /usr/bin/cmp -s "$ROOT/fskit/$member" "$bundle/fskit/$member" \
       || die "acceptance helper differs from signed bundle: $member; run the bundle's fskit/signed_acceptance.sh instead"
   done
+}
+# Inspect the authoritative FSClient registry, not just the signed app file.
+# App copies can retain the same bundle ID while macOS dispatches an older
+# registered extension. Compare the actual registered host's signed contents
+# with the manifest-covered package before collecting mounted acceptance.
+verify_registered_extension() {
+  local bundle="$1" out="$2" installed member
+  test -x "$bundle/fskit/installed-module-witness" \
+    || die "bundle lacks executable FSKit registered-module witness"
+  "$bundle/fskit/installed-module-witness" --installed-host \
+    > "$out/registered-module.json" 2> "$out/registered-module-error.txt" \
+    || die "FSClient cannot confirm the enabled installed ASCF extension; see $out/registered-module-error.txt"
+  installed="$(/usr/bin/python3 - "$out/registered-module.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+raw = Path(sys.argv[1]).read_bytes()
+if len(raw) > 4096:
+    sys.exit("registered-module evidence exceeds bound")
+try:
+    data = json.loads(raw)
+except (ValueError, UnicodeDecodeError) as error:
+    sys.exit("invalid registered-module JSON: " + str(error))
+if (not isinstance(data, dict)
+        or data.get("schema_version") != 1
+        or data.get("bundle_id") != "org.chriscoveries.applesauce.ascfhost.ascfextension"
+        or data.get("enabled") is not True):
+    sys.exit("FSKit registered-module identity mismatch")
+host = data.get("installed_host")
+module = data.get("module_url")
+if not isinstance(host, str) or not isinstance(module, str):
+    sys.exit("missing installed host or extension path")
+if any(c in host + module for c in "\x00\r\n") or not host.startswith("/"):
+    sys.exit("unsafe installed FSKit module path")
+if module != host + "/Contents/Extensions/ASCFExtension.appex":
+    sys.exit("FSKit registered-module path does not belong to installed host")
+print(host)
+PY
+)" || die "installed ASCF module witness has invalid paths"
+  test -d "$installed" && test ! -L "$installed" \
+    || die "registered ASCF host path missing or symlinked: $installed"
+  /bin/mkdir "$out/installed-signature"
+  verify_host "$installed" "$out/installed-signature" "$bundle"
+  for member in \
+    Contents/Info.plist \
+    Contents/MacOS/ASCFHost \
+    Contents/embedded.provisionprofile \
+    Contents/_CodeSignature/CodeResources \
+    Contents/Extensions/ASCFExtension.appex/Contents/Info.plist \
+    Contents/Extensions/ASCFExtension.appex/Contents/MacOS/ASCFExtension \
+    Contents/Extensions/ASCFExtension.appex/Contents/embedded.provisionprofile \
+    Contents/Extensions/ASCFExtension.appex/Contents/_CodeSignature/CodeResources; do
+    /usr/bin/cmp -s "$bundle/ASCFHost.app/$member" "$installed/$member" \
+      || die "registered FSKit installation differs from signed handoff: $member"
+  done
+  "$bundle/fskit/installed-module-witness" --installed-host \
+    > "$out/registered-module-final.json" 2> "$out/registered-module-final-error.txt" \
+    || die "installed ASCF module disappeared during signature verification"
+  /usr/bin/cmp -s "$out/registered-module.json" "$out/registered-module-final.json" \
+    || die "FSKit module registration changed during installed signature comparison"
 }
 # Stamp successful mounted readbacks with unique run identities. The
 # unmount verifier binds to that exact first readback; a reused JSON report
@@ -320,6 +383,7 @@ case "$1" in
     verify_package_manifest "$bundle" "$out"
     require_matching_bundle_helper "$bundle"
     verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    verify_registered_extension "$bundle" "$out"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-before.txt"
     # -F selects the registered FSKit module, avoiding mount_ascf helper
@@ -404,6 +468,14 @@ PY
     # The owner can run acceptance from the copied bundle without cloning
     # this repository or installing a Rust toolchain on the destination Mac.
     /bin/mkdir "$out/fskit"
+    /bin/cp "$ROOT/fskit/InstalledModuleWitness.swift" "$out/fskit/InstalledModuleWitness.swift"
+    /usr/bin/xcrun swiftc -parse-as-library -swift-version 5 -warnings-as-errors \
+      "$out/fskit/InstalledModuleWitness.swift" \
+      -o "$out/fskit/installed-module-witness" \
+      || die "could not compile FSKit registered-module witness"
+    "$out/fskit/installed-module-witness" --self-test \
+      > "$out/installed-module-tests.log" 2>&1 \
+      || die "FSKit installed-module witness regression failed"
     /bin/cp "$ROOT/fskit/signed_acceptance.sh" "$out/fskit/signed_acceptance.sh"
     /bin/cp "$ROOT/fskit/manifest_integrity.py" "$out/fskit/manifest_integrity.py"
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
@@ -597,6 +669,7 @@ PY
     verify_package_manifest "$bundle" "$out"
     require_matching_bundle_helper "$bundle"
     verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    verify_registered_extension "$bundle" "$out"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-before.txt"
     /usr/bin/python3 "$bundle/fskit/verify_mount.py" \
@@ -684,6 +757,7 @@ PY
     verify_package_manifest "$bundle" "$out"
     require_matching_bundle_helper "$bundle"
     verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    verify_registered_extension "$bundle" "$out"
     /usr/bin/python3 "$bundle/fskit/acceptance_evidence.py" \
       --bundle "$bundle" --codec "$codec" --first "$4" \
       --unmounted "$5" --remounted "$6" --refusal "$7" --replacement "$8" \
@@ -700,6 +774,7 @@ PY
     verify_package_manifest "$bundle" "$out"
     require_matching_bundle_helper "$bundle"
     verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    verify_registered_extension "$bundle" "$out"
     /usr/bin/python3 "$bundle/fskit/acceptance_evidence.py" --both \
       --bundle "$bundle" \
       --raven-first "$3" --raven-unmounted "$4" \
@@ -719,6 +794,7 @@ PY
     verify_package_manifest "$bundle" "$out"
     require_matching_bundle_helper "$bundle"
     verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    verify_registered_extension "$bundle" "$out"
     /usr/bin/python3 "$bundle/fskit/replacement_acceptance.py" stage "$bundle" "$3"
     ;;
   replacement-check)
@@ -750,6 +826,7 @@ PY
     verify_package_manifest "$bundle" "$out"
     require_matching_bundle_helper "$bundle"
     verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    verify_registered_extension "$bundle" "$out"
     if ! /usr/bin/python3 "$bundle/fskit/replacement_acceptance.py" check "$2" "$3" "$4" > "$out/replacement.json"; then
       die "replacement refusal failed; staged archive may be replaced; see $out"
     fi
@@ -766,6 +843,7 @@ PY
     verify_package_manifest "$bundle" "$out"
     require_matching_bundle_helper "$bundle"
     verify_host "$bundle/ASCFHost.app" "$out" "$bundle"
+    verify_registered_extension "$bundle" "$out"
     /usr/bin/sw_vers > "$out/macos.txt"
     /sbin/mount > "$out/mounts-after-unmount.txt"
     /usr/bin/python3 "$bundle/fskit/unmount_acceptance.py" \
