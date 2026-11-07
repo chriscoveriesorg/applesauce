@@ -31,13 +31,28 @@ class TagCliReleaseTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-m", "generated source")
         self.sha = self.git("rev-parse", "HEAD").stdout.strip()
-        self.git("remote", "add", "origin", str(remote))
+        # Use the canonical origin URL; rewrite only Git transport to the
+        # generated local bare repository, so tests never access the network.
+        self.git("remote", "add", "origin", "https://github.com/chriscoveriesorg/applesauce.git")
+        self.git("config", f"url.file://{remote}.insteadOf",
+                 "https://github.com/chriscoveriesorg/applesauce.git")
         self.git("push", "-u", "origin", "main")
         bindir = base / "bin"
         bindir.mkdir()
         curl = bindir / "curl"
         curl.write_text('#!/bin/sh\nprintf "%s\\n" "$MOCK_CI"\n')
         curl.chmod(0o755)
+        # Simulate an authenticated remote lookup failure without changing
+        # any real Git ref or touching a network service.
+        gitbin = bindir / "git"
+        realgit = subprocess.check_output(["which", "git"], text=True).strip()
+        gitbin.write_text('#!/bin/sh\\n'
+                          'if [ "${FAIL_TAG_LOOKUP:-}" = 1 ] && [ "$1" = ls-remote ]; then\\n'
+                          '  echo "simulated remote tag lookup failure" >&2\\n'
+                          '  exit 128\\n'
+                          'fi\\n'
+                          f'exec "{realgit}" "$@"\\n')
+        gitbin.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         self.set_green(True)
 
@@ -81,6 +96,23 @@ class TagCliReleaseTests(unittest.TestCase):
         result = self.run_helper("0.5.32", self.sha)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("origin must point", result.stderr)
+
+    def test_rejects_lookalike_origin_host(self):
+        for origin in ("https://attacker.invalid/chriscoveriesorg/applesauce.git",
+                       "https://github.com.attacker.invalid/chriscoveriesorg/applesauce.git",
+                       "ssh://git@attacker.invalid/chriscoveriesorg/applesauce.git"):
+            self.git("remote", "set-url", "origin", origin)
+            result = self.run_helper("0.5.32", self.sha, "--push")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("origin must point", result.stderr)
+            self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+
+    def test_fails_closed_when_remote_tag_lookup_fails(self):
+        self.env["FAIL_TAG_LOOKUP"] = "1"
+        result = self.run_helper("0.5.32", self.sha, "--push")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unable to verify remote tag absence", result.stderr)
+        self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
 
     def test_rejects_unqualified_source_or_version(self):
         for version, sha in [("0.5.31", self.sha), ("0.5.32", "f" * 40),
