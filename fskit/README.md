@@ -96,7 +96,24 @@ linker behaviour even when the Git working tree is clean. The manifest-covered
 `build-tools.txt` records their SHA-256 values or explicit absence, without
 publishing local paths or file contents. The package command compares this
 witness before and after the signed build, refusing altered, symlinked or
-nonregular configuration files. The toolchain `--self-test` command returns
+nonregular configuration files.
+
+The portable `manifest-check` command now authenticates each required
+signed-handoff member using a pinned bundle directory and no-follow file
+descriptors. It rejects symlinked parent directories, FIFOs, duplicate or
+unsafe SHA256SUMS entries, changed files during hashing, and mismatched
+digests without running `shasum -c` against operator-controlled paths.
+The SHA256SUMS file itself is opened relative to the same pinned root,
+bounded, and inspected as a regular file. `bundle-code-check` separately
+compares both executable acceptance helpers, the shell entrypoint and its
+Python manifest verifier, with the checkout before accepting evidence.
+Package generation runs the same verifier's portable self-tests.
+
+These manifest checks protect the transferred package against accidental
+modification and unsafe pathname reads. The manifest is not a cryptographic
+signature of an independently trusted publisher. The signed host/extension,
+matching restricted provisioning profiles and actual mounted readbacks
+remain separate acceptance requirements. The toolchain `--self-test` command returns
 a failing process status when tests fail, so CI can enforce these checks.
 This evidence covers build inputs and does not establish signed mount acceptance.
 
