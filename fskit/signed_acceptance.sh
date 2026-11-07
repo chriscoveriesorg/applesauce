@@ -531,8 +531,13 @@ PY
     cat > "$out/NEXT-STEPS.txt" <<'STEPS'
 These files are synthetic. Preserve the originals and the signed app.
 1. Copy this entire folder onto an authorized disposable macOS 27+ Mac.
-2. Install ASCFHost.app and enable its extension in System Settings >
-   General > Login Items & Extensions > File System Extensions.
+2. Install THIS signed ASCFHost.app and enable its extension in System
+   Settings > General > Login Items & Extensions > File System Extensions.
+   The acceptance helper now consults FSClient's live installed registry and
+   compares the registered host/extension signatures, provisioning profiles
+   and binary bytes against this exact handoff. A different installed copy or
+   stale registration blocks acceptance. Resolve such registrations through
+   normal installation/System Settings, never private daemon edits.
    For a second Terminal-driven FSKit mount path, run:
    bash fskit/signed_acceptance.sh cli-mount . lzmesh
    It uses a NEW private /private/tmp mountpoint and proves actual ascf

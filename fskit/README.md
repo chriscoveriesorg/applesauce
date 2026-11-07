@@ -132,6 +132,27 @@ publishing a volume under `/Volumes`, where Finder and ordinary apps can
 read the restored file. The host shows the resulting path and can reveal it
 in Finder. The original source path and attributes stay untouched.
 
+Before mounting, the host now examines the authoritative
+`FSClient.installedExtensions` registry entry for the exact ASCF bundle ID.
+The selected module's URL must resolve to
+`Contents/Extensions/ASCFExtension.appex` **inside the running host app**.
+A different registered app location, disabled module or ambiguous duplicate
+blocks the mount before FSKit opens any archive. This catches stale extension
+registration after an app is copied, updated or re-signed. Resolve conflicting
+installations and enable the intended module in System Settings; do not edit
+private FSKit registration files or restart privileged services as a workaround.
+
+The packaged signed acceptance adds an independent registry witness compiled
+against the macOS FSKit SDK. It obtains the active module URL, verifies the
+installed host and extension's Apple signatures and restricted entitlements,
+and compares their executable, signature, profile and plist bytes against the
+manifest-covered signed bundle. It rechecks the registry after comparison.
+This proof binds signed readback evidence to the **installed module macOS
+actually selects**, rather than a different signed app carried in the handoff.
+An unregistered, stale or different installed copy fails before readback.
+This is a read-only preflight; only a real physical mount and independent review
+can complete FSKit acceptance.
+
 Provisioning must authorize both `com.apple.developer.fskit.fsmodule`
 (for the extension) and `com.apple.developer.fskit.mount` (for the host).
 Run `bash fskit/signed_acceptance.sh preflight` before compiling. It checks
@@ -196,7 +217,8 @@ directory under `/private/tmp`. The `-F` flag selects the registered FSKit
 module instead of a traditional `mount_ascf` helper; `-k` refuses symlink
 substitution of the mountpoint, and `-r` requests a read-only kernel mount.
 The script checks the signed host and extension, provisioning profiles,
-handoff manifest and selected synthetic archive before the mount request.
+handoff manifest, the **actually registered installed extension and its
+binary identity**, and the selected synthetic archive before the mount request.
 It retains the exact invocation in `mount-command.txt`, together with
 `mount-command.log`. An independent reader then verifies actual ASCF VFS
 identity, whole-file SHA-256, unaligned/random reads, EOF and denied write-opens.
