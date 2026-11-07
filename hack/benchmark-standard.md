@@ -89,6 +89,7 @@ Artifacts include:
 | `matrix-check.txt` | Independent fail-closed check that every expected codec, workload, size, layout and scratch mode was actually measured |
 | `criterion/**/new/estimates.json` and `sample.json` | Raw Criterion timing estimates, confidence intervals and samples for encode and decode |
 | `summary.csv` | Full-case median ns and derived encode/decode MiB/s joined by exact case key |
+| `confidence.csv` | Every case's validated 95% median-time interval and correctly inverted encode/decode MiB/s bounds; `summary.csv` schema unchanged |
 | `summary.md` | Small same-host Chat JSONL vs entropy comparison |
 | `criterion.log` | Complete runner output, including measurement warnings and skips |
 
@@ -116,6 +117,9 @@ python3 hack/validate-benchmark-matrix.py \
 python3 hack/summarize-benchmarks.py \
   "$APPLESAUCE_BENCH_MANIFEST" target/criterion \
   target/applesauce-bench/summary.csv
+python3 hack/criterion-confidence.py \
+  target/applesauce-bench/summary.csv target/criterion \
+  target/applesauce-bench/confidence.csv
 ```
 
 If modifying a codec or its build flags, capture exact commit/runner metadata
@@ -127,6 +131,8 @@ small changes. Report the regression/improvement only after independently
 reproducing it on a controlled host. The public hosted workflow intentionally
 **does not fail CI on percentage speed changes**. It fails on broken builds,
 round trips, missing reports or invalid contracts.
+
+Confidence intervals are the Criterion bootstrap **95% intervals for median execution time**, not cross-host uncertainty bounds. Throughput is the reciprocal of elapsed time, so its lower bound uses the **upper time bound** and its upper bound uses the **lower time bound**. The separate exporter refuses malformed estimates, missing cases, summary/estimate disagreement and non-95% bounds. It does not claim CPU utilization, allocation counts, or a speedup from one hosted run. Those require additional instrumentation and controlled repeats.
 
 The everyday command `applesauce benchmark-codecs --json` remains a quick
 diagnostic and schema-v1 capability contract for `compress-agent-sessions` and
