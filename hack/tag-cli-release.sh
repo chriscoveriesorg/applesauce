@@ -83,7 +83,18 @@ fi
 printf 'Qualified %s at %s; main CI passes.\n' "$tag" "$source_sha"
 if [[ "$mode" == '--push' ]]; then
   git tag "$tag" "$source_sha"
-  git push origin "refs/tags/$tag"
+  if ! git push origin "refs/tags/$tag"; then
+    # Leave no orphan local tag after failed authentication/transport. The
+    # expected old SHA makes cleanup conditional, preserving a ref changed
+    # concurrently by a different process. A push whose reply was lost may
+    # have succeeded remotely; the next invocation will detect that tag.
+    if ! git update-ref -d "refs/tags/$tag" "$source_sha"; then
+      echo "Push failed; local tag $tag changed and needs manual inspection" >&2
+    else
+      echo "Push failed; removed the local tag created by this attempt" >&2
+    fi
+    exit 1
+  fi
 else
   echo 'Read-only check complete. Add --push for owner-authenticated tag creation.'
 fi
