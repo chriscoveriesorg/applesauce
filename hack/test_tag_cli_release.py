@@ -31,32 +31,43 @@ class TagCliReleaseTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-m", "generated source")
         self.sha = self.git("rev-parse", "HEAD").stdout.strip()
-        # Use the canonical origin URL; rewrite only Git transport to the
-        # generated local bare repository, so tests never access the network.
+        # The real origin is canonical. A test-only Git shim routes transport
+        # to a disposable bare repo, without rewriting the Git configuration.
+        self.remote = remote
         self.git("remote", "add", "origin", "https://github.com/chriscoveriesorg/applesauce.git")
-        self.git("config", f"url.file://{remote}.insteadOf",
-                 "https://github.com/chriscoveriesorg/applesauce.git")
-        self.git("push", "-u", "origin", "main")
+        self.git("push", str(remote), "main")
         bindir = base / "bin"
         bindir.mkdir()
         curl = bindir / "curl"
         curl.write_text('#!/bin/sh\nprintf "%s\\n" "$MOCK_CI"\n')
         curl.chmod(0o755)
-        # Simulate an authenticated remote lookup failure without changing
-        # any real Git ref or touching a network service.
+        # All network-shaped Git operations are intercepted. Unexpected
+        # transport calls fail closed instead of accessing GitHub.
         gitbin = bindir / "git"
         realgit = subprocess.check_output(["which", "git"], text=True).strip()
-        gitbin.write_text('#!/bin/sh\n'
-                          'if [ "${FAIL_TAG_LOOKUP:-}" = 1 ] && [ "$1" = ls-remote ]; then\n'
-                          '  echo "simulated remote tag lookup failure" >&2\n'
-                          '  exit 128\n'
-                          'fi\n'
-                          'if [ "${FAIL_TAG_PUSH:-}" = 1 ] && [ "$1" = push ] && [ "$2" = origin ]; then\n'
-                          '  case "${3:-}" in refs/tags/*) echo "simulated tag push failure" >&2; exit 128 ;; esac\n'
-                          'fi\n'
-                          f'exec "{realgit}" "$@"\n')
+        gitbin.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = fetch ] && [ "$2" = --no-tags ] && [ "$3" = origin ]; then\n'
+            f'  exec "{realgit}" fetch --no-tags "$TEST_REMOTE" "main:refs/remotes/origin/main"\n'
+            'fi\n'
+            'if [ "$1" = ls-remote ] && [ "$4" = origin ]; then\n'
+            '  if [ "${FAIL_TAG_LOOKUP:-}" = 1 ]; then\n'
+            '    echo "simulated remote tag lookup failure" >&2; exit 128\n'
+            '  fi\n'
+            f'  exec "{realgit}" ls-remote "$2" "$3" "$TEST_REMOTE" "$5"\n'
+            'fi\n'
+            'if [ "$1" = push ] && [ "$2" = origin ]; then\n'
+            '  if [ "${FAIL_TAG_PUSH:-}" = 1 ]; then\n'
+            '    echo "simulated tag push failure" >&2; exit 128\n'
+            '  fi\n'
+            f'  exec "{realgit}" push "$TEST_REMOTE" "$3"\n'
+            'fi\n'
+            'case "$1" in fetch|ls-remote|push) echo "unmocked Git transport" >&2; exit 125 ;; esac\n'
+            f'exec "{realgit}" "$@"\n'
+        )
         gitbin.chmod(0o755)
-        self.env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+        self.env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
+                        TEST_REMOTE=str(remote))
         self.set_green(True)
 
     def git(self, *args, cwd=None):
@@ -86,7 +97,7 @@ class TagCliReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.git("rev-parse", "applesauce-cli/v0.5.32").stdout.strip(), self.sha)
         self.assertNotEqual(self.run_helper("0.5.32", self.sha, "--push").returncode, 0)
-        self.assertIn(self.sha, self.git("ls-remote", "origin", "refs/tags/applesauce-cli/v0.5.32").stdout)
+        self.assertIn(self.sha, self.git("ls-remote", str(self.remote), "refs/tags/applesauce-cli/v0.5.32").stdout)
 
     def test_failed_tag_push_cleans_only_its_local_ref_and_allows_retry(self):
         self.env["FAIL_TAG_PUSH"] = "1"
@@ -94,7 +105,7 @@ class TagCliReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("removed the local tag", result.stderr)
         self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
-        self.assertEqual(self.git("ls-remote", "--tags", "origin",
+        self.assertEqual(self.git("ls-remote", "--tags", str(self.remote),
                                   "refs/tags/applesauce-cli/v0.5.32").stdout.strip(), "")
         del self.env["FAIL_TAG_PUSH"]
         result = self.run_helper("0.5.32", self.sha, "--push")
@@ -104,7 +115,7 @@ class TagCliReleaseTests(unittest.TestCase):
 
     def test_refuses_existing_remote_tag_even_if_not_present_locally(self):
         self.git("tag", "applesauce-cli/v0.5.32", self.sha)
-        self.git("push", "origin", "refs/tags/applesauce-cli/v0.5.32")
+        self.git("push", str(self.remote), "refs/tags/applesauce-cli/v0.5.32")
         self.git("tag", "-d", "applesauce-cli/v0.5.32")
         self.assertNotEqual(self.run_helper("0.5.32", self.sha, "--push").returncode, 0)
 
@@ -123,6 +134,36 @@ class TagCliReleaseTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("origin must point", result.stderr)
             self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+
+    def test_rejects_instead_of_rewrite_before_tag_creation(self):
+        self.git("config", f"url.file://{self.remote}.insteadOf",
+                 "https://github.com/chriscoveriesorg/applesauce.git")
+        result = self.run_helper("0.5.32", self.sha, "--push")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Git URL rewrites", result.stderr)
+        self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+
+    def test_rejects_push_instead_of_rewrite_before_tag_creation(self):
+        self.git("config", f"url.file://{self.remote}.pushInsteadOf",
+                 "https://github.com/chriscoveriesorg/applesauce.git")
+        result = self.run_helper("0.5.32", self.sha, "--push")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Git URL rewrites", result.stderr)
+        self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+
+    def test_rejects_explicit_origin_pushurl_before_tag_creation(self):
+        self.git("config", "remote.origin.pushurl", str(self.remote))
+        result = self.run_helper("0.5.32", self.sha, "--push")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pushurl overrides", result.stderr)
+        self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+
+    def test_rejects_multiple_origin_urls(self):
+        self.git("config", "--add", "remote.origin.url", str(self.remote))
+        result = self.run_helper("0.5.32", self.sha, "--push")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("origin must point", result.stderr)
+        self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
 
     def test_fails_closed_when_remote_tag_lookup_fails(self):
         self.env["FAIL_TAG_LOOKUP"] = "1"
