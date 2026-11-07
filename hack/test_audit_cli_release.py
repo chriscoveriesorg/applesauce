@@ -287,7 +287,18 @@ class AuditReleaseAssetsTests(unittest.TestCase):
 
     def test_executable_bit_required_for_installed_binary(self):
         self.make_archive("aarch64", ARCHES["aarch64"], mode=0o644)
-        self.assertIn("invalid executable size or mode", self.run_audit().stderr)
+        self.assertIn("invalid or writable executable mode", self.run_audit().stderr)
+
+    def test_group_or_world_writable_executable_is_refused(self):
+        for mode in (0o775, 0o757, 0o777):
+            with self.subTest(mode=oct(mode)):
+                self.make_archive("aarch64", ARCHES["aarch64"], mode=mode)
+                self.log.unlink(missing_ok=True)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("invalid or writable executable mode", run.stderr)
+                self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                     for c in self.calls()))
 
     def test_malformed_macho_load_command_is_refused(self):
         self.make_archive("aarch64", ARCHES["aarch64"], bad_load_size=True)
