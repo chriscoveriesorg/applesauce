@@ -141,7 +141,12 @@ def valid_acceptance_mount(mount):
 def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     require(codec in ("lzraven", "lzmesh"), "unsupported codec")
     source = Path(bundle) / ("source." + codec + ".jsonl")
-    require(source.is_file(), "missing synthetic reference cleartext")
+    # lstat tests only existence: is_file() follows symlinks and silently
+    # classifies FIFOs as missing before the bounded descriptor gate runs.
+    try:
+        source.lstat()
+    except FileNotFoundError as error:
+        raise EvidenceError("missing synthetic reference cleartext") from error
     logical_bytes, digest = bounded_regular(source, MAX_FIXTURE_BYTES, hash_only=True)
     reports = [load_json(first), load_json(remounted)]
 
