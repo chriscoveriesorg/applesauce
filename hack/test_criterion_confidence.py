@@ -73,6 +73,98 @@ class ConfidenceTests(unittest.TestCase):
             },
         }), encoding="utf-8")
 
+    def complete_smoke(self):
+        """Build the full smoke matrix with independent fixture hashes."""
+        matrix = confidence._matrix
+        source_rows = []
+        summary_rows = []
+        for suite, workload, size, layout, codec, mode in sorted(
+            matrix.expected_cases("smoke")
+        ):
+            row = dict(self.row)
+            row.update(
+                suite=suite, workload=workload, input_bytes=str(size),
+                input_sha256=matrix.GOLDEN_SHA256[size][workload],
+                layout=layout, codec=codec, scratch_mode=mode,
+                encode_scratch_bytes="n/a" if mode == "api-managed" else "0",
+                decode_scratch_bytes="n/a" if mode == "api-managed" else "0",
+            )
+            source_rows.append({
+                field: row[field] for field in confidence._summary.FIELDS
+            })
+            summary_rows.append(row)
+            group = self.criterion / (
+                f"apple-buffer_{suite}_{size}_{workload}_{layout}"
+            ) / f"{codec}-{mode}"
+            for operation, low, center, high in (
+                ("encode", 1_000_000, 1_500_000, 2_000_000),
+                ("decode", 500_000, 1_000_000, 1_500_000),
+            ):
+                estimate = group / operation / "new" / "estimates.json"
+                estimate.parent.mkdir(parents=True, exist_ok=True)
+                estimate.write_text(json.dumps({"median": {
+                    "point_estimate": center,
+                    "confidence_interval": {
+                        "confidence_level": 0.95,
+                        "lower_bound": low,
+                        "upper_bound": high,
+                    },
+                }}), encoding="utf-8")
+        manifest = self.root / "manifest.csv"
+        with manifest.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=confidence._summary.FIELDS
+            )
+            writer.writeheader()
+            writer.writerows(source_rows)
+        self.rewrite_summary(summary_rows)
+        return manifest, summary_rows
+
+    def test_full_matrix_provenance_gate(self):
+        manifest, rows = self.complete_smoke()
+        expected = len(confidence._matrix.expected_cases("smoke"))
+        self.assertEqual(confidence.write_confidence(
+            self.summary, self.criterion, self.output, manifest, "smoke"
+        ), expected)
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(len(list(csv.DictReader(stream))), expected)
+        self.rewrite_summary(rows[:-1])
+        with self.assertRaisesRegex(ValueError, "missing benchmark cases"):
+            confidence.write_confidence(
+                self.summary, self.criterion, self.output, manifest, "smoke"
+            )
+        self.rewrite_summary(rows)
+        modified = [dict(row) for row in rows]
+        modified[0]["encode_scratch_bytes"] = "2048"
+        self.rewrite_summary(modified)
+        with self.assertRaisesRegex(ValueError, "differs from verified source"):
+            confidence.write_confidence(
+                self.summary, self.criterion, self.output, manifest, "smoke"
+            )
+        self.rewrite_summary(rows)
+        with self.assertRaisesRegex(ValueError, "incomplete|unexpected"):
+            confidence.write_confidence(
+                self.summary, self.criterion, self.output, manifest, "standard"
+            )
+        with self.assertRaisesRegex(ValueError, "must be supplied together"):
+            confidence.write_confidence(
+                self.summary, self.criterion, self.output, manifest=manifest
+            )
+        # Tampering with manifest hashes must fail the independent golden check.
+        with manifest.open(newline="", encoding="utf-8") as stream:
+            source = list(csv.DictReader(stream))
+        source[0]["input_sha256"] = "a" * 64
+        with manifest.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=confidence._summary.FIELDS
+            )
+            writer.writeheader()
+            writer.writerows(source)
+        with self.assertRaisesRegex(ValueError, "golden"):
+            confidence.write_confidence(
+                self.summary, self.criterion, self.output, manifest, "smoke"
+            )
+
     def test_inverts_time_intervals_for_throughput_and_preserves_schema(self):
         self.assertEqual(confidence.write_confidence(
             self.summary, self.criterion, self.output), 1)
