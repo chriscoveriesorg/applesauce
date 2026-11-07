@@ -115,15 +115,16 @@ fn parse_logical_range(input: &str) -> Result<(u64, u64), String> {
 fn open_regular(path: &Path) -> io::Result<File> {
     // Reject devices, sockets and FIFOs before open() can interact with them.
     // Descriptor validation below remains essential if a path is swapped.
-    if !fs::symlink_metadata(path)?.file_type().is_file() {
+    let before = fs::symlink_metadata(path)?;
+    if !before.file_type().is_file() {
         return Err(invalid("archive input must be a regular file"));
     }
-    open_checked_regular(path)
+    open_checked_regular(path, &before)
 }
 
 // Kept separate so tests can reproduce a pathname swap AFTER the first
 // metadata check. All callers must still use open_regular for preflight.
-fn open_checked_regular(path: &Path) -> io::Result<File> {
+fn open_checked_regular(path: &Path, before: &fs::Metadata) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -135,9 +136,21 @@ fn open_checked_regular(path: &Path) -> io::Result<File> {
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let opened = file.metadata()?;
+    if !opened.is_file() {
         return Err(invalid("archive input must be a regular file"));
     }
+    // Refuse a different regular file substituted between preflight and open.
+    // Compare the opened descriptor's identity rather than re-statting a path.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != opened.dev() || before.ino() != opened.ino() {
+            return Err(invalid("archive input changed between preflight and open"));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = before;
     Ok(file)
 }
 
@@ -599,7 +612,8 @@ mod tests {
         let source = dir.path().join("formerly-regular");
         let replacement = dir.path().join("replacement-fifo");
         fs::write(&source, b"original").unwrap();
-        assert!(fs::symlink_metadata(&source).unwrap().file_type().is_file());
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
 
         let raw = CString::new(replacement.as_os_str().as_bytes()).unwrap();
         // SAFETY: NUL-terminated path is owned by this disposable tempdir.
@@ -609,7 +623,31 @@ mod tests {
         // would hang here; descriptor validation must reject the substituted
         // object without returning a File.
         fs::rename(&replacement, &source).unwrap();
-        assert_rejected_without_blocking(move || open_checked_regular(&source));
+        assert_rejected_without_blocking(move || open_checked_regular(&source, &before));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_regular_file_is_rejected_after_metadata_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected-input");
+        let replacement = dir.path().join("different-regular-input");
+        fs::write(&source, b"authorized archive input").unwrap();
+        fs::write(&replacement, b"unexpected replacement bytes").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
+
+        // Identical path and file type are insufficient after a rename race.
+        fs::rename(&replacement, &source).unwrap();
+        let error = open_checked_regular(&source, &before).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("changed between preflight and open"));
+
+        // A subsequent explicit operation is free to select the new file.
+        let mut opened = open_regular(&source).unwrap();
+        let mut bytes = Vec::new();
+        opened.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"unexpected replacement bytes");
     }
 
     #[test]
