@@ -37,11 +37,14 @@ bash hack/tag-cli-release.sh 0.5.31 1585dceb6c745cebf822588526ee5005255818c9
 bash hack/tag-cli-release.sh 0.5.31 1585dceb6c745cebf822588526ee5005255818c9 --push
 ```
 
-The `--push` action requires the owner's GitHub authentication. Equivalently,
-after independently checking source and CI, the exact underlying operation is
-`git tag applesauce-cli/v0.5.31 1585dceb6c745cebf822588526ee5005255818c9`
-followed by `git push origin refs/tags/applesauce-cli/v0.5.31`.
-Do not tag the current `main` HEAD by default. Never force-move a tag.
+The `--push` action requires the owner's GitHub authentication. Use
+the helper rather than issuing `git tag` directly. GitHub evaluates release
+workflows and their guard scripts from the **tagged source commit**; the
+qualified v0.5.31 commit predates the newer exact-SHA publisher check and
+cannot inherit it retroactively. The owner-side helper therefore supplies
+the essential exact-SHA gate before creating this historical release tag.
+If it refuses, resolve the stated failure rather than bypassing the check.
+Never force-move a tag.
 
 The `Release` GitHub Actions workflow builds and publishes the matching GitHub
 release after its gates pass. Binary downloadability, both macOS architectures,
