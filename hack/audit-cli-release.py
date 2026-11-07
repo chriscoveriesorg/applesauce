@@ -127,8 +127,9 @@ def check_macho(archive, arch):
                 if found_binary or not member.isfile():
                     raise AuditError(f"{archive.name}: duplicate or unsafe applesauce binary")
                 found_binary = True
-                if member.size < 40 or not (member.mode & 0o111):
-                    raise AuditError(f"{archive.name}: invalid executable size or mode")
+                if (member.size < 40 or not (member.mode & 0o111)
+                        or member.mode & 0o022):
+                    raise AuditError(f"{archive.name}: invalid or writable executable mode")
                 with tar.extractfile(member) as binary:
                     header = binary.read(32)
                     if len(header) != 32:
