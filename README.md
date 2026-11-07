@@ -79,6 +79,8 @@ applesauce archive verify chatlog.ascf
 applesauce archive extract chatlog.ascf chatlog-restored.jsonl
 applesauce archive extract chatlog.ascf chatlog-slice.jsonl --range 65535:131073
 # Or choose --codec lzmesh for the create command.
+# Explicit opt-in auto selection, with a verified bounded first-block trial:
+applesauce archive create chatlog.jsonl chatlog-auto.ascf --codec auto
 ```
 
 `archive info` reads the header and validated index without loading a
@@ -90,6 +92,16 @@ and writes a new no-clobber file through a verified temporary file. It skips
 unrelated chunks, so the range digest is evidence for the selected bytes.
 Run `archive verify` to authenticate the complete logical archive; that
 requires an available Raven/Mesh decoder on macOS 27+.
+
+`archive create --codec auto` encodes and decodes the first up-to-64 KiB
+of the opened source with both Apple buffer codecs. It chooses LZRAVEN only
+when its encoded sample is at least 20% smaller than LZMESH's; otherwise it
+chooses LZMESH to avoid Raven's measured encoding slowdown on mixed JSONL.
+The rule is deterministic, explicitly requested, and prints the sample sizes
+and selected codec. A heterogeneous file may compress differently after the
+sample; the final whole-file savings and SHA-256 verification checks remain
+mandatory. Explicit `--codec lzraven` retains the existing default behavior.
+No automatic native APFS codec selection or `decmpfs` writer is involved.
 
 The writer rereads and hashes the original, verifies every staged chunk and
 publishes a new file only after verification. Archives that cannot save space
