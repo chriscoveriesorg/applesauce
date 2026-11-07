@@ -51,13 +51,15 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                      bad_load_size=False, extra_link=False, extra_members=(),
                      subtype=None, platform=1, build_tool_count=0,
                      entry_offset=None, duplicate_entry=False, reserved=0,
-                     unknown_command_size=None):
+                     unknown_command_size=None, legacy_extra_bytes=0):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
             if platform is None:
                 command = struct.pack("<II", 2, 8)  # no OS marker
             elif platform == "legacy":
-                command = struct.pack("<4I", 0x24, 16, 0x000A0F00, 0x000A0F00)
+                command = (struct.pack("<4I", 0x24, 16 + legacy_extra_bytes,
+                                       0x000A0F00, 0x000A0F00)
+                           + b"\0" * legacy_extra_bytes)
             else:
                 command = struct.pack(
                     "<6I", 0x32, 7 if bad_load_size else 24,
@@ -188,6 +190,17 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                           subtype=0x80000003, platform="legacy")
         run = self.run_audit()
         self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_rejects_oversized_legacy_macos_version_command(self):
+        # LC_VERSION_MIN_MACOSX has a fixed 16-byte structure; an aligned
+        # trailing payload must not be silently accepted as valid metadata.
+        self.make_archive("aarch64", ARCHES["aarch64"],
+                          platform="legacy", legacy_extra_bytes=8)
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("malformed macOS version command size", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
 
     def test_rejects_misaligned_unknown_macho_load_command(self):
         # A malformed unknown LC_* used to pass structural validation because
