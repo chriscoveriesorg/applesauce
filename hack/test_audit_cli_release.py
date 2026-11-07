@@ -128,7 +128,7 @@ class AuditReleaseAssetsTests(unittest.TestCase):
 
     def test_symlink_executable_fails_before_provenance(self):
         self.make_archive("aarch64", ARCHES["aarch64"], symlink=True)
-        self.assertIn("missing or unsafe", self.run_audit().stderr)
+        self.assertIn("unsafe tar member type", self.run_audit().stderr)
 
     def test_corrupt_archive_fails(self):
         path = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
