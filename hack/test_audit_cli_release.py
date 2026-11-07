@@ -295,6 +295,21 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         target.symlink_to(real)
         self.assertIn("exactly one aarch64", self.run_audit().stderr)
 
+    def test_wrong_release_version_archive_name_is_refused_before_provenance(self):
+        # An attested archive from another version must not be accepted merely
+        # because its filename starts with "applesauce" and ends in the CPU suffix.
+        original = self.downloads / (
+            "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+        )
+        original.rename(
+            self.downloads / "applesauce-cli-v0.5.30-aarch64-apple-darwin.tar.xz"
+        )
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("expected exactly one aarch64 Apple archive", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
+
     def test_missing_or_duplicated_architecture_fails(self):
         (self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz").unlink()
         self.assertIn("exactly one aarch64", self.run_audit().stderr)
