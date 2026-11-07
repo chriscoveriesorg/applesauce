@@ -233,6 +233,10 @@ def check_macho(archive, arch):
                             entryoff = struct.unpack_from(
                                 endian + "Q", commands, offset + 8
                             )[0]
+                            if entryoff < 32 + sizeofcmds:
+                                raise AuditError(
+                                    f"{archive.name}: Mach-O entry offset overlaps load commands"
+                                )
                             if entryoff >= member.size:
                                 raise AuditError(
                                     f"{archive.name}: Mach-O entry offset outside executable"
