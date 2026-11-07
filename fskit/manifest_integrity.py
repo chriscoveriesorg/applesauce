@@ -189,6 +189,21 @@ class ManifestTests(unittest.TestCase):
                 with self.assertRaises(ManifestError):
                     verify(root, ["source.ascf"])
             manifest.write_text(record)
+            # The manifest itself is opened relative to the pinned bundle
+            # directory, with O_NOFOLLOW and O_NONBLOCK. It cannot become a
+            # redirected digest list or a blocking named pipe.
+            manifest.rename(root / "saved-hashes")
+            manifest.symlink_to(root / "saved-hashes")
+            with self.assertRaises(OSError):
+                verify(root, ["source.ascf"])
+            manifest.unlink()
+            (root / "saved-hashes").rename(manifest)
+            manifest.unlink()
+            os.mkfifo(manifest)
+            with self.assertRaises(ManifestError):
+                verify(root, ["source.ascf"])
+            manifest.unlink()
+            manifest.write_text(record)
             path.unlink()
             os.mkfifo(path)
             with self.assertRaises(ManifestError):
