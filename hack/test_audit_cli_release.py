@@ -172,6 +172,19 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Mach-O CPU", run.stderr)
 
+    def test_regular_file_with_directory_style_path_is_refused(self):
+        # A trailing slash on a regular file is ambiguous to tar extractors.
+        # Reject before remote provenance, including on the executable itself.
+        for name in ("applesauce-cli/applesauce/", "applesauce-cli/README/"):
+            with self.subTest(name=name):
+                self.make_archive("aarch64", ARCHES["aarch64"], name=name)
+                self.log.unlink(missing_ok=True)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("regular file has directory-style path", run.stderr)
+                self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                     for c in self.calls()))
+
     def test_executable_at_unexpected_path_is_refused(self):
         self.make_archive(
             "aarch64", ARCHES["aarch64"], name="other/applesauce",
