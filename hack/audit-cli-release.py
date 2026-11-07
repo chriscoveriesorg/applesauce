@@ -156,6 +156,11 @@ def check_macho(archive, arch):
                     cpu, subtype, filetype, ncmds, sizeofcmds, _, _ = struct.unpack(
                         endian + "7I", header[4:]
                     )
+                    # The reserved word in a 64-bit Mach-O header must be zero.
+                    # Refuse malformed headers before certifying executable bytes.
+                    reserved = struct.unpack_from(endian + "I", header, 28)[0]
+                    if reserved != 0:
+                        raise AuditError(f"{archive.name}: nonzero Mach-O reserved header")
                     if filetype != 2:
                         raise AuditError(
                             f"{archive.name}: Mach-O filetype {filetype}, expected executable"
