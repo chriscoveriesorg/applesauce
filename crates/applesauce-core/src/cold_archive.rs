@@ -42,6 +42,13 @@ fn u64_at(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes.try_into().expect("eight-byte header slice"))
 }
 
+/// Validate ASCF v1 chunk geometry before attempting codec work or creating
+/// staged output. Callers that perform extra preflight can use the same bounds
+/// as the writer and reader, avoiding a second, divergent size policy.
+pub fn validate_archive_geometry(logical_size: u64, chunk_size: usize) -> io::Result<usize> {
+    chunk_count(logical_size, chunk_size)
+}
+
 fn chunk_count(logical_size: u64, chunk_size: usize) -> io::Result<usize> {
     if !(MIN_CHUNK_BYTES..=MAX_CHUNK_BYTES).contains(&chunk_size) || !chunk_size.is_power_of_two() {
         return Err(bad_input(
