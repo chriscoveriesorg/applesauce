@@ -115,6 +115,8 @@ def check_macho(archive, arch):
 
                 if parts[-1] != "applesauce":
                     continue
+                if parts != ["applesauce-cli", "applesauce"]:
+                    raise AuditError(f"{archive.name}: unexpected executable path")
                 if found_binary or not member.isfile():
                     raise AuditError(f"{archive.name}: duplicate or unsafe applesauce binary")
                 found_binary = True
