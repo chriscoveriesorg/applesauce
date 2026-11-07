@@ -242,12 +242,16 @@ verify_package_manifest() {
 # the helper, fail before running acceptance so a report cannot be attributed
 # to signed packaged code while executing a different implementation.
 require_matching_bundle_helper() {
-  local bundle="$1"
-  test -f "$bundle/fskit/signed_acceptance.sh" \
-    && test ! -L "$bundle/fskit/signed_acceptance.sh" \
-    || die "bundled acceptance helper missing or symlinked"
-  /usr/bin/cmp -s "$ROOT/fskit/signed_acceptance.sh" "$bundle/fskit/signed_acceptance.sh" \
-    || die "acceptance helper differs from signed bundle; run the bundle's fskit/signed_acceptance.sh instead"
+  local bundle="$1" member
+  # Both interpreter entrypoint and manifest verifier are security-critical
+  # operator code. A recomputed manifest must not let a different checkout's
+  # verifier certify a package from another source revision.
+  for member in signed_acceptance.sh manifest_integrity.py; do
+    test -f "$bundle/fskit/$member" && test ! -L "$bundle/fskit/$member" \
+      || die "bundled acceptance helper missing or symlinked: $member"
+    /usr/bin/cmp -s "$ROOT/fskit/$member" "$bundle/fskit/$member" \
+      || die "acceptance helper differs from signed bundle: $member; run the bundle's fskit/signed_acceptance.sh instead"
+  done
 }
 # Stamp successful mounted readbacks with unique run identities. The
 # unmount verifier binds to that exact first readback; a reused JSON report
