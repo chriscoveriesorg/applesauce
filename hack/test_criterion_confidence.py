@@ -103,7 +103,7 @@ class ConfidenceTests(unittest.TestCase):
         )
         row = dict(self.row)
         row.update(suite="standard", input_bytes="1048576",
-                   chunk_bytes="1048576")
+                   chunk_bytes="1048576", encoded_bytes="131072")
         for operation in ("encode", "decode"):
             estimate = json.loads(
                 (group / operation / "new" / "estimates.json").read_text(
