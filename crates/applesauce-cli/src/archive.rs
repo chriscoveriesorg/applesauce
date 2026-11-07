@@ -7,12 +7,13 @@ use applesauce_core::cold_archive::{write_archive, ArchiveReader, MAX_READ_BYTES
 use clap::{Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 const DEFAULT_CHUNK_BYTES: usize = 1024 * 1024;
 const AUTO_SAMPLE_BYTES: usize = 64 * 1024;
+const AUTO_SAMPLE_WINDOWS: usize = 3;
 const HASH_BUFFER_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, clap::Args)]
@@ -165,16 +166,47 @@ fn hash_reader(source: &mut impl Read) -> io::Result<[u8; 32]> {
     Ok(digest.finalize().into())
 }
 
-/// Explicit opt-in. The deterministic first 64 KiB trial is bounded and
-/// verified for both codecs; it never infers native APFS decoder support.
-/// Favor the much faster Mesh encoder unless Raven is at least 20% smaller
-/// on the sample. The final whole-file savings guard still applies.
+/// Explicit opt-in: inspect at most 64 KiB total across the beginning,
+/// middle and end of large files. A first-block-only trial can misclassify
+/// a heterogeneous JSONL log. These are independently encoded windows,
+/// so account for each window's actual codec overhead in the comparison.
+/// No sample implies native APFS decoder support.
 fn prefer_auto_codec(raven_bytes: usize, mesh_bytes: usize) -> Codec {
     if raven_bytes.saturating_mul(100) <= mesh_bytes.saturating_mul(80) {
         Codec::Lzraven
     } else {
         Codec::Lzmesh
     }
+}
+
+fn auto_sample_windows(source_len: u64) -> Vec<(u64, usize)> {
+    let total = source_len.min(AUTO_SAMPLE_BYTES as u64) as usize;
+    // For small files preserve the original contiguous trial. On large files,
+    // divide the same bounded budget into three nonoverlapping windows.
+    if source_len < (AUTO_SAMPLE_BYTES * AUTO_SAMPLE_WINDOWS) as u64 {
+        return vec![(0, total)];
+    }
+    let first = total / AUTO_SAMPLE_WINDOWS;
+    let middle = first;
+    let last = total - first - middle;
+    vec![
+        (0, first),
+        ((source_len - middle as u64) / 2, middle),
+        (source_len - last as u64, last),
+    ]
+}
+
+fn read_auto_samples(source: &mut File, source_len: u64) -> io::Result<Vec<Vec<u8>>> {
+    let mut samples = Vec::new();
+    for (offset, length) in auto_sample_windows(source_len) {
+        source.seek(SeekFrom::Start(offset))?;
+        let mut sample = vec![0_u8; length];
+        source.read_exact(&mut sample)?;
+        samples.push(sample);
+    }
+    // The normal writer must always begin at logical byte zero.
+    source.rewind()?;
+    Ok(samples)
 }
 
 fn sample_auto_codec(source: &mut File, source_len: u64) -> io::Result<Codec> {
@@ -186,27 +218,28 @@ fn sample_auto_codec(source: &mut File, source_len: u64) -> io::Result<Codec> {
             ));
         }
     }
-    let sample_len = source_len.min(AUTO_SAMPLE_BYTES as u64) as usize;
-    let mut sample = vec![0_u8; sample_len];
-    source.read_exact(&mut sample)?;
-    source.rewind()?;
-
+    let samples = read_auto_samples(source, source_len)?;
     let mut encoded_lengths = [0_usize; 2];
     for (index, codec) in [Codec::Lzraven, Codec::Lzmesh].into_iter().enumerate() {
-        let encoded = codec.encode(&sample)?;
-        // Reject a damaged or unavailable encoder before selecting any codec.
-        if codec.decode_exact(&encoded, sample_len)? != sample {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "auto codec sample failed exact-byte round-trip",
-            ));
+        for sample in &samples {
+            let encoded = codec.encode(sample)?;
+            // Reject a damaged or unavailable encoder before selecting a codec.
+            if codec.decode_exact(&encoded, sample.len())?.as_slice() != sample.as_slice() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "auto codec sample failed exact-byte round-trip",
+                ));
+            }
+            encoded_lengths[index] = encoded_lengths[index]
+                .checked_add(encoded.len())
+                .ok_or_else(|| invalid("auto codec sample length overflow"))?;
         }
-        encoded_lengths[index] = encoded.len();
     }
     let selected = prefer_auto_codec(encoded_lengths[0], encoded_lengths[1]);
     eprintln!(
-        "archive --codec auto: {} sampled bytes, raven {} bytes, mesh {} bytes; selected {}",
-        sample_len,
+        "archive --codec auto: {} sampled bytes across {} window(s), raven {} bytes, mesh {} bytes; selected {}",
+        samples.iter().map(Vec::len).sum::<usize>(),
+        samples.len(),
         encoded_lengths[0],
         encoded_lengths[1],
         selected.name()
@@ -496,6 +529,49 @@ mod tests {
         assert_eq!(prefer_auto_codec(81, 100), Codec::Lzmesh);
         assert_eq!(prefer_auto_codec(100, 80), Codec::Lzmesh);
         assert_eq!(prefer_auto_codec(usize::MAX, 1), Codec::Lzmesh);
+    }
+
+    #[test]
+    fn auto_sampling_is_bounded_and_covers_heterogeneous_large_files() {
+        assert_eq!(auto_sample_windows(1), vec![(0, 1)]);
+        assert_eq!(
+            auto_sample_windows((AUTO_SAMPLE_BYTES * AUTO_SAMPLE_WINDOWS - 1) as u64),
+            vec![(0, AUTO_SAMPLE_BYTES)]
+        );
+        let windows = auto_sample_windows((AUTO_SAMPLE_BYTES * 4) as u64);
+        assert_eq!(windows.len(), AUTO_SAMPLE_WINDOWS);
+        assert_eq!(
+            windows.iter().map(|(_, length)| length).sum::<usize>(),
+            AUTO_SAMPLE_BYTES
+        );
+        assert_eq!(windows[0].0, 0);
+        assert_eq!(
+            windows[2].0 + windows[2].1 as u64,
+            (AUTO_SAMPLE_BYTES * 4) as u64
+        );
+        assert!(windows.windows(2).all(|w| w[0].0 + w[0].1 as u64 <= w[1].0));
+
+        // Pure file-read regression: works even when Apple codecs are absent.
+        // A first-window-only sampler would never see the B/C sections.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("synthetic-strata");
+        let mut bytes = vec![b'A'; AUTO_SAMPLE_BYTES * 4];
+        bytes[AUTO_SAMPLE_BYTES..AUTO_SAMPLE_BYTES * 3].fill(b'B');
+        bytes[AUTO_SAMPLE_BYTES * 3..].fill(b'C');
+        fs::write(&path, &bytes).unwrap();
+        let mut source = open_regular(&path).unwrap();
+        let samples = read_auto_samples(&mut source, bytes.len() as u64).unwrap();
+        assert!(samples[0].iter().all(|b| *b == b'A'));
+        assert!(samples[1].iter().all(|b| *b == b'B'));
+        assert!(samples[2].iter().all(|b| *b == b'C'));
+        assert_eq!(source.stream_position().unwrap(), 0);
+        assert_eq!(
+            auto_sample_windows(u64::MAX)
+                .iter()
+                .map(|(_, length)| length)
+                .sum::<usize>(),
+            AUTO_SAMPLE_BYTES
+        );
     }
 
     #[test]
