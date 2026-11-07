@@ -203,6 +203,7 @@ macos.txt
 build-tools.txt
 NEXT-STEPS.txt
 fskit/signed_acceptance.sh
+fskit/manifest_integrity.py
 fskit/verify_mount.py
 fskit/finder_mount_witness.py
 fskit/unmount_acceptance.py
@@ -225,56 +226,16 @@ PATHS
 verify_package_manifest() {
   local bundle="$1" out="$2"
   test -f "$bundle/SHA256SUMS" || die "bundle SHA256SUMS missing"
-  # Validate the manifest BEFORE shasum -c processes any filenames. Only
-  # packaged members may be read. Extra entries, duplicates and any symlink
-  # along a member's path could otherwise redirect verification outside the
-  # selected portable bundle, even with a matching SHA-256.
+  # Authenticate via an open directory FD. Never invoke shasum -c on
+  # untrusted bundle pathnames: a substituted symlink/FIFO or directory race
+  # could otherwise redirect or block reads after pathname validation.
+  # The verifier pins every parent directory, rejects nonregular members,
+  # streams SHA-256 from the same FD and rechecks identity after each digest.
   need python3
-  test ! -L "$bundle/SHA256SUMS" || die "symlinked SHA256SUMS manifest"
-  # Copy before validation so shasum checks the identical reviewed list.
-  # All callers use their own mode-0700 staging/evidence directory.
-  /bin/cp "$bundle/SHA256SUMS" "$out/SHA256SUMS.checked" \
-    || die "cannot snapshot bundle SHA256SUMS"
   ASCF_REQUIRED_PATHS="$(required_manifest_paths)" \
-    /usr/bin/python3 - "$bundle" "$out/SHA256SUMS.checked" <<'PY' \
-    || die "bundle SHA256SUMS has unsafe, missing or unexpected members"
-import os
-from pathlib import Path, PurePosixPath
-import re
-import sys
-
-root = Path(sys.argv[1])
-expected = set(os.environ["ASCF_REQUIRED_PATHS"].splitlines())
-manifest = Path(sys.argv[2])
-if not expected:
-    sys.exit("missing expected files or symlinked manifest")
-seen = set()
-for line in manifest.read_text(encoding="utf-8").splitlines():
-    # Our packager emits only ordinary two-space shasum records.
-    match = re.fullmatch(r"[0-9a-fA-F]{64}  (.+)", line)
-    if not match:
-        sys.exit("noncanonical SHA256SUMS entry")
-    member = match.group(1)
-    path = PurePosixPath(member)
-    if (member not in expected or member in seen or path.is_absolute()
-            or any(part in (".", "..") for part in path.parts)):
-        sys.exit("unexpected or duplicate SHA256SUMS path: " + member)
-    cursor = root
-    for component in path.parts:
-        cursor = cursor / component
-        if cursor.is_symlink():
-            sys.exit("symlink in signed bundle member: " + member)
-    if not cursor.is_file():
-        sys.exit("missing regular bundle member: " + member)
-    seen.add(member)
-if seen != expected:
-    sys.exit("bundle manifest omits required members")
-PY
-  # Verify exactly the checked snapshot, then discard our temporary copy.
-  (cd "$bundle" && /usr/bin/shasum -a 256 -c "$out/SHA256SUMS.checked") \
-    > "$out/manifest-verified.log" 2>&1 \
-    || die "bundle hash verification failed; see $out/manifest-verified.log"
-  /bin/rm -f "$out/SHA256SUMS.checked"
+    /usr/bin/python3 "$ROOT/fskit/manifest_integrity.py" "$bundle" \
+      > "$out/manifest-verified.log" 2>&1 \
+    || die "bundle SHA256SUMS or member verification failed; see $out/manifest-verified.log"
 }
 # A bundle is self-contained, and its manifest authenticates the actual
 # verifier scripts. When invoked from a checkout with a different version of
@@ -440,6 +401,7 @@ PY
     # this repository or installing a Rust toolchain on the destination Mac.
     /bin/mkdir "$out/fskit"
     /bin/cp "$ROOT/fskit/signed_acceptance.sh" "$out/fskit/signed_acceptance.sh"
+    /bin/cp "$ROOT/fskit/manifest_integrity.py" "$out/fskit/manifest_integrity.py"
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
     /bin/cp "$ROOT/fskit/finder_mount_witness.py" "$out/fskit/finder_mount_witness.py"
     /bin/cp "$ROOT/fskit/unmount_acceptance.py" "$out/fskit/unmount_acceptance.py"
@@ -449,6 +411,9 @@ PY
     /bin/cp "$ROOT/fskit/build_toolchain.py" "$out/fskit/build_toolchain.py"
     /bin/cp "$ROOT/fskit/replacement_acceptance.py" "$out/fskit/replacement_acceptance.py"
     /bin/cp "$ROOT/fskit/finder_readback.applescript" "$out/fskit/finder_readback.applescript"
+    /usr/bin/python3 "$out/fskit/manifest_integrity.py" --self-test \
+      > "$out/manifest-integrity-tests.log" 2>&1 \
+      || die "packaged manifest verifier self-tests failed; see $out/manifest-integrity-tests.log"
     /usr/bin/python3 "$out/fskit/verify_mount.py" --self-test \
       > "$out/portable-verifier-tests.log" 2>&1 \
       || die "packaged verifier self-tests failed; see $out/portable-verifier-tests.log"
