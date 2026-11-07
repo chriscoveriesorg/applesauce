@@ -644,7 +644,7 @@ mod tests {
         fs::remove_file(&source).unwrap();
         symlink(&target, &source).unwrap();
         let error = open_checked_regular(&source, &before).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
         assert_eq!(fs::read(&target).unwrap(), b"other bytes");
     }
 
