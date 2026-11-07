@@ -546,6 +546,15 @@ The command rechecks the SHA-256 manifest, signing identities, the archived
 source and both readback JSON reports, the intervening unmount, kernel-level
 read-only VFS flags, random/EOF evidence and the typed corruption-refusal
 diagnostic. It emits a JSON summary with hashes of all five evidence files for each codec.
+The acceptance validator opens operator-supplied evidence with nonblocking,
+no-follow descriptors and refuses special files, symlinks, oversized records
+and changed files. It streams the signed original and Raven/Mesh archive SHA-256
+digests in bounded chunks instead of loading a fixture of up to 1 GiB into
+memory. Corruption-refusal text and source provenance are capped at 64 KiB;
+the whole-byte logical source comparison and mounted hash checks remain
+mandatory. Portable tests cover FIFO substitution, symlinks, oversized
+sparse fixtures, truncated reads and both-codec evidence.
+
 Its success establishes **internal consistency of operator-supplied evidence**, including the staged archive-replacement refusal;
 the captured host diagnostic is not a signed machine attestation. Independent
 review of the authorized Mac's actual installed extension and mounted
