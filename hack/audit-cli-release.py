@@ -89,9 +89,9 @@ def check_macho(archive, arch):
                     if len(header) != 32:
                         raise AuditError(f"{archive.name}: truncated Mach-O header")
                     magic = header[:4]
-                    if magic == b"\\xcf\\xfa\\xed\\xfe":
+                    if magic == b"\xcf\xfa\xed\xfe":
                         endian = "<"
-                    elif magic == b"\\xfe\\xed\\xfa\\xcf":
+                    elif magic == b"\xfe\xed\xfa\xcf":
                         endian = ">"
                     else:
                         raise AuditError(f"{archive.name}: executable is not a thin Mach-O 64")
