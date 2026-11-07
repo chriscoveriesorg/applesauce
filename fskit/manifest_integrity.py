@@ -12,6 +12,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 class ManifestError(ValueError):
@@ -20,6 +21,9 @@ class ManifestError(ValueError):
 
 MAX_MANIFEST = 65536
 MAX_MEMBERS = 128
+# A signed host/extension, archive or fixture over 1 GiB is unexpected.
+# Refuse pathological sparse members before streaming potentially untrusted data.
+MAX_MEMBER_BYTES = 1024 * 1024 * 1024
 CHUNK = 1024 * 1024
 HEX_LINE = re.compile(r"([0-9a-fA-F]{64})  ([A-Za-z0-9_.+/-]+)\Z")
 OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -72,8 +76,9 @@ def read_manifest(fd):
         if not block:
             break
         raw.extend(block)
-    require(len(raw) <= MAX_MANIFEST and identity(before) == identity(os.fstat(fd)),
-            "manifest changed during validation or exceeds size limit")
+    require(len(raw) == before.st_size and len(raw) <= MAX_MANIFEST
+            and identity(before) == identity(os.fstat(fd)),
+            "manifest changed, shortened during read or exceeds size limit")
     try:
         return bytes(raw).decode("ascii")
     except UnicodeDecodeError as error:
@@ -85,6 +90,9 @@ def verify(root, expected):
     require(expected and len(expected) <= MAX_MEMBERS
             and len(expected) == len(set(expected)),
             "required manifest path list is empty, duplicated or oversized")
+    require(all(getattr(os, name, 0) for name in
+                ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")),
+            "platform lacks required no-follow, directory or nonblocking open flags")
     for member in expected:
         require(HEX_LINE.fullmatch("0" * 64 + "  " + member) is not None
                 and all(part not in ("", ".", "..") for part in member.split("/")),
@@ -111,12 +119,20 @@ def verify(root, expected):
             fd = safe_member(root_fd, member)
             try:
                 start = os.fstat(fd)
+                require(0 <= start.st_size <= MAX_MEMBER_BYTES,
+                        "manifest member exceeds 1 GiB limit: " + member)
                 hasher = hashlib.sha256()
-                while True:
-                    block = os.read(fd, CHUNK)
-                    if not block:
-                        break
+                remaining = start.st_size
+                while remaining:
+                    block = os.read(fd, min(CHUNK, remaining))
+                    require(bool(block),
+                            "manifest member shortened during digest: " + member)
                     hasher.update(block)
+                    remaining -= len(block)
+                # A 1-byte bounded probe detects appended bytes without following
+                # an attacker-controlled, continuously growing regular file.
+                require(not os.read(fd, 1),
+                        "manifest member grew during digest: " + member)
                 require(identity(start) == identity(os.fstat(fd)),
                         "manifest member changed during digest: " + member)
                 require(hasher.hexdigest() == expected_sha,
@@ -208,6 +224,37 @@ class ManifestTests(unittest.TestCase):
             os.mkfifo(path)
             with self.assertRaises(ManifestError):
                 verify(root, ["source.ascf"])
+
+    def test_reject_large_sparse_member_before_streaming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = root / "oversized.app"
+            with payload.open("wb") as fd:
+                fd.truncate(MAX_MEMBER_BYTES + 1)
+            (root / "SHA256SUMS").write_text("0" * 64 + "  oversized.app\n")
+            with self.assertRaisesRegex(ManifestError, "exceeds 1 GiB"):
+                verify(root, ["oversized.app"])
+
+    def test_reject_short_read_even_when_truncated_digest_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = root / "payload"
+            payload.write_bytes(b"real signed bundle member")
+            # This digest is for the bytes a falsely early EOF would expose.
+            # A stable inode/mtime alone would otherwise accept it.
+            (root / "SHA256SUMS").write_text(
+                hashlib.sha256(b"").hexdigest() + "  payload\n")
+            original_read = os.read
+            payload_inode = payload.stat().st_ino
+
+            def early_eof(fd, limit):
+                if os.fstat(fd).st_ino == payload_inode:
+                    return b""
+                return original_read(fd, limit)
+
+            with mock.patch.object(os, "read", side_effect=early_eof):
+                with self.assertRaisesRegex(ManifestError, "shortened during digest"):
+                    verify(root, ["payload"])
 
 
 def main():
