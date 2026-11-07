@@ -67,11 +67,14 @@ After the owner has pushed the **qualified** tag and the Release workflow has
 published both archives, download them into a **new empty directory**. The
 auditor checks that exactly one arm64 and one Intel macOS archive are present;
 each contains a regular thin Mach-O \`applesauce\` binary with the expected CPU
-type. The auditor also checks executable mode and Mach-O load-command
-structure, then scans every archive member without extracting it. It rejects
-traversal or absolute paths, links, special files, duplicate executables and
-excessive member sizes or total expansion. It prints the downloaded archive
-SHA-256 hashes and invokes the GitHub CLI
+type. The auditor also checks executable mode, baseline CPU subtype, macOS
+platform, Mach-O build-tool records and any LC_MAIN entry offset, then scans
+every archive member without extracting it. It rejects traversal or absolute
+paths, links, special files, duplicate executables and excessive member sizes
+or total expansion. It reads the complete executable to record an independent
+SHA-256 for the inner Mach-O alongside the downloaded archive's SHA-256.
+These fingerprints let operators compare the exact installed executable with
+the audited archive after unpacking. It invokes the GitHub CLI
 for two independent remote checks per archive: release-asset byte identity and
 cryptographic provenance bound to the exact source SHA, tag ref, repository and
 release workflow. This requires an up-to-date \`gh\` authenticated for public
