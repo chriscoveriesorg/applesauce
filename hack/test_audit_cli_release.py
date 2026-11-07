@@ -46,7 +46,7 @@ class AuditReleaseAssetsTests(unittest.TestCase):
 
     def make_archive(self, arch, cpu, *, symlink=False, filetype=2,
                      name="applesauce-cli/applesauce", mode=0o755,
-                     bad_load_size=False, extra_link=False):
+                     bad_load_size=False, extra_link=False, extra_members=()):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
             data = (b"\xcf\xfa\xed\xfe"
@@ -67,6 +67,16 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 link.type = tarfile.SYMTYPE
                 link.linkname = "../../../outside"
                 tar.addfile(link)
+            for extra_name, kind in extra_members:
+                extra = tarfile.TarInfo(extra_name)
+                if kind == "directory":
+                    extra.type = tarfile.DIRTYPE
+                    extra.mode = 0o755
+                    tar.addfile(extra)
+                else:
+                    data = b"extra fixture contents"
+                    extra.size = len(data)
+                    tar.addfile(extra, io.BytesIO(data))
         return path
 
     def run_audit(self):
@@ -157,6 +167,55 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("duplicate archive member path", run.stderr)
         self.assertFalse(any(c[:2] == ["release", "verify-asset"] for c in self.calls()))
+
+    def test_macos_case_insensitive_collision_is_refused(self):
+        # On common macOS volumes a case-only alias could overwrite an
+        # executable after the one we verified.
+        self.make_archive(
+            "aarch64", ARCHES["aarch64"],
+            extra_members=[("applesauce-cli/APPLESAUCE", "file")],
+        )
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("collides on macOS", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
+
+    def test_macos_unicode_normalization_collision_is_refused(self):
+        self.make_archive(
+            "aarch64", ARCHES["aarch64"],
+            extra_members=[
+                ("applesauce-cli/résumé.txt", "file"),
+                ("applesauce-cli/re\u0301sume\u0301.txt", "file"),
+            ],
+        )
+        self.assertIn("collides on macOS", self.run_audit().stderr)
+
+    def test_file_as_ancestor_of_extracted_member_is_refused(self):
+        self.make_archive(
+            "aarch64", ARCHES["aarch64"],
+            extra_members=[("applesauce-cli/applesauce/docs", "file")],
+        )
+        self.assertIn("file obstructs nested path", self.run_audit().stderr)
+
+    def test_file_overwriting_implicit_directory_is_refused(self):
+        self.make_archive(
+            "aarch64", ARCHES["aarch64"],
+            extra_members=[("applesauce-cli", "file")],
+        )
+        self.assertIn("file conflicts with directory", self.run_audit().stderr)
+
+    def test_explicit_directories_with_safe_nested_files_are_allowed(self):
+        self.make_archive(
+            "aarch64", ARCHES["aarch64"],
+            extra_members=[
+                ("applesauce-cli", "directory"),
+                ("applesauce-cli/docs", "directory"),
+                ("applesauce-cli/docs/README", "file"),
+            ],
+        )
+        run = self.run_audit()
+        self.assertEqual(run.returncode, 0, run.stderr)
 
     def test_secondary_symlink_in_archive_is_refused(self):
         self.make_archive("aarch64", ARCHES["aarch64"], extra_link=True)
