@@ -50,7 +50,8 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                      name="applesauce-cli/applesauce", mode=0o755,
                      bad_load_size=False, extra_link=False, extra_members=(),
                      subtype=None, platform=1, build_tool_count=0,
-                     entry_offset=None, duplicate_entry=False, reserved=0):
+                     entry_offset=None, duplicate_entry=False, reserved=0,
+                     unknown_command_size=None):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
             if platform is None:
@@ -68,6 +69,13 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 if entry_offset is None:
                     raise ValueError("duplicate_entry requires entry_offset")
                 command += struct.pack("<IIQQ", 0x80000028, 24, entry_offset, 0)
+            # Unknown LC_* commands may appear in newer SDKs. They are
+            # permitted when structurally valid, including 8-byte alignment.
+            if unknown_command_size is not None:
+                if not 8 <= unknown_command_size <= 64:
+                    raise ValueError("unknown command size must be 8..64")
+                command += struct.pack("<II", 0x71234567, unknown_command_size)
+                command += b"\0" * (unknown_command_size - 8)
             default_subtype = next(
                 (SUBTYPES[arch] for arch, target in ARCHES.items() if cpu == target), 0
             )
@@ -75,7 +83,8 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                     + struct.pack("<7I", cpu,
                                   default_subtype if subtype is None else subtype,
                                   filetype, 1 + (entry_offset is not None)
-                                  + duplicate_entry,
+                                  + duplicate_entry
+                                  + (unknown_command_size is not None),
                                   len(command), 0, reserved)
                     + command + b"\0" * 64)
             member = tarfile.TarInfo(name)
@@ -177,6 +186,27 @@ class AuditReleaseAssetsTests(unittest.TestCase):
     def test_accepts_legacy_macos_marker_and_baseline_cpu_capability(self):
         self.make_archive("x86_64", ARCHES["x86_64"],
                           subtype=0x80000003, platform="legacy")
+        run = self.run_audit()
+        self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_rejects_misaligned_unknown_macho_load_command(self):
+        # A malformed unknown LC_* used to pass structural validation because
+        # the auditor checked only that the command ended inside sizeofcmds.
+        for length in (9, 15, 17):
+            with self.subTest(length=length):
+                self.make_archive("aarch64", ARCHES["aarch64"],
+                                  unknown_command_size=length)
+                self.log.unlink(missing_ok=True)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("invalid Mach-O load command size or alignment", run.stderr)
+                self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                     for c in self.calls()))
+
+    def test_accepts_aligned_unknown_macho_load_command(self):
+        # Future LC_* types must not be rejected merely for being unfamiliar.
+        self.make_archive("aarch64", ARCHES["aarch64"],
+                          unknown_command_size=16)
         run = self.run_audit()
         self.assertEqual(run.returncode, 0, run.stderr)
 
