@@ -224,8 +224,8 @@ def check_macho(archive, arch):
                                     )
                             elif command != 0x24:  # LC_VERSION_MIN_MACOSX
                                 raise AuditError(f"{archive.name}: foreign Mach-O platform")
-                            elif size < 16:
-                                raise AuditError(f"{archive.name}: short macOS version command")
+                            elif size != 16:
+                                raise AuditError(f"{archive.name}: malformed macOS version command size")
                             macos_marker_seen = True
                         if command == 0x80000028:  # LC_MAIN
                             if main_entry_seen:
