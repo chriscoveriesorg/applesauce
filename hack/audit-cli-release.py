@@ -38,7 +38,7 @@ def find_archives(directory):
     for arch in ARCH_CPUS:
         candidates = [
             p for p in directory.iterdir()
-            if p.is_file() and p.name.endswith(SUFFIXES)
+            if p.is_file() and not p.is_symlink() and p.name.endswith(SUFFIXES)
             and p.name.endswith(tuple("-" + arch + "-apple-darwin" + s for s in SUFFIXES))
             and p.name.startswith("applesauce")
         ]
@@ -60,10 +60,10 @@ def check_macho(archive, arch):
             if len(matches) != 1 or not matches[0].isfile():
                 raise AuditError(f"{archive.name}: missing or unsafe applesauce binary")
             member = matches[0]
-            if member.size < 12 or member.size > 128 * 1024 * 1024:
+            if member.size < 16 or member.size > 128 * 1024 * 1024:
                 raise AuditError(f"{archive.name}: invalid executable size")
             with tar.extractfile(member) as binary:
-                header = binary.read(12)
+                header = binary.read(16)
     except (tarfile.TarError, EOFError, OSError) as exc:
         raise AuditError(f"{archive.name}: cannot read tar archive: {exc}") from exc
 
@@ -75,7 +75,9 @@ def check_macho(archive, arch):
     else:
         raise AuditError(f"{archive.name}: executable is not a thin Mach-O 64")
     cpu = struct.unpack(endian + "I", header[4:8])[0]
-    filetype = struct.unpack(endian + "I", header[12:16])[0] if len(header) >= 16 else None
+    filetype = struct.unpack(endian + "I", header[12:16])[0]
+    if filetype != 2:  # MH_EXECUTE; refuse dynamic libraries or fabricated headers
+        raise AuditError(f"{archive.name}: Mach-O filetype {filetype}, expected executable")
     if cpu != ARCH_CPUS[arch]:
         raise AuditError(f"{archive.name}: Mach-O CPU {cpu:#x}, expected {arch}")
 
