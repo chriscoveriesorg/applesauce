@@ -58,6 +58,7 @@ def check_macho(archive, arch):
     # A verified archive is later extracted by an installer. Validate every tar
     # entry before certifying it, even though this auditor never extracts files.
     found_binary = False
+    executable_digest = None
     total_size = 0
     seen_paths = set()
     mac_paths = set()
@@ -171,6 +172,12 @@ def check_macho(archive, arch):
                     commands = binary.read(sizeofcmds)
                     if len(commands) != sizeofcmds:
                         raise AuditError(f"{archive.name}: truncated Mach-O load commands")
+                    # Hash the exact executable bytes, not merely the enclosing
+                    # attested archive. A full bounded read also refuses a
+                    # truncated binary whose initial Mach-O table looks valid.
+                    binary_hash = hashlib.sha256()
+                    binary_hash.update(header)
+                    binary_hash.update(commands)
                     offset = 0
                     macos_marker_seen = False
                     for _ in range(ncmds):
@@ -195,20 +202,46 @@ def check_macho(archive, arch):
                                     raise AuditError(
                                         f"{archive.name}: Mach-O targets platform {platform}, not macOS"
                                     )
+                                tools = struct.unpack_from(
+                                    endian + "I", commands, offset + 20
+                                )[0]
+                                if size != 24 + tools * 8:
+                                    raise AuditError(
+                                        f"{archive.name}: inconsistent Mach-O build tool table"
+                                    )
                             elif command != 0x24:  # LC_VERSION_MIN_MACOSX
                                 raise AuditError(f"{archive.name}: foreign Mach-O platform")
                             elif size < 16:
                                 raise AuditError(f"{archive.name}: short macOS version command")
                             macos_marker_seen = True
+                        if command == 0x80000028:  # LC_MAIN
+                            if size != 24:
+                                raise AuditError(f"{archive.name}: malformed Mach-O LC_MAIN")
+                            entryoff = struct.unpack_from(
+                                endian + "Q", commands, offset + 8
+                            )[0]
+                            if entryoff >= member.size:
+                                raise AuditError(
+                                    f"{archive.name}: Mach-O entry offset outside executable"
+                                )
                         offset += size
                     if offset != sizeofcmds:
                         raise AuditError(f"{archive.name}: unaccounted Mach-O load command bytes")
                     if not macos_marker_seen:
                         raise AuditError(f"{archive.name}: missing macOS Mach-O platform marker")
+                    remaining = member.size - 32 - sizeofcmds
+                    while remaining:
+                        block = binary.read(min(1024 * 1024, remaining))
+                        if not block:
+                            raise AuditError(f"{archive.name}: truncated Mach-O executable")
+                        binary_hash.update(block)
+                        remaining -= len(block)
+                    executable_digest = binary_hash.hexdigest()
     except (tarfile.TarError, EOFError, OSError) as exc:
         raise AuditError(f"{archive.name}: cannot read tar archive: {exc}") from exc
     if not found_binary:
         raise AuditError(f"{archive.name}: missing or unsafe applesauce binary")
+    return executable_digest
 
 
 def gh(*args):
@@ -235,7 +268,7 @@ def audit(directory):
     archives = find_archives(directory)
     evidence = {}
     for arch, asset in archives.items():
-        check_macho(asset, arch)
+        executable_digest = check_macho(asset, arch)
         digest = sha256(asset)
         # Remote asset correspondence is checked independently of downloaded
         # checksum files. The attestation binds these same bytes to source SHA.
@@ -247,7 +280,11 @@ def audit(directory):
             "--signer-workflow",
             REPO + "/.github/workflows/applesauce-cli-release.yml",
         )
-        evidence[arch] = {"filename": asset.name, "sha256": digest}
+        evidence[arch] = {
+            "filename": asset.name,
+            "sha256": digest,
+            "executable_sha256": executable_digest,
+        }
     return evidence
 
 
