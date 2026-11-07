@@ -118,7 +118,10 @@ fn open_regular(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // O_NOFOLLOW rejects symlink inputs. O_NONBLOCK keeps a swapped-in
+        // FIFO from hanging before metadata() can reject non-regular files.
+        // Regular-file reads retain their normal blocking semantics.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {
@@ -482,6 +485,42 @@ mod tests {
             std::os::unix::fs::symlink(source, &symlink).unwrap();
             assert!(open_regular(&symlink).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_input_is_rejected_without_waiting_for_a_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("unopened-archive-pipe");
+        let raw = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: raw is NUL terminated, and the path belongs to this tempdir.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        let output = dir.path().join("must-not-exist");
+
+        // A FIFO opened with O_RDONLY alone would wait indefinitely for a
+        // writer. All archive entry points must reject it before reading.
+        for error in [
+            open_regular(&fifo).unwrap_err(),
+            info(&fifo).unwrap_err(),
+            verify(&fifo).unwrap_err(),
+            extract(&fifo, &output).unwrap_err(),
+            extract_range(&fifo, &output, (0, 1)).unwrap_err(),
+            create(&fifo, &output, Codec::Lzraven, 64 * 1024, true).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+        assert!(!output.exists());
+
+        // The nonblocking flag must not stop an ordinary file being read.
+        let regular = dir.path().join("regular");
+        fs::write(&regular, b"ordinary archive input").unwrap();
+        let mut file = open_regular(&regular).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"ordinary archive input");
     }
 
     #[test]
