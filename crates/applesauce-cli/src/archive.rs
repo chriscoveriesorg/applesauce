@@ -113,17 +113,44 @@ fn parse_logical_range(input: &str) -> Result<(u64, u64), String> {
 }
 
 fn open_regular(path: &Path) -> io::Result<File> {
+    // Reject devices, sockets and FIFOs before open() can interact with them.
+    // Descriptor validation below remains essential if a path is swapped.
+    let before = fs::symlink_metadata(path)?;
+    if !before.file_type().is_file() {
+        return Err(invalid("archive input must be a regular file"));
+    }
+    open_checked_regular(path, &before)
+}
+
+// Kept separate so tests can reproduce a pathname swap AFTER the first
+// metadata check. All callers must still use open_regular for preflight.
+fn open_checked_regular(path: &Path, before: &fs::Metadata) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // O_NOFOLLOW rejects symlink inputs. O_NONBLOCK keeps a swapped-in
+        // FIFO from hanging before metadata() can reject non-regular files.
+        // Regular-file reads retain their normal blocking semantics.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let opened = file.metadata()?;
+    if !opened.is_file() {
         return Err(invalid("archive input must be a regular file"));
     }
+    // Refuse a different regular file substituted between preflight and open.
+    // Compare the opened descriptor's identity rather than re-statting a path.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != opened.dev() || before.ino() != opened.ino() {
+            return Err(invalid("archive input changed between preflight and open"));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = before;
     Ok(file)
 }
 
@@ -482,6 +509,169 @@ mod tests {
             std::os::unix::fs::symlink(source, &symlink).unwrap();
             assert!(open_regular(&symlink).is_err());
         }
+    }
+
+    // Run potentially blocking FIFO opens in a separate thread with a deadline.
+    // A regression that drops O_NONBLOCK must fail quickly instead of hanging
+    // the entire CI job until the runner's global timeout expires.
+    #[cfg(unix)]
+    fn assert_rejected_without_blocking<T, F>(action: F)
+    where
+        F: FnOnce() -> io::Result<T> + Send + 'static,
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let outcome = action().map(|_| ()).map_err(|error| error.kind());
+            let _ = sender.send(outcome);
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("archive operation blocked while opening a FIFO");
+        assert_eq!(outcome, Err(io::ErrorKind::InvalidInput));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_input_is_rejected_without_waiting_for_a_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("unopened-archive-pipe");
+        let raw = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: raw is NUL terminated, and the path belongs to this tempdir.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        let output = dir.path().join("must-not-exist");
+
+        // A FIFO opened with O_RDONLY alone would wait indefinitely for a
+        // writer. All archive entry points must reject it before reading.
+        // Each operation has its own bound. A single blocking entry point
+        // cannot prevent the remaining cases from being diagnosed.
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || open_regular(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || info(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || verify(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || extract(&path, &destination)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || extract_range(&path, &destination, (0, 1))
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || create(&path, &destination, Codec::Lzraven, 64 * 1024, true)
+        });
+        assert!(!output.exists());
+
+        // The nonblocking flag must not stop an ordinary file being read.
+        let regular = dir.path().join("regular");
+        fs::write(&regular, b"ordinary archive input").unwrap();
+        let mut file = open_regular(&regular).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"ordinary archive input");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_and_directory_inputs_are_rejected_before_open() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("archive-socket");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        for path in [&socket, dir.path()] {
+            assert_eq!(
+                open_regular(path).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "accepted non-regular archive input: {path:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_fifo_is_rejected_after_a_successful_regular_file_preflight() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("formerly-regular");
+        let replacement = dir.path().join("replacement-fifo");
+        fs::write(&source, b"original").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
+
+        let raw = CString::new(replacement.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated path is owned by this disposable tempdir.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        // Simulate replacement between the metadata preflight and open().
+        // No writer exists for this FIFO. An O_RDONLY open without O_NONBLOCK
+        // would hang here; descriptor validation must reject the substituted
+        // object without returning a File.
+        fs::rename(&replacement, &source).unwrap();
+        assert_rejected_without_blocking(move || open_checked_regular(&source, &before));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_symlink_is_rejected_after_regular_file_preflight() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected-archive");
+        let target = dir.path().join("other-archive");
+        fs::write(&source, b"selected bytes").unwrap();
+        fs::write(&target, b"other bytes").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
+
+        // A pathname may become a symlink after the initial regular-file
+        // check. O_NOFOLLOW must still refuse it without reading its target.
+        fs::remove_file(&source).unwrap();
+        symlink(&target, &source).unwrap();
+        let error = open_checked_regular(&source, &before).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(fs::read(&target).unwrap(), b"other bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_regular_file_is_rejected_after_metadata_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected-input");
+        let replacement = dir.path().join("different-regular-input");
+        fs::write(&source, b"authorized archive input").unwrap();
+        fs::write(&replacement, b"unexpected replacement bytes").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
+
+        // Identical path and file type are insufficient after a rename race.
+        fs::rename(&replacement, &source).unwrap();
+        let error = open_checked_regular(&source, &before).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("changed between preflight and open"));
+
+        // A subsequent explicit operation is free to select the new file.
+        let mut opened = open_regular(&source).unwrap();
+        let mut bytes = Vec::new();
+        opened.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"unexpected replacement bytes");
     }
 
     #[test]
