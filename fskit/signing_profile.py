@@ -93,6 +93,25 @@ def check(signed, profile, entitlement, name, team, bundle_id, now=None):
     require(isinstance(expiry, datetime.datetime),
             f"{name}: provisioning profile has no expiration date")
     current = now or datetime.datetime.now(datetime.timezone.utc)
+    # A development identity cannot sign an iOS/tvOS-only profile for a
+    # macOS FSKit extension. Xcode's automatic signing may fail much later
+    # without this explicit, read-only local diagnostic. Older profile
+    # formats may omit Platform, so validate it whenever it is provided.
+    if "Platform" in profile:
+        platforms = profile["Platform"]
+        require(isinstance(platforms, list)
+                and all(isinstance(platform, str) for platform in platforms)
+                and any(platform.upper() in ("OSX", "MACOS", "MACOSX")
+                        for platform in platforms),
+                f"{name}: provisioning profile is not for macOS")
+    created = profile.get("CreationDate")
+    if created is not None:
+        require(isinstance(created, datetime.datetime),
+                f"{name}: invalid provisioning profile creation date")
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=datetime.timezone.utc)
+        require(created <= current,
+                f"{name}: provisioning profile is not yet valid")
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=datetime.timezone.utc)
     require(expiry > current,
@@ -179,8 +198,15 @@ def local_profile_paths(home):
             continue
         for suffix in ("*.mobileprovision", "*.provisionprofile"):
             for path in sorted(root.glob(suffix)):
-                if path.is_file() and not path.is_symlink():
-                    found.append(path)
+                # Local profile directories are input, not a trusted source
+                # of executable code. Refuse links, empty files and enormous
+                # CMS envelopes before security(1) decodes them.
+                try:
+                    if (not path.is_symlink() and path.is_file()
+                            and 0 < path.stat().st_size <= 8 * 1024 * 1024):
+                        found.append(path)
+                except OSError:
+                    continue
     return found
 
 
@@ -199,7 +225,7 @@ def preflight_profiles(team, home=None, decode=None):
         def decode(path):
             return subprocess.run(
                 ["/usr/bin/security", "cms", "-D", "-i", str(path)],
-                check=True, capture_output=True).stdout
+                check=True, capture_output=True, timeout=15).stdout
     decoded = []
     paths = local_profile_paths(home)
     for path in paths:
@@ -208,7 +234,7 @@ def preflight_profiles(team, home=None, decode=None):
             # profile later in the scan from satisfying either FSKit target.
             profile = plistlib.loads(decode(path))
         except (OSError, ValueError, plistlib.InvalidFileException,
-                subprocess.CalledProcessError):
+                subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
         decoded.append(profile)
     covered = covered_targets(decoded, team)
@@ -243,6 +269,44 @@ class ProfileCoverageTests(unittest.TestCase):
                     ("*" if wildcard else bundle),
             },
         }
+
+    def test_explicit_iphone_profile_never_satisfies_mac_fskit(self):
+        host, extension = FSKIT_TARGETS
+        iphone = self.profile(host)
+        iphone["Platform"] = ["iOS"]
+        mac = self.profile(extension)
+        mac["Platform"] = ["OSX"]
+        now = datetime.datetime(2026, 11, 6, tzinfo=datetime.timezone.utc)
+        self.assertEqual(covered_targets([iphone, mac], self.team, now),
+                         {"extension"})
+        for invalid_platform in ([], ["iOS", "tvOS"], "OSX", [42]):
+            with self.subTest(platform=invalid_platform):
+                iphone["Platform"] = invalid_platform
+                self.assertEqual(covered_targets([iphone], self.team, now), set())
+        iphone["Platform"] = ["OSX"]
+        self.assertEqual(covered_targets([iphone, mac], self.team, now),
+                         {"host", "extension"})
+
+    def test_future_profile_creation_date_cannot_satisfy_preflight(self):
+        host = self.profile(FSKIT_TARGETS[0])
+        now = datetime.datetime(2026, 11, 6, tzinfo=datetime.timezone.utc)
+        host["CreationDate"] = datetime.datetime(2027, 2, 1)
+        self.assertEqual(covered_targets([host], self.team, now), set())
+        host["CreationDate"] = datetime.datetime(2026, 11, 1)
+        self.assertEqual(covered_targets([host], self.team, now), {"host"})
+
+    def test_scan_refuses_oversize_and_empty_local_profiles(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            folder = home / "Library/MobileDevice/Provisioning Profiles"
+            folder.mkdir(parents=True)
+            (folder / "empty.mobileprovision").write_bytes(b"")
+            with (folder / "oversize.provisionprofile").open("wb") as fd:
+                fd.truncate(8 * 1024 * 1024 + 1)
+            good = folder / "host.mobileprovision"
+            good.write_bytes(b"small CMS fixture")
+            self.assertEqual(local_profile_paths(home), [good])
 
     def test_both_profiles_are_required(self):
         host, extension = FSKIT_TARGETS
