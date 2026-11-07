@@ -498,6 +498,25 @@ mod tests {
         }
     }
 
+    // Run potentially blocking FIFO opens in a separate thread with a deadline.
+    // A regression that drops O_NONBLOCK must fail quickly instead of hanging
+    // the entire CI job until the runner's global timeout expires.
+    #[cfg(unix)]
+    fn assert_rejected_without_blocking<T, F>(action: F)
+    where
+        F: FnOnce() -> io::Result<T> + Send + 'static,
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let outcome = action().map(|_| ()).map_err(|error| error.kind());
+            let _ = sender.send(outcome);
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("archive operation blocked while opening a FIFO");
+        assert_eq!(outcome, Err(io::ErrorKind::InvalidInput));
+    }
+
     #[cfg(unix)]
     #[test]
     fn fifo_input_is_rejected_without_waiting_for_a_writer() {
@@ -513,16 +532,35 @@ mod tests {
 
         // A FIFO opened with O_RDONLY alone would wait indefinitely for a
         // writer. All archive entry points must reject it before reading.
-        for error in [
-            open_regular(&fifo).unwrap_err(),
-            info(&fifo).unwrap_err(),
-            verify(&fifo).unwrap_err(),
-            extract(&fifo, &output).unwrap_err(),
-            extract_range(&fifo, &output, (0, 1)).unwrap_err(),
-            create(&fifo, &output, Codec::Lzraven, 64 * 1024, true).unwrap_err(),
-        ] {
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        }
+        // Each operation has its own bound. A single blocking entry point
+        // cannot prevent the remaining cases from being diagnosed.
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || open_regular(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || info(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || verify(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || extract(&path, &destination)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || extract_range(&path, &destination, (0, 1))
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || create(&path, &destination, Codec::Lzraven, 64 * 1024, true)
+        });
         assert!(!output.exists());
 
         // The nonblocking flag must not stop an ordinary file being read.
@@ -554,10 +592,7 @@ mod tests {
         // would hang here; descriptor validation must reject the substituted
         // object without returning a File.
         fs::rename(&replacement, &source).unwrap();
-        assert_eq!(
-            open_checked_regular(&source).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
+        assert_rejected_without_blocking(move || open_checked_regular(&source));
     }
 
     #[test]
