@@ -220,7 +220,10 @@ class AuditReleaseAssetsTests(unittest.TestCase):
 
     def test_duplicate_macho_main_is_refused_before_provenance(self):
         self.make_archive("aarch64", ARCHES["aarch64"],
-                          entry_offset=100, duplicate_entry=True)
+                          # With two LC_MAIN commands, the header and command table occupy
+                          # 32 + 24 + 24 + 24 = 104 bytes. A valid offset
+                          # reaches the duplicate-command guard itself.
+                          entry_offset=104, duplicate_entry=True)
         run = self.run_audit()
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("duplicate Mach-O LC_MAIN", run.stderr)
