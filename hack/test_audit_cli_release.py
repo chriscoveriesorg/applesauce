@@ -44,20 +44,29 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         for arch, cpu in ARCHES.items():
             self.make_archive(arch, cpu)
 
-    def make_archive(self, arch, cpu, *, symlink=False, filetype=2):
+    def make_archive(self, arch, cpu, *, symlink=False, filetype=2,
+                     name="applesauce-cli/applesauce", mode=0o755,
+                     bad_load_size=False, extra_link=False):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
-            data = (b"\xcf\xfa\xed\xfe" + struct.pack("<I", cpu) + b"\0" * 4
-                    + struct.pack("<I", filetype) + b"\0" * 64)
-            member = tarfile.TarInfo("applesauce-cli/applesauce")
+            data = (b"\xcf\xfa\xed\xfe"
+                    + struct.pack("<7I", cpu, 0, filetype, 1, 8, 0, 0)
+                    + struct.pack("<II", 2, 7 if bad_load_size else 8)
+                    + b"\0" * 64)
+            member = tarfile.TarInfo(name)
+            member.mode = mode
             if symlink:
                 member.type = tarfile.SYMTYPE
                 member.linkname = "../../outside"
                 tar.addfile(member)
             else:
                 member.size = len(data)
-                member.mode = 0o755
                 tar.addfile(member, io.BytesIO(data))
+            if extra_link:
+                link = tarfile.TarInfo("applesauce-cli/unsafe-link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../../outside"
+                tar.addfile(link)
         return path
 
     def run_audit(self):
@@ -125,6 +134,31 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         path = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
         path.write_bytes(b"fake archive")
         self.assertIn("cannot read tar archive", self.run_audit().stderr)
+
+    def test_archive_path_traversal_and_absolute_names_are_refused(self):
+        for unsafe in ("../../applesauce", "/tmp/applesauce",
+                       "applesauce-cli/../applesauce",
+                       "applesauce-cli//applesauce",
+                       r"applesauce-cli\applesauce"):
+            with self.subTest(path=unsafe):
+                self.make_archive("aarch64", ARCHES["aarch64"], name=unsafe)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("unsafe archive member path", run.stderr)
+
+    def test_secondary_symlink_in_archive_is_refused(self):
+        self.make_archive("aarch64", ARCHES["aarch64"], extra_link=True)
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("unsafe tar member type", run.stderr)
+
+    def test_executable_bit_required_for_installed_binary(self):
+        self.make_archive("aarch64", ARCHES["aarch64"], mode=0o644)
+        self.assertIn("invalid executable size or mode", self.run_audit().stderr)
+
+    def test_malformed_macho_load_command_is_refused(self):
+        self.make_archive("aarch64", ARCHES["aarch64"], bad_load_size=True)
+        self.assertIn("invalid Mach-O load command size", self.run_audit().stderr)
 
     def test_missing_or_failed_provenance_fails_closed(self):
         self.env["AUDIT_GH_FAIL"] = "attestation"
