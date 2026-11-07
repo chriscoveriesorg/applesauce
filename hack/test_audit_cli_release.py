@@ -304,6 +304,24 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 self.assertFalse(any(c[:2] == ["release", "verify-asset"]
                                      for c in self.calls()))
 
+    def test_writable_archive_directory_is_refused_before_provenance(self):
+        for mode in (0o775, 0o757, 0o777):
+            with self.subTest(mode=oct(mode)):
+                path = self.downloads / (
+                    "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+                )
+                with tarfile.open(path, "w:xz") as tar:
+                    directory = tarfile.TarInfo("applesauce-cli/docs")
+                    directory.type = tarfile.DIRTYPE
+                    directory.mode = mode
+                    tar.addfile(directory)
+                self.log.unlink(missing_ok=True)
+                run = self.run_audit()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("writable archive directory", run.stderr)
+                self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                     for c in self.calls()))
+
     def test_executable_bit_required_for_installed_binary(self):
         self.make_archive("aarch64", ARCHES["aarch64"], mode=0o644)
         self.assertIn("invalid or writable executable mode", self.run_audit().stderr)
