@@ -114,6 +114,10 @@ def check_macho(archive, arch):
                 # non-executable archive members.
                 if member.mode & 0o7000:
                     raise AuditError(f"{archive.name}: unsafe archive member permissions")
+                # Group/world-writable directories can permit replacement of
+                # otherwise protected files after extraction. Refuse them too.
+                if member.isdir() and member.mode & 0o022:
+                    raise AuditError(f"{archive.name}: writable archive directory")
                 # Installed regular files must not be modifiable by other users.
                 if member.isfile() and member.mode & 0o022:
                     raise AuditError(f"{archive.name}: writable archive regular file")
