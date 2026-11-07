@@ -184,6 +184,7 @@ def check_macho(archive, arch):
                     binary_hash.update(commands)
                     offset = 0
                     macos_marker_seen = False
+                    main_entry_seen = False
                     for _ in range(ncmds):
                         if offset + 8 > sizeofcmds:
                             raise AuditError(f"{archive.name}: truncated Mach-O load command")
@@ -219,6 +220,9 @@ def check_macho(archive, arch):
                                 raise AuditError(f"{archive.name}: short macOS version command")
                             macos_marker_seen = True
                         if command == 0x80000028:  # LC_MAIN
+                            if main_entry_seen:
+                                raise AuditError(f"{archive.name}: duplicate Mach-O LC_MAIN")
+                            main_entry_seen = True
                             if size != 24:
                                 raise AuditError(f"{archive.name}: malformed Mach-O LC_MAIN")
                             entryoff = struct.unpack_from(
