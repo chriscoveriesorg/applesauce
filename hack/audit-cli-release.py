@@ -51,35 +51,79 @@ def find_archives(directory):
 
 
 def check_macho(archive, arch):
+    # A verified archive is later extracted by an installer. Validate every tar
+    # entry before certifying it, even though this auditor never extracts files.
+    found_binary = False
+    total_size = 0
     try:
         with tarfile.open(archive, "r:*") as tar:
-            matches = [
-                member for member in tar.getmembers()
-                if member.name.split("/")[-1] == "applesauce"
-            ]
-            if len(matches) != 1 or not matches[0].isfile():
-                raise AuditError(f"{archive.name}: missing or unsafe applesauce binary")
-            member = matches[0]
-            if member.size < 16 or member.size > 128 * 1024 * 1024:
-                raise AuditError(f"{archive.name}: invalid executable size")
-            with tar.extractfile(member) as binary:
-                header = binary.read(16)
+            for index, member in enumerate(tar):
+                if index >= 4096:
+                    raise AuditError(f"{archive.name}: excessive tar entries")
+                # Reject absolute/traversing paths and ambiguous separators.
+                # A leading './' is customary in some otherwise safe tarballs.
+                name = member.name
+                if name.startswith("./"):
+                    name = name[2:]
+                parts = name.rstrip("/").split("/")
+                if (not name or name.startswith("/") or "\\" in name
+                        or any(part in ("", ".", "..") for part in parts)):
+                    raise AuditError(f"{archive.name}: unsafe archive member path")
+                if not (member.isfile() or member.isdir()):
+                    raise AuditError(f"{archive.name}: unsafe tar member type")
+                if member.size < 0 or member.size > 128 * 1024 * 1024:
+                    raise AuditError(f"{archive.name}: excessive member size")
+                total_size += member.size
+                if total_size > 512 * 1024 * 1024:
+                    raise AuditError(f"{archive.name}: excessive archive expansion")
+
+                if parts[-1] != "applesauce":
+                    continue
+                if found_binary or not member.isfile():
+                    raise AuditError(f"{archive.name}: duplicate or unsafe applesauce binary")
+                found_binary = True
+                if member.size < 40 or not (member.mode & 0o111):
+                    raise AuditError(f"{archive.name}: invalid executable size or mode")
+                with tar.extractfile(member) as binary:
+                    header = binary.read(32)
+                    if len(header) != 32:
+                        raise AuditError(f"{archive.name}: truncated Mach-O header")
+                    magic = header[:4]
+                    if magic == b"\\xcf\\xfa\\xed\\xfe":
+                        endian = "<"
+                    elif magic == b"\\xfe\\xed\\xfa\\xcf":
+                        endian = ">"
+                    else:
+                        raise AuditError(f"{archive.name}: executable is not a thin Mach-O 64")
+                    cpu, _, filetype, ncmds, sizeofcmds, _, _ = struct.unpack(
+                        endian + "7I", header[4:]
+                    )
+                    if filetype != 2:
+                        raise AuditError(
+                            f"{archive.name}: Mach-O filetype {filetype}, expected executable"
+                        )
+                    if cpu != ARCH_CPUS[arch]:
+                        raise AuditError(f"{archive.name}: Mach-O CPU {cpu:#x}, expected {arch}")
+                    if (not 1 <= ncmds <= 4096 or not 8 <= sizeofcmds <= 8 * 1024 * 1024
+                            or sizeofcmds > member.size - 32):
+                        raise AuditError(f"{archive.name}: invalid Mach-O load command table")
+                    commands = binary.read(sizeofcmds)
+                    if len(commands) != sizeofcmds:
+                        raise AuditError(f"{archive.name}: truncated Mach-O load commands")
+                    offset = 0
+                    for _ in range(ncmds):
+                        if offset + 8 > sizeofcmds:
+                            raise AuditError(f"{archive.name}: truncated Mach-O load command")
+                        _, size = struct.unpack_from(endian + "II", commands, offset)
+                        if size < 8 or offset + size > sizeofcmds:
+                            raise AuditError(f"{archive.name}: invalid Mach-O load command size")
+                        offset += size
+                    if offset != sizeofcmds:
+                        raise AuditError(f"{archive.name}: unaccounted Mach-O load command bytes")
     except (tarfile.TarError, EOFError, OSError) as exc:
         raise AuditError(f"{archive.name}: cannot read tar archive: {exc}") from exc
-
-    magic = header[:4]
-    if magic == b"\xcf\xfa\xed\xfe":
-        endian = "<"
-    elif magic == b"\xfe\xed\xfa\xcf":
-        endian = ">"
-    else:
-        raise AuditError(f"{archive.name}: executable is not a thin Mach-O 64")
-    cpu = struct.unpack(endian + "I", header[4:8])[0]
-    filetype = struct.unpack(endian + "I", header[12:16])[0]
-    if filetype != 2:  # MH_EXECUTE; refuse dynamic libraries or fabricated headers
-        raise AuditError(f"{archive.name}: Mach-O filetype {filetype}, expected executable")
-    if cpu != ARCH_CPUS[arch]:
-        raise AuditError(f"{archive.name}: Mach-O CPU {cpu:#x}, expected {arch}")
+    if not found_binary:
+        raise AuditError(f"{archive.name}: missing or unsafe applesauce binary")
 
 
 def gh(*args):
