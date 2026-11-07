@@ -574,6 +574,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn unix_socket_and_directory_inputs_are_rejected_before_open() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("archive-socket");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        for path in [&socket, dir.path()] {
+            assert_eq!(
+                open_regular(path).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "accepted non-regular archive input: {path:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn swapped_fifo_is_rejected_after_a_successful_regular_file_preflight() {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
