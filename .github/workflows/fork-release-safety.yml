@@ -10,6 +10,8 @@ on:
       - '.github/fork-release-build-setup.yml'
       - 'hack/verify-fork-release.sh'
       - 'hack/test_fork_release.py'
+      - 'hack/tag-cli-release.sh'
+      - 'hack/test_tag_cli_release.py'
       - 'crates/**/Cargo.toml'
   pull_request:
     paths:
@@ -20,6 +22,8 @@ on:
       - '.github/fork-release-build-setup.yml'
       - 'hack/verify-fork-release.sh'
       - 'hack/test_fork_release.py'
+      - 'hack/tag-cli-release.sh'
+      - 'hack/test_tag_cli_release.py'
       - 'crates/**/Cargo.toml'
 
 permissions:
@@ -45,4 +49,6 @@ jobs:
           python3 --version
       - uses: actions/checkout@v4
       - name: Check fork binary release and tag gates
-        run: python3 -m unittest discover -s hack -p 'test_fork_release.py' -v
+        run: |
+          python3 -m unittest discover -s hack -p 'test_fork_release.py' -v
+          python3 -m unittest discover -s hack -p 'test_tag_cli_release.py' -v
