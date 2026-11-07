@@ -68,6 +68,19 @@ class TagCliReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.git("rev-parse", "applesauce-cli/v0.5.32").stdout.strip(), self.sha)
         self.assertNotEqual(self.run_helper("0.5.32", self.sha, "--push").returncode, 0)
+        self.assertIn(self.sha, self.git("ls-remote", "origin", "refs/tags/applesauce-cli/v0.5.32").stdout)
+
+    def test_refuses_existing_remote_tag_even_if_not_present_locally(self):
+        self.git("tag", "applesauce-cli/v0.5.32", self.sha)
+        self.git("push", "origin", "refs/tags/applesauce-cli/v0.5.32")
+        self.git("tag", "-d", "applesauce-cli/v0.5.32")
+        self.assertNotEqual(self.run_helper("0.5.32", self.sha, "--push").returncode, 0)
+
+    def test_rejects_wrong_origin(self):
+        self.git("remote", "set-url", "origin", "https://example.invalid/other/repo.git")
+        result = self.run_helper("0.5.32", self.sha)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("origin must point", result.stderr)
 
     def test_rejects_unqualified_source_or_version(self):
         for version, sha in [("0.5.31", self.sha), ("0.5.32", "f" * 40),
