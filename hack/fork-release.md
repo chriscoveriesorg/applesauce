@@ -22,22 +22,81 @@ binary build. A failed builder blocks artifact hosting. Inspect checksums
 afterward. A green CI job does not prove native LZRAVEN/LZMESH filesystem
 decoding.
 
-The owner can push the validated tag from a local Git checkout, after
-reviewing `main` CI and the current package version:
+Tag creation must use the **qualified CI-green source commit**, even if
+`main` has moved to a newer commit with the same CLI version. The owner runs
+the fail-closed helper from the up-to-date fork checkout. The helper fetches
+`origin/main`, checks commit ancestry and the CLI package version at that SHA,
+requires successful exact-SHA main push CI, and rejects an existing tag.
+Before any remote operation it also rejects configured Git URL rewrites
+(`insteadOf`/`pushInsteadOf`), extra origin URLs and `pushurl` overrides,
+and checks that the effective fetch and push destinations match the approved
+GitHub origin. Remove or isolate those settings in the release checkout
+rather than circumventing the guard.
+Without `--push` it creates no tag.
+
+For **v0.5.31**, the only authorized source is
+`1585dceb6c745cebf822588526ee5005255818c9`:
 
 ```sh
-git fetch origin main --tags
-git switch main
-git pull --ff-only origin main
-git tag applesauce-cli/v<CLI-VERSION>
-git push origin applesauce-cli/v<CLI-VERSION>
+bash hack/tag-cli-release.sh 0.5.31 1585dceb6c745cebf822588526ee5005255818c9
+bash hack/tag-cli-release.sh 0.5.31 1585dceb6c745cebf822588526ee5005255818c9 --push
 ```
 
-Replace `<CLI-VERSION>` with the actual version. The `Release` GitHub Actions
-workflow builds and publishes the matching GitHub release after its gates pass.
-Do not reuse an already-published version tag or force-move one.
+The `--push` action requires the owner's GitHub authentication. Use
+the helper rather than issuing `git tag` directly. GitHub evaluates release
+workflows and their guard scripts from the **tagged source commit**; the
+qualified v0.5.31 commit predates the newer exact-SHA publisher check and
+cannot inherit it retroactively. The owner-side helper therefore supplies
+the essential exact-SHA gate before creating this historical release tag.
+If it refuses, resolve the stated failure rather than bypassing the check.
+Never force-move a tag.
+
+The `Release` GitHub Actions workflow builds and publishes the matching GitHub
+release after its gates pass. Binary downloadability, both macOS architectures,
+installability, SHA-256 and provenance must be checked against the produced
+artifacts before declaring v0.5.31 shipped.
 
 Until a version is tagged and its release artifacts pass validation, the fork
 has a **release candidate only**, regardless of how many PRs or benchmarks
 have passed. Binary distribution is separate from native Raven/Mesh
 qualification. See [the codec roadmap](roadmap-lzraven.md).
+
+## Post-publication macOS asset audit
+
+After the owner has pushed the **qualified** tag and the Release workflow has
+published both archives, download them into a **new empty directory**. The
+auditor checks that exactly one arm64 and one Intel macOS archive are present;
+each contains a regular thin Mach-O \`applesauce\` binary with the expected CPU
+type. The auditor also checks executable mode, baseline CPU subtype, macOS
+platform, Mach-O build-tool records and any LC_MAIN entry offset, then scans
+every archive member without extracting it. It rejects traversal or absolute
+paths, links, special files, duplicate executables and excessive member sizes
+or total expansion. It reads the complete executable to record an independent
+SHA-256 for the inner Mach-O alongside the downloaded archive's SHA-256.
+These fingerprints let operators compare the exact installed executable with
+the audited archive after unpacking. It invokes the GitHub CLI
+for two independent remote checks per archive: release-asset byte identity and
+cryptographic provenance bound to the exact source SHA, tag ref, repository and
+release workflow. This requires an up-to-date \`gh\` authenticated for public
+GitHub reads.
+
+\`\`\`sh
+mkdir -p /tmp/applesauce-v0.5.31-assets
+gh release download applesauce-cli/v0.5.31 \
+  -R chriscoveriesorg/applesauce \
+  --dir /tmp/applesauce-v0.5.31-assets \
+  --pattern '*apple-darwin.tar.*'
+python3 hack/audit-cli-release.py /tmp/applesauce-v0.5.31-assets
+\`\`\`
+
+The auditor is deliberately pinned to v0.5.31 and its qualified SHA. Failure
+to verify either architecture or either remote assertion fails the audit.
+Synthetic tests are available via
+\`python3 -m unittest discover -s hack -p test_audit_cli_release.py -v\`
+and run in fork-release-safety CI. Those synthetic tests mock \`gh\`; only the
+post-publication command invokes real GitHub verification.
+
+The archive audit reads bytes without installing or executing the CLI.
+**Release acceptance also requires actual installation, \`applesauce --version\`
+and a disposable-file smoke test on real arm64 and x86_64 macOS machines.**
+FSKit mounted acceptance and native APFS decoder qualification remain separate.
