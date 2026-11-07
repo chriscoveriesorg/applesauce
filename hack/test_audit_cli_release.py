@@ -50,7 +50,7 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                      name="applesauce-cli/applesauce", mode=0o755,
                      bad_load_size=False, extra_link=False, extra_members=(),
                      subtype=None, platform=1, build_tool_count=0,
-                     entry_offset=None):
+                     entry_offset=None, duplicate_entry=False):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
             if platform is None:
@@ -64,13 +64,18 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 )
             if entry_offset is not None:
                 command += struct.pack("<IIQQ", 0x80000028, 24, entry_offset, 0)
+            if duplicate_entry:
+                if entry_offset is None:
+                    raise ValueError("duplicate_entry requires entry_offset")
+                command += struct.pack("<IIQQ", 0x80000028, 24, entry_offset, 0)
             default_subtype = next(
                 (SUBTYPES[arch] for arch, target in ARCHES.items() if cpu == target), 0
             )
             data = (b"\xcf\xfa\xed\xfe"
                     + struct.pack("<7I", cpu,
                                   default_subtype if subtype is None else subtype,
-                                  filetype, 1 + (entry_offset is not None),
+                                  filetype, 1 + (entry_offset is not None)
+                                  + duplicate_entry,
                                   len(command), 0, 0)
                     + command + b"\0" * 64)
             member = tarfile.TarInfo(name)
@@ -199,6 +204,15 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         with tarfile.open(asset, "r:xz") as tar:
             executable = tar.extractfile("applesauce-cli/applesauce").read()
         self.assertIn(hashlib.sha256(executable).hexdigest(), run.stdout)
+
+    def test_duplicate_macho_main_is_refused_before_provenance(self):
+        self.make_archive("aarch64", ARCHES["aarch64"],
+                          entry_offset=100, duplicate_entry=True)
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("duplicate Mach-O LC_MAIN", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
 
     def test_dynamic_library_header_is_refused(self):
         self.make_archive("x86_64", ARCHES["x86_64"], filetype=6)
