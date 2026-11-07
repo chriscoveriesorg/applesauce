@@ -12,7 +12,9 @@ import datetime
 import errno
 import hashlib
 import json
+import os
 import re
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -27,6 +29,51 @@ from finder_mount_witness import load_report
 
 class EvidenceError(ValueError):
     pass
+
+
+# Source and archive fixtures are independently manifest-limited to 1 GiB.
+# Verification streams digests; operator-supplied text never needs megabytes.
+MAX_FIXTURE_BYTES = 1024 * 1024 * 1024
+MAX_OPERATOR_BYTES = 64 * 1024
+READ_CHUNK = 1024 * 1024
+
+
+def bounded_regular(path, limit, hash_only=False):
+    """Read or hash a stable, bounded regular FD, refusing FIFO and symlinks.
+
+    Nonblocking opens avoid hanging when a named pipe has no writer.
+    Source identity is checked after the final byte to reject concurrent edits.
+    """
+    require(all(getattr(os, flag, 0) for flag in
+                ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")),
+            "platform lacks safe operator-evidence open flags")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and 0 <= before.st_size <= limit,
+                "evidence is not a bounded regular file: " + str(path))
+        snapshot = (before.st_dev, before.st_ino, before.st_mode,
+                    before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+                    before.st_nlink)
+        hasher = hashlib.sha256()
+        data = bytearray() if not hash_only else None
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(fd, min(READ_CHUNK, remaining))
+            require(bool(chunk), "evidence shortened during read: " + str(path))
+            hasher.update(chunk)
+            if data is not None:
+                data.extend(chunk)
+            remaining -= len(chunk)
+        require(not os.read(fd, 1), "evidence grew during read: " + str(path))
+        after = os.fstat(fd)
+        require(snapshot == (after.st_dev, after.st_ino, after.st_mode,
+                             after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+                             after.st_nlink),
+                "evidence changed during read: " + str(path))
+        return (before.st_size, hasher.hexdigest()) if hash_only else bytes(data)
+    finally:
+        os.close(fd)
 
 
 def require(condition, message):
@@ -50,7 +97,7 @@ def signed_source_commit(bundle):
     Both the repository name and full commit SHA are covered by SHA256SUMS.
     A malformed record must never pass as a claimed provenance identity.
     """
-    raw = (Path(bundle) / "source-provenance.txt").read_text(encoding="utf-8")
+    raw = bounded_regular(Path(bundle) / "source-provenance.txt", MAX_OPERATOR_BYTES).decode("utf-8")
     match = re.fullmatch(
         r"repository=chriscoveriesorg/applesauce\ncommit=([0-9a-f]{40})\n",
         raw,
@@ -95,8 +142,7 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     require(codec in ("lzraven", "lzmesh"), "unsupported codec")
     source = Path(bundle) / ("source." + codec + ".jsonl")
     require(source.is_file(), "missing synthetic reference cleartext")
-    reference = source.read_bytes()
-    digest = hashlib.sha256(reference).hexdigest()
+    logical_bytes, digest = bounded_regular(source, MAX_FIXTURE_BYTES, hash_only=True)
     reports = [load_json(first), load_json(remounted)]
 
     for stage, report in zip(("first mount", "remount"), reports):
@@ -116,7 +162,7 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
         # Check the mounted bytes against the reference before checking the
         # independently copied Finder output. A replaced synthetic source must
         # fail at the logical-byte contract, even if the Finder proof is stale.
-        require(report.get("logical_bytes") == len(reference)
+        require(report.get("logical_bytes") == logical_bytes
                 and report.get("sha256") == digest,
                 stage + ": original logical bytes do not match bundle")
         require(report.get("restored_file") == "source." + codec,
@@ -138,7 +184,7 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
         require(report.get("macos_version") and report.get("macos_build"),
                 stage + ": missing host OS provenance")
         offsets = report.get("random_read_offsets")
-        require(offsets == sampled_offsets(len(reference), digest),
+        require(offsets == sampled_offsets(logical_bytes, digest),
                 stage + ": complete deterministic random/EOF read evidence missing")
     require(reports[0]["macos_build"] == reports[1]["macos_build"],
             "first mount and remount have different macOS build provenance")
@@ -207,14 +253,14 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
                           ("replacement_sha256", ".corrupt.ascf")):
         archive = Path(bundle) / ("source." + codec + suffix)
         require(archive.is_file(), "required signed-bundle archive fixture missing")
-        require(replaced.get(field) == hashlib.sha256(archive.read_bytes()).hexdigest(),
+        require(replaced.get(field) == bounded_regular(archive, MAX_FIXTURE_BYTES, hash_only=True)[1],
                 "replaced-source refusal has wrong " + field)
     require(replaced.get("denied_errno") in (errno.ESTALE, errno.EIO, errno.ENODEV),
             "replaced-source fresh read did not fail with the permitted errno")
     # Check the entire deterministic source-replacement probe schedule. A
     # single refused offset-zero read cannot attest to cached chunk boundaries,
     # nonzero offsets, EOF or newly opened paths.
-    offsets = replacement_offsets(len(reference))
+    offsets = replacement_offsets(logical_bytes)
     require(replaced.get("denied_offsets") == offsets,
             "replaced-source refusal offset schedule incomplete")
     errnos = replaced.get("denied_errnos")
@@ -230,26 +276,26 @@ def validate(bundle, codec, first, unmounted, remounted, refusal, replacement):
     # manifest-covered damaged fixture. Reject a copied confirmation line
     # embedded in other diagnostics and a same-named unrelated corrupt file.
     corrupt_fixture = Path(bundle) / ("source." + codec + ".corrupt.ascf")
-    expected_sha = hashlib.sha256(corrupt_fixture.read_bytes()).hexdigest()
+    expected_sha = bounded_regular(corrupt_fixture, MAX_FIXTURE_BYTES, hash_only=True)[1]
     expected_prefix = ("CORRUPT_REFUSAL_CONFIRMED: source." + codec
                        + ".corrupt.ascf: sha256=" + expected_sha
                        + ": signed FSKit probe rejected the recognized ASCF payload: "
                        + "FSKitErrorDomain resourceDamaged code ")
-    text = Path(refusal).read_text(encoding="utf-8").strip()
+    text = bounded_regular(refusal, MAX_OPERATOR_BYTES).decode("utf-8").strip()
     require(text.startswith(expected_prefix)
             and re.fullmatch(r"[1-9][0-9]*: [^\r\n]+", text[len(expected_prefix):]) is not None,
             "typed codec-specific signed-host corruption refusal is not bound to the bundled fixture SHA-256")
 
     paths = (first, unmounted, remounted, refusal, replacement)
     evidence_hashes = {
-        name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        name: bounded_regular(path, MAX_OPERATOR_BYTES, hash_only=True)[1]
         for name, path in zip(("first", "unmounted", "remounted", "refusal", "replacement"), paths)
     }
     return {
         "result": "pass",
         "scope": "operator-evidence-consistency; independent signed-mount review required",
         "codec": codec,
-        "logical_bytes": len(reference),
+        "logical_bytes": logical_bytes,
         "sha256": digest,
         "source_commit": signed_source_commit(bundle),
         "first_mount": reports[0]["mount"],
@@ -423,6 +469,54 @@ class EvidenceTests(unittest.TestCase):
         self.items[1].symlink_to(self.items[0])
         with self.assertRaisesRegex(EvidenceError, "unsafe signed acceptance"):
             self.check()
+
+    def test_operator_refusal_fifo_is_rejected_without_blocking(self):
+        # Substituted named pipes previously hung the unbounded read_text().
+        refusal = self.items[3]
+        refusal.unlink()
+        os.mkfifo(refusal)
+        with self.assertRaisesRegex(EvidenceError, "bounded regular file"):
+            self.check()
+
+    def test_operator_refusal_symlink_and_oversized_text_are_rejected(self):
+        refusal = self.items[3]
+        refusal.unlink()
+        refusal.symlink_to(self.items[0])
+        with self.assertRaises(OSError):
+            self.check()
+        refusal.unlink()
+        refusal.write_bytes(b"x" * (MAX_OPERATOR_BYTES + 1))
+        with self.assertRaisesRegex(EvidenceError, "bounded regular file"):
+            self.check()
+
+    def test_source_fixture_fifo_and_oversized_sparse_file_are_rejected(self):
+        source = self.base / "source.lzmesh.jsonl"
+        source.unlink()
+        os.mkfifo(source)
+        with self.assertRaisesRegex(EvidenceError, "bounded regular file"):
+            self.check()
+        source.unlink()
+        with source.open("wb") as stream:
+            stream.truncate(MAX_FIXTURE_BYTES + 1)
+        with self.assertRaisesRegex(EvidenceError, "bounded regular file"):
+            self.check()
+
+    def test_bounded_reader_detects_shortened_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            member = Path(tmp) / "fixture"
+            member.write_bytes(b"12345")
+            original_read = os.read
+            member_inode = member.stat().st_ino
+
+            def short_read(fd, amount):
+                if os.fstat(fd).st_ino == member_inode:
+                    return b""
+                return original_read(fd, amount)
+
+            from unittest import mock
+            with mock.patch.object(os, "read", side_effect=short_read):
+                with self.assertRaisesRegex(EvidenceError, "shortened during read"):
+                    bounded_regular(member, MAX_OPERATOR_BYTES, hash_only=True)
 
     def test_canonical_manifest_source_commit_is_reported(self):
         self.assertEqual(self.check()["source_commit"], "a" * 40)
