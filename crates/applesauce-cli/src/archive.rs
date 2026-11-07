@@ -182,7 +182,7 @@ fn sample_auto_codec(source: &mut File, source_len: u64) -> io::Result<Codec> {
         if !codec.is_supported() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("auto requires both {} and lzmesh buffer APIs", codec.name()),
+                "auto requires both lzraven and lzmesh buffer APIs",
             ));
         }
     }
@@ -477,7 +477,13 @@ mod tests {
     #[test]
     fn auto_choice_is_explicit_and_uses_a_deterministic_threshold() {
         assert!(crate::Cli::try_parse_from([
-            "applesauce", "archive", "create", "input", "output", "--codec", "auto"
+            "applesauce",
+            "archive",
+            "create",
+            "input",
+            "output",
+            "--codec",
+            "auto",
         ])
         .is_ok());
         assert_eq!(ArchiveCodec::Lzraven.selected(), Some(Codec::Lzraven));
@@ -498,7 +504,8 @@ mod tests {
         let source_path = dir.path().join("auto-source.jsonl");
         let archive_path = dir.path().join("auto.ascf");
         let restore_path = dir.path().join("auto-restored");
-        let data = b"{\"role\":\"user\",\"content\":\"generated fixture\"}\n".repeat(4096);
+        let data =
+            b"{\"role\":\"user\",\"content\":\"generated fixture\"}\n".repeat(4096);
         fs::write(&source_path, &data).unwrap();
         let expected = {
             let mut source = open_regular(&source_path).unwrap();
