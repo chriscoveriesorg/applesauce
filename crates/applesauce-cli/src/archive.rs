@@ -206,7 +206,10 @@ fn sample_auto_codec(source: &mut File, source_len: u64) -> io::Result<Codec> {
     let selected = prefer_auto_codec(encoded_lengths[0], encoded_lengths[1]);
     eprintln!(
         "archive --codec auto: {} sampled bytes, raven {} bytes, mesh {} bytes; selected {}",
-        sample_len, encoded_lengths[0], encoded_lengths[1], selected.name()
+        sample_len,
+        encoded_lengths[0],
+        encoded_lengths[1],
+        selected.name()
     );
     Ok(selected)
 }
@@ -504,8 +507,7 @@ mod tests {
         let source_path = dir.path().join("auto-source.jsonl");
         let archive_path = dir.path().join("auto.ascf");
         let restore_path = dir.path().join("auto-restored");
-        let data =
-            b"{\"role\":\"user\",\"content\":\"generated fixture\"}\n".repeat(4096);
+        let data = b"{\"role\":\"user\",\"content\":\"generated fixture\"}\n".repeat(4096);
         fs::write(&source_path, &data).unwrap();
         let expected = {
             let mut source = open_regular(&source_path).unwrap();
