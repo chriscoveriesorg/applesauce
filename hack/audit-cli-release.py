@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import unicodedata
 from pathlib import Path
 
 REPO = "chriscoveriesorg/applesauce"
@@ -56,6 +57,9 @@ def check_macho(archive, arch):
     found_binary = False
     total_size = 0
     seen_paths = set()
+    mac_paths = set()
+    regular_files = set()
+    nested_prefixes = set()
     try:
         with tarfile.open(archive, "r:*") as tar:
             for index, member in enumerate(tar):
@@ -75,6 +79,32 @@ def check_macho(archive, arch):
                 if name in seen_paths:
                     raise AuditError(f"{archive.name}: duplicate archive member path")
                 seen_paths.add(name)
+                # The verified archive will be unpacked onto a macOS filesystem.
+                # Reject paths that become aliases under canonical Unicode
+                # decomposition and case-insensitive lookup. Otherwise a second
+                # file can replace a previously audited 'applesauce' executable.
+                mac_parts = [unicodedata.normalize("NFD", part).casefold()
+                             for part in parts]
+                mac_path = "/".join(mac_parts)
+                if mac_path in mac_paths:
+                    raise AuditError(
+                        f"{archive.name}: archive member path collides on macOS"
+                    )
+                mac_paths.add(mac_path)
+
+                parents = ["/".join(mac_parts[:count])
+                           for count in range(1, len(mac_parts))]
+                if any(parent in regular_files for parent in parents):
+                    raise AuditError(
+                        f"{archive.name}: archive file obstructs nested path"
+                    )
+                if member.isfile() and mac_path in nested_prefixes:
+                    raise AuditError(
+                        f"{archive.name}: archive file conflicts with directory"
+                    )
+                nested_prefixes.update(parents)
+                if member.isfile():
+                    regular_files.add(mac_path)
                 if not (member.isfile() or member.isdir()):
                     raise AuditError(f"{archive.name}: unsafe tar member type")
                 if member.size < 0 or member.size > 128 * 1024 * 1024:
