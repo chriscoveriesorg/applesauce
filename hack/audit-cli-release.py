@@ -19,6 +19,9 @@ REPO = "chriscoveriesorg/applesauce"
 TAG = "applesauce-cli/v0.5.31"
 QUALIFIED_SHA = "1585dceb6c745cebf822588526ee5005255818c9"
 ARCH_CPUS = {"aarch64": 0x0100000C, "x86_64": 0x01000007}
+# The public archives must run on baseline machines for each target, not
+# require arm64e pointer authentication or the x86_64h Haswell variant.
+ARCH_SUBTYPES = {"aarch64": 0, "x86_64": 3}
 SUFFIXES = (".tar.xz", ".tar.gz")
 
 
@@ -133,7 +136,7 @@ def check_macho(archive, arch):
                         endian = ">"
                     else:
                         raise AuditError(f"{archive.name}: executable is not a thin Mach-O 64")
-                    cpu, _, filetype, ncmds, sizeofcmds, _, _ = struct.unpack(
+                    cpu, subtype, filetype, ncmds, sizeofcmds, _, _ = struct.unpack(
                         endian + "7I", header[4:]
                     )
                     if filetype != 2:
@@ -142,6 +145,14 @@ def check_macho(archive, arch):
                         )
                     if cpu != ARCH_CPUS[arch]:
                         raise AuditError(f"{archive.name}: Mach-O CPU {cpu:#x}, expected {arch}")
+                    # The high capability byte can contain the ordinary LIB64
+                    # flag; refuse unknown feature bits and special CPU subtypes.
+                    if ((subtype & 0x00ffffff) != ARCH_SUBTYPES[arch]
+                            or subtype & 0x7f000000):
+                        raise AuditError(
+                            f"{archive.name}: Mach-O CPU subtype {subtype:#x} "
+                            f"is not baseline {arch}"
+                        )
                     if (not 1 <= ncmds <= 4096 or not 8 <= sizeofcmds <= 8 * 1024 * 1024
                             or sizeofcmds > member.size - 32):
                         raise AuditError(f"{archive.name}: invalid Mach-O load command table")
@@ -149,15 +160,39 @@ def check_macho(archive, arch):
                     if len(commands) != sizeofcmds:
                         raise AuditError(f"{archive.name}: truncated Mach-O load commands")
                     offset = 0
+                    macos_marker_seen = False
                     for _ in range(ncmds):
                         if offset + 8 > sizeofcmds:
                             raise AuditError(f"{archive.name}: truncated Mach-O load command")
-                        _, size = struct.unpack_from(endian + "II", commands, offset)
+                        command, size = struct.unpack_from(endian + "II", commands, offset)
                         if size < 8 or offset + size > sizeofcmds:
                             raise AuditError(f"{archive.name}: invalid Mach-O load command size")
+                        # Architecture alone does not distinguish macOS from
+                        # iOS/tvOS/watchOS Mach-O executables. Modern toolchains
+                        # emit LC_BUILD_VERSION; older ones emit LC_VERSION_MIN_*.
+                        if command in (0x32, 0x24, 0x25, 0x2f, 0x30):
+                            if macos_marker_seen:
+                                raise AuditError(f"{archive.name}: duplicate Mach-O platform marker")
+                            if command == 0x32:
+                                if size < 24:
+                                    raise AuditError(f"{archive.name}: short Mach-O build version")
+                                platform = struct.unpack_from(
+                                    endian + "I", commands, offset + 8
+                                )[0]
+                                if platform != 1:  # PLATFORM_MACOS
+                                    raise AuditError(
+                                        f"{archive.name}: Mach-O targets platform {platform}, not macOS"
+                                    )
+                            elif command != 0x24:  # LC_VERSION_MIN_MACOSX
+                                raise AuditError(f"{archive.name}: foreign Mach-O platform")
+                            elif size < 16:
+                                raise AuditError(f"{archive.name}: short macOS version command")
+                            macos_marker_seen = True
                         offset += size
                     if offset != sizeofcmds:
                         raise AuditError(f"{archive.name}: unaccounted Mach-O load command bytes")
+                    if not macos_marker_seen:
+                        raise AuditError(f"{archive.name}: missing macOS Mach-O platform marker")
     except (tarfile.TarError, EOFError, OSError) as exc:
         raise AuditError(f"{archive.name}: cannot read tar archive: {exc}") from exc
     if not found_binary:
