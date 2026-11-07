@@ -127,7 +127,10 @@ verify_bundle() {
     || die "cannot inspect signed $name entitlements"
   local profile="$bundle/Contents/embedded.provisionprofile"
   test -f "$profile" || die "$name missing provisioning profile"
-  /usr/bin/security cms -D -i "$profile" \
+  # Use the same bounded CMS decoder as local preflight, including regular
+  # file, no-follow, size, timeout, decoded-plist and source-identity checks.
+  # Do not let an unbounded security(1) process hold signed packaging open.
+  /usr/bin/python3 "$helper_root/fskit/signing_profile.py" --decode-profile "$profile" \
     > "$out/$name.provisioning.plist" || die "$name invalid provisioning profile"
   # codesign and CMS have already checked the cryptographic envelopes.
   # Bind each provisioning profile to the actual code-signing team, bundle
