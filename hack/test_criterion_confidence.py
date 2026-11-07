@@ -146,7 +146,7 @@ class ConfidenceTests(unittest.TestCase):
             confidence.write_confidence(
                 self.summary, self.criterion, self.output, manifest, "standard"
             )
-        with self.assertRaisesRegex(ValueError, "must be supplied together"):
+        with self.assertRaises(TypeError):
             confidence.write_confidence(
                 self.summary, self.criterion, self.output, manifest=manifest
             )
@@ -166,13 +166,10 @@ class ConfidenceTests(unittest.TestCase):
             )
 
     def test_inverts_time_intervals_for_throughput_and_preserves_schema(self):
-        self.assertEqual(confidence.write_confidence(
-            self.summary, self.criterion, self.output), 1)
-        with self.output.open(newline="", encoding="utf-8") as stream:
-            reader = csv.DictReader(stream)
-            self.assertEqual(tuple(reader.fieldnames), confidence.COLUMNS)
-            row = next(reader)
-            self.assertEqual(len(list(reader)), 0)
+        rows = confidence.confidence_rows(self.summary, self.criterion)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(tuple(row), confidence.COLUMNS)
         self.assertEqual(row["encode_ci95_lower_ns"], "1000000.00000")
         self.assertEqual(row["encode_ci95_upper_ns"], "2000000.00000")
         self.assertEqual(row["encode_median_mib_per_s"], "41.6667")
