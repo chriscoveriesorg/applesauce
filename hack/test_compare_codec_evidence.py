@@ -161,6 +161,23 @@ class CodecCompareTests(unittest.TestCase):
             self.assertEqual(float(pair["mesh_payload_ratio"]), 2e-12)
             self.assertEqual(pair["raven_savings_vs_mesh_pct"], "50.00")
 
+    def test_adjacent_payload_ratios_preserve_relative_difference(self):
+        # Dividing first loses precision in the relative difference for
+        # adjacent large floats, even though both inputs are finite.
+        mesh_ratio = 1e300
+        raven_ratio = math.nextafter(mesh_ratio, math.inf)
+        rows = [dict(row) for row in self.rows]
+        for row in rows:
+            if row["codec"] == "lzraven":
+                row["encoded_over_input_ratio"] = repr(raven_ratio)
+            elif row["codec"] == "lzmesh":
+                row["encoded_over_input_ratio"] = repr(mesh_ratio)
+        self.save(rows)
+        expected = 100 * ((mesh_ratio - raven_ratio) / mesh_ratio)
+        for pair in compare.compare(self.input, "smoke"):
+            self.assertEqual(float(pair["raven_savings_vs_mesh_pct"]), expected)
+            self.assertLess(expected, 0)
+
     def test_tiny_nonzero_payload_savings_remains_visible(self):
         rows = [dict(row) for row in self.rows]
         for row in rows:
