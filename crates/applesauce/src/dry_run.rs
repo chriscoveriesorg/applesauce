@@ -1071,6 +1071,44 @@ mod tests {
     }
 
     #[test]
+    fn bundle_audit_excludes_signed_code_before_encoding() {
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let app = temp.path().join("Fixture.app");
+        let executable = app.join("Contents/MacOS/Fixture");
+        let signature = app.join("Contents/_CodeSignature/CodeResources");
+        let resource = app.join("Contents/Resources/localization.strings");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(signature.parent().unwrap()).unwrap();
+        fs::create_dir_all(resource.parent().unwrap()).unwrap();
+        fs::write(&executable, b"test executable").unwrap();
+        fs::write(&signature, b"test signature").unwrap();
+        fs::write(&resource, b"test resource").unwrap();
+
+        let audit = analyze_with_profile(&[app], Kind::Zlib, 0.95, 5, Some(Profile::Bundles));
+        assert_eq!(audit.profile, Some("bundles"));
+        assert!(audit.complete);
+        for protected in [executable, signature] {
+            let entry = audit.paths.iter().find(|entry| {
+                entry.path.display == protected.to_string_lossy()
+            }).unwrap();
+            assert_eq!(entry.reason, "bundle_non_resource");
+            assert!(!entry.would_compress);
+            assert_eq!(entry.raw_compressed_bytes, None);
+        }
+        assert_eq!(audit.paths.len(), 3);
+    }
+
+    #[test]
+    fn unprofiled_projection_keeps_its_existing_optional_fields_absent() {
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let input = temp.path().join("input");
+        fs::write(&input, b"fixture").unwrap();
+        let report = analyze(&[input], Kind::Zlib, 0.95, 5);
+        assert_eq!(report.profile, None);
+        assert_eq!(report.schema_version, 1);
+    }
+
+    #[test]
     fn overlapping_roots_are_deduplicated_lexically() {
         let roots = deduplicate_roots(&[
             PathBuf::from("/tmp/tree/child"),
