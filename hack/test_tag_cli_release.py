@@ -48,6 +48,9 @@ class TagCliReleaseTests(unittest.TestCase):
         gitbin.write_text(
             '#!/bin/sh\n'
             'if [ "$1" = fetch ] && [ "$2" = --no-tags ] && [ "$3" = origin ]; then\n'
+            '  if [ "${FETCH_HEAD_ONLY:-}" = 1 ]; then\n'
+            f'    exec "{realgit}" fetch --no-tags "$TEST_REMOTE" refs/heads/main\n'
+            '  fi\n'
             f'  exec "{realgit}" fetch --no-tags "$TEST_REMOTE" "main:refs/remotes/origin/main"\n'
             'fi\n'
             'if [ "$1" = ls-remote ] && [ "$4" = origin ]; then\n'
@@ -118,6 +121,32 @@ class TagCliReleaseTests(unittest.TestCase):
         self.git("push", str(self.remote), "refs/tags/applesauce-cli/v0.5.32")
         self.git("tag", "-d", "applesauce-cli/v0.5.32")
         self.assertNotEqual(self.run_helper("0.5.32", self.sha, "--push").returncode, 0)
+
+    def test_remote_main_replacement_cannot_use_stale_tracking_ref(self):
+        # An offline test with two disconnected histories. The approved SHA
+        # stays in the local remote-tracking cache, while the actual remote
+        # main ref is moved to a different root commit. A fresh FETCH_HEAD
+        # must govern ancestry even if green CI evidence for the old SHA exists.
+        self.git("update-ref", "refs/remotes/origin/main", self.sha)
+        self.git("checkout", "--orphan", "disconnected")
+        self.git("rm", "-r", "--cached", ".")
+        (self.repo / "different-root").write_text("unrelated source")
+        self.git("add", "different-root")
+        self.git("commit", "-m", "generated unrelated main")
+        unrelated = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("--git-dir", str(self.remote), "update-ref",
+                 "refs/heads/main", unrelated)
+        self.env["FETCH_HEAD_ONLY"] = "1"
+        result = self.run_helper("0.5.32", self.sha, "--push")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("freshly fetched origin main", result.stderr)
+        self.assertEqual(
+            self.git("rev-parse", "refs/remotes/origin/main").stdout.strip(),
+            self.sha)
+        self.assertEqual(self.git("tag", "--list").stdout.strip(), "")
+        self.assertEqual(
+            self.git("ls-remote", "--tags", str(self.remote),
+                     "refs/tags/applesauce-cli/v0.5.32").stdout.strip(), "")
 
     def test_rejects_wrong_origin(self):
         self.git("remote", "set-url", "origin", "https://example.invalid/other/repo.git")
