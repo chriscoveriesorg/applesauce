@@ -635,10 +635,7 @@ mod tests {
                     .iter()
                     .map(|sample| {
                         let encoded = codec.encode(sample).unwrap();
-                        assert_eq!(
-                            codec.decode_exact(&encoded, sample.len()).unwrap(),
-                            *sample
-                        );
+                        assert_eq!(codec.decode_exact(&encoded, sample.len()).unwrap(), *sample);
                         encoded.len()
                     })
                     .sum::<usize>()
@@ -655,9 +652,7 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            auto_encoded_lengths(&[Vec::new()])
-                .unwrap_err()
-                .kind(),
+            auto_encoded_lengths(&[Vec::new()]).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
     }
