@@ -68,10 +68,7 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
             }
         }
         Profile::Bundles => {
-            let Some(app_index) = parts
-                .iter()
-                .position(|part| ascii_suffix(part, b".app"))
-            else {
+            let Some(app_index) = parts.iter().position(|part| ascii_suffix(part, b".app")) else {
                 return Some("outside_app_bundle");
             };
             if parts.get(app_index + 1).copied() != Some(OsStr::new("Contents"))
@@ -1242,11 +1239,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o000)).unwrap();
         fs::set_permissions(&signature, fs::Permissions::from_mode(0o000)).unwrap();
-        fs::set_permissions(
-            &extensionless_executable,
-            fs::Permissions::from_mode(0o111),
-        )
-        .unwrap();
+        fs::set_permissions(&extensionless_executable, fs::Permissions::from_mode(0o111)).unwrap();
 
         let audit = analyze_with_profile(&[app], Kind::Zlib, 0.95, 5, Some(Profile::Bundles));
         assert_eq!(audit.profile, Some("bundles"));
