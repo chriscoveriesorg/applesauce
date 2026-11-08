@@ -407,6 +407,81 @@ mod tests {
     }
 
     #[test]
+    fn native_auto_choice_matches_verified_sample_sizes_on_heterogeneous_files() {
+        use super::{read_sample, sample_windows, select_native_codec};
+        use applesauce_core::compressor::Kind;
+        use std::io::Write;
+
+        // Exercise a constant file, a mixed file whose middle differs from the
+        // edges, and deterministic high-entropy input. All files are disposable.
+        let constant = vec![b'Q'; 4 * BLOCK_SIZE + 17];
+        let mut mixed = vec![b'R'; 4 * BLOCK_SIZE + 17];
+        for byte in &mut mixed[BLOCK_SIZE..3 * BLOCK_SIZE] {
+            *byte = b'X';
+        }
+        let mut entropy = vec![0u8; 4 * BLOCK_SIZE + 17];
+        let mut state = 0x1234_5678_u32;
+        for byte in &mut entropy {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = (state >> 8) as u8;
+        }
+
+        for input in [constant, mixed, entropy] {
+            let mut source = tempfile::tempfile().unwrap();
+            source.write_all(&input).unwrap();
+            let mut best: Option<(Kind, usize)> = None;
+            for kind in [Kind::Lzfse, Kind::Lzvn, Kind::Zlib] {
+                let Some(mut encoder) = kind.compressor() else {
+                    continue;
+                };
+                let mut score = 0usize;
+                let mut valid = true;
+                for (offset, length) in sample_windows(input.len() as u64) {
+                    let window = read_sample(&source, offset, length).unwrap();
+                    let mut encoded = vec![0; BLOCK_SIZE + 1024];
+                    let mut decoded = vec![0; BLOCK_SIZE];
+                    let Ok(size) = encoder.compress(&mut encoded, &window, 5) else {
+                        valid = false;
+                        break;
+                    };
+                    let Ok(restored) = encoder.decompress(&mut decoded, &encoded[..size]) else {
+                        valid = false;
+                        break;
+                    };
+                    if restored != window.len() || decoded[..restored] != window[..] {
+                        valid = false;
+                        break;
+                    }
+                    score += size;
+                }
+                if valid && best.is_none_or(|(_, size)| score < size) {
+                    best = Some((kind, score));
+                }
+            }
+            let (selected, measured, windows) =
+                select_native_codec(&source, input.len() as u64, 5).unwrap();
+            assert_eq!(selected, best.expect("at least one stable codec").0);
+            assert_eq!(measured, BLOCK_SIZE);
+            assert_eq!(windows, 3);
+        }
+    }
+
+    #[test]
+    fn native_auto_refuses_truncated_source_during_sampling() {
+        use super::select_native_codec;
+        use std::io::{Seek, SeekFrom, Write};
+
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"short").unwrap();
+        source.seek(SeekFrom::Start(3)).unwrap();
+        let error = select_native_codec(&source, 200_000, 5).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(source.stream_position().unwrap(), 3);
+    }
+
+    #[test]
     fn chunk_reader_preserves_generated_bytes_and_boundaries() {
         for len in [
             0,
