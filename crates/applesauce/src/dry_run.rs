@@ -457,6 +457,19 @@ impl Analyzer {
     }
 
     fn visit_file(&mut self, path: &Path, scanned: &Metadata) -> Accumulator {
+        // A policy exclusion needs only the no-follow stat from visit(). Do not
+        // open excluded code/signature files: they may be deliberately unreadable.
+        if let Some(reason) = self
+            .profile
+            .and_then(|profile| profile_exclusion(profile, path))
+        {
+            // Preserve the existing hard-link accounting without opening the file.
+            let reason = if scanned.nlink() > 1 { "hard_link" } else { reason };
+            let report = skipped(path, "file", self.kind, reason, Some(scanned));
+            let result = accumulate_report(&report);
+            self.paths.push(report);
+            return result;
+        }
         let file = match open_regular_file(path, scanned) {
             Ok(file) => file,
             Err(error) => return self.push_error(path, "file", error),
@@ -493,16 +506,6 @@ impl Analyzer {
         let current = opened.blocks().checked_mul(512).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "allocated byte count overflow")
         })?;
-
-        // Exclude sensitive paths before reading or encoding any file data.
-        if let Some(reason) = self
-            .profile
-            .and_then(|profile| profile_exclusion(profile, path))
-        {
-            return Ok(skipped_with_sizes(
-                path, self.kind, reason, logical, current, block,
-            ));
-        }
 
         if opened.st_flags() & libc::UF_COMPRESSED != 0 {
             return Ok(skipped_with_sizes(
@@ -1187,6 +1190,11 @@ mod tests {
         fs::write(&executable, b"test executable").unwrap();
         fs::write(&signature, b"test signature").unwrap();
         fs::write(&resource, b"test resource").unwrap();
+        // Excluded sealed code may not be readable by the current user.
+        // The audit must skip it by pathname policy without ever opening it.
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::set_permissions(&signature, fs::Permissions::from_mode(0o000)).unwrap();
 
         let audit = analyze_with_profile(&[app], Kind::Zlib, 0.95, 5, Some(Profile::Bundles));
         assert_eq!(audit.profile, Some("bundles"));
