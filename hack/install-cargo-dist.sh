@@ -58,7 +58,7 @@ PY
     return 1
   fi
   chmod 700 "$binary"
-  if ! reported="$("$binary" --version)" || [[ ! "$reported" =~ (^|[[:space:]])0\\.33\\.0($|[[:space:]]) ]]; then
+  if ! reported="$("$binary" --version)" || [[ ! "$reported" =~ (^|[[:space:]])0\.33\.0($|[[:space:]]) ]]; then
     rm -f -- "$archive" "$binary"
     printf 'pinned cargo-dist asset has unexpected or unavailable version\n' >&2
     return 1
