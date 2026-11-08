@@ -83,8 +83,8 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
             let resources = &parts[app_index + 3..];
             if resources.iter().any(|part| {
                 code_container(part)
-                    || part.as_bytes() == b"_CodeSignature"
-                    || part.as_bytes() == b"_MASReceipt"
+                    || part.as_bytes().eq_ignore_ascii_case(b"_CodeSignature")
+                    || part.as_bytes().eq_ignore_ascii_case(b"_MASReceipt")
             }) {
                 return Some("bundle_nested_code_or_signature");
             }
@@ -1152,6 +1152,11 @@ mod tests {
             (
                 Profile::Bundles,
                 "/Applications/Foo.app/Contents/Resources/Nested.bundle/file",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/_codesignature/CodeResources",
                 Some("bundle_nested_code_or_signature"),
             ),
             (
