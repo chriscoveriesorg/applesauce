@@ -1,6 +1,7 @@
 """Verify five-codec rankings from complete, same-host synthetic Criterion rows."""
 import csv
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -118,6 +119,53 @@ class RankCodecEvidenceTests(unittest.TestCase):
                 self.write(changed)
                 with self.assertRaisesRegex(ValueError, message):
                     ranker.rank_cases(self.source, "smoke")
+
+    def test_unsafe_confidence_inputs_are_bounded_and_nonblocking(self):
+        original = self.source.read_bytes()
+        backup = self.root / "untouched-fixture.csv"
+        backup.write_bytes(original)
+        command = [sys.executable, str(SCRIPT), str(self.source),
+                   "smoke", str(self.output)]
+
+        self.source.unlink()
+        self.source.write_bytes(b"x" * (ranker.compare.MAX_CONFIDENCE_BYTES + 1))
+        oversized = subprocess.run(
+            command, capture_output=True, text=True, timeout=5
+        )
+        self.assertEqual(oversized.returncode, 1, oversized.stderr)
+        self.assertIn("oversized", oversized.stderr)
+        self.assertFalse(self.output.exists())
+
+        self.source.unlink()
+        self.source.symlink_to(backup)
+        symlink = subprocess.run(
+            command, capture_output=True, text=True, timeout=5
+        )
+        self.assertEqual(symlink.returncode, 1, symlink.stderr)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(backup.read_bytes(), original)
+
+        self.source.unlink()
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.source)
+            fifo = subprocess.run(
+                command, capture_output=True, text=True, timeout=5
+            )
+            self.assertEqual(fifo.returncode, 1, fifo.stderr)
+            self.assertIn("regular file", fifo.stderr)
+            self.assertFalse(self.output.exists())
+
+    def test_output_hardlink_to_evidence_is_refused(self):
+        original = self.source.read_bytes()
+        os.link(self.source, self.output)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), str(self.source), "smoke",
+             str(self.output)], capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("differ from source", result.stderr)
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(self.output.read_bytes(), original)
 
     def test_failed_rerun_drops_stale_output_without_erasing_input(self):
         self.output.write_text("old measurements", encoding="utf-8")
