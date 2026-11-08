@@ -175,6 +175,8 @@ class CodecCompareTests(unittest.TestCase):
         self.save(rows)
         expected = 100 * ((mesh_ratio - raven_ratio) / mesh_ratio)
         for pair in compare.compare(self.input, "smoke"):
+            self.assertEqual(float(pair["raven_payload_ratio"]), raven_ratio)
+            self.assertEqual(float(pair["mesh_payload_ratio"]), mesh_ratio)
             self.assertEqual(float(pair["raven_savings_vs_mesh_pct"]), expected)
             self.assertLess(expected, 0)
 
