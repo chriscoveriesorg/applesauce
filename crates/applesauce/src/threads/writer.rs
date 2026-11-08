@@ -260,12 +260,10 @@ impl WorkHandler<WorkItem> for Handler {
 
         let compression_kind = item.compression_kind;
         let res = match context.operation.mode {
-            Mode::Compress { .. } | Mode::CompressAuto { .. } => {
-                self.write_compressed_file(
-                    item,
-                    compression_kind.expect("native compression requires selected codec"),
-                )
-            }
+            Mode::Compress { .. } | Mode::CompressAuto { .. } => self.write_compressed_file(
+                item,
+                compression_kind.expect("native compression requires selected codec"),
+            ),
             Mode::DecompressManually | Mode::DecompressByReading => {
                 self.write_uncompressed_file(item)
             }
