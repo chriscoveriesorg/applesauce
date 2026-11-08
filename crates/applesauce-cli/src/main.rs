@@ -165,6 +165,8 @@ struct Info {
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum, PartialEq, Eq)]
 enum Compression {
+    /// Measure bounded per-file native samples and select a stable codec.
+    Auto,
     #[cfg(all(feature = "lzbitmap", target_os = "macos"))]
     Lzbitmap,
     #[cfg(feature = "lzfse")]
@@ -178,6 +180,7 @@ enum Compression {
 impl From<Compression> for Kind {
     fn from(c: Compression) -> Self {
         match c {
+            Compression::Auto => unreachable!("auto codec is selected per input file"),
             #[cfg(all(feature = "lzbitmap", target_os = "macos"))]
             Compression::Lzbitmap => Kind::Lzbitmap,
             #[cfg(feature = "zlib")]
@@ -239,6 +242,12 @@ fn main() {
 
     if let Commands::Compress(args) = &cli.command {
         if args.dry_run {
+            if args.compression == Compression::Auto {
+                eprintln!(
+                    "applesauce: --compression auto is not yet supported by the full-encoding dry-run projection"
+                );
+                std::process::exit(1);
+            }
             if cli.chrome_tracing.is_some() {
                 eprintln!("applesauce: --chrome-tracing is not supported with --dry-run");
                 std::process::exit(1);
@@ -359,27 +368,39 @@ fn main() {
             dry_run: false,
             json,
         }) => {
-            let kind: Kind = compression.into();
-            if !kind.supported() {
-                eprintln!("applesauce: {kind} is unavailable in this build or on this host");
-                std::process::exit(1);
+            let kind = (compression != Compression::Auto).then(|| Kind::from(compression));
+            if let Some(kind) = kind {
+                if !kind.supported() {
+                    eprintln!("applesauce: {kind} is unavailable in this build or on this host");
+                    std::process::exit(1);
+                }
             }
             // Experimental native encoders must verify before atomic replacement.
-            let verify = verify || kind == Kind::Lzbitmap;
+            let verify = verify || kind == Some(Kind::Lzbitmap);
 
-            if kind != Kind::Zlib && level != 5 {
+            if kind.is_some_and(|kind| kind != Kind::Zlib) && level != 5 {
                 tracing::warn!("Compression level is ignored for non-zlib compression");
             }
 
             let mut compressor = applesauce::FileCompressor::new();
-            let _stats = compressor.recursive_compress(
-                paths.iter().map(Path::new),
-                kind,
-                minimum_compression_ratio,
-                level,
-                &progress_bars,
-                verify,
-            );
+            let _stats = if let Some(kind) = kind {
+                compressor.recursive_compress(
+                    paths.iter().map(Path::new),
+                    kind,
+                    minimum_compression_ratio,
+                    level,
+                    &progress_bars,
+                    verify,
+                )
+            } else {
+                compressor.recursive_compress_auto(
+                    paths.iter().map(Path::new),
+                    minimum_compression_ratio,
+                    level,
+                    &progress_bars,
+                    verify,
+                )
+            };
             progress_bars.finish();
             let mut report = size_report::analyze(&paths);
             report.operation_errors(progress_bars.errors());
@@ -634,6 +655,27 @@ fn truncate_single_segment() {
 fn command_check() {
     use clap::CommandFactory;
     Cli::command().debug_assert()
+}
+
+#[test]
+fn native_auto_codec_is_explicit_and_does_not_change_defaults() {
+    let parsed = Cli::try_parse_from([
+        "applesauce",
+        "compress",
+        "--compression",
+        "auto",
+        "fixture",
+    ])
+    .unwrap();
+    let Commands::Compress(compress) = parsed.command else {
+        panic!("expected compress");
+    };
+    assert_eq!(compress.compression, Compression::Auto);
+    let parsed = Cli::try_parse_from(["applesauce", "compress", "fixture"]).unwrap();
+    let Commands::Compress(compress) = parsed.command else {
+        panic!("expected compress");
+    };
+    assert_ne!(compress.compression, Compression::Auto);
 }
 
 #[test]
