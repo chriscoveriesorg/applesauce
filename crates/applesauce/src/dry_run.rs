@@ -9,7 +9,7 @@ use applesauce_core::{decmpfs, round_to_block_size, BLOCK_SIZE};
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::ffi::{CStr, OsString};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, RawFd};
@@ -20,6 +20,96 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
 const SCHEMA_VERSION: u32 = 1;
+
+/// Read-only candidate classifiers. These profiles do not permit native writes.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum Profile {
+    Caches,
+    Bundles,
+}
+
+impl Profile {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Caches => "caches",
+            Self::Bundles => "bundles",
+        }
+    }
+}
+
+/// Decide from path components, never substring matches. No-follow descriptor
+/// traversal still checks identity; refuse parent traversal in profile mode.
+fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
+    if path.components().any(|component| matches!(component, Component::ParentDir)) {
+        return Some("profile_parent_traversal");
+    }
+    let parts: Vec<&OsStr> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    match profile {
+        Profile::Caches => {
+            if parts.iter().any(|part| code_container(part)) {
+                return Some("cache_contains_code_bundle");
+            }
+            if parts.windows(2).any(|pair| {
+                pair[0] == OsStr::new("Library") && pair[1] == OsStr::new("Caches")
+            }) {
+                None
+            } else {
+                Some("outside_library_caches")
+            }
+        }
+        Profile::Bundles => {
+            let Some(app_index) = parts
+                .iter()
+                .position(|part| part.as_bytes().ends_with(b".app"))
+            else {
+                return Some("outside_app_bundle");
+            };
+            if parts.get(app_index + 1).copied() != Some(OsStr::new("Contents"))
+                || parts.get(app_index + 2).copied() != Some(OsStr::new("Resources"))
+                || parts.len() <= app_index + 3
+            {
+                return Some("bundle_non_resource");
+            }
+            let resources = &parts[app_index + 3..];
+            if resources.iter().any(|part| {
+                code_container(part)
+                    || part.as_bytes() == b"_CodeSignature"
+                    || part.as_bytes() == b"_MASReceipt"
+            }) {
+                return Some("bundle_nested_code_or_signature");
+            }
+            // A candidate resource still needs codesign and launch tests
+            // on a disposable app before any write is ever authorized.
+            const EXECUTABLE_SUFFIXES: [&[u8]; 8] = [
+                b".dylib", b".so", b".a", b".o",
+                b".sh", b".command", b".metallib", b".exe",
+            ];
+            if resources.last().is_some_and(|file| {
+                EXECUTABLE_SUFFIXES
+                    .iter()
+                    .any(|suffix| file.as_bytes().ends_with(suffix))
+            }) {
+                return Some("bundle_executable_resource");
+            }
+            None
+        }
+    }
+}
+
+fn code_container(name: &OsStr) -> bool {
+    const CODE_SUFFIXES: [&[u8]; 9] = [
+        b".app", b".framework", b".appex", b".xpc", b".bundle",
+        b".plugin", b".qlgenerator", b".kext", b".component",
+    ];
+    CODE_SUFFIXES.iter().any(|suffix| name.as_bytes().ends_with(suffix))
+}
+
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EncodedPath {
@@ -106,6 +196,9 @@ pub struct Report {
     pub complete: bool,
     pub codec: String,
     pub minimum_compression_ratio: f64,
+    /// Included only in explicit opt-in read-only policy audits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<&'static str>,
     pub full_encoding: bool,
     pub paths: Vec<PathReport>,
     pub directories: Vec<DirectoryReport>,
@@ -186,10 +279,22 @@ pub fn analyze(
     minimum_compression_ratio: f64,
     level: u32,
 ) -> Report {
+    analyze_with_profile(paths, kind, minimum_compression_ratio, level, None)
+}
+
+/// Read-only candidate inspection. The mutating compressor does not accept a profile.
+pub fn analyze_with_profile(
+    paths: &[PathBuf],
+    kind: Kind,
+    minimum_compression_ratio: f64,
+    level: u32,
+    profile: Option<Profile>,
+) -> Report {
     let mut analyzer = Analyzer {
         kind,
         minimum_compression_ratio,
         level,
+        profile,
         paths: Vec::new(),
         directories: Vec::new(),
         visited_directories: HashSet::new(),
@@ -206,6 +311,7 @@ pub fn analyze(
         complete: totals.complete,
         codec: codec_name(kind).to_owned(),
         minimum_compression_ratio,
+        profile: profile.map(Profile::name),
         full_encoding: true,
         paths: analyzer.paths,
         directories: analyzer.directories,
@@ -222,6 +328,7 @@ struct Analyzer {
     kind: Kind,
     minimum_compression_ratio: f64,
     level: u32,
+    profile: Option<Profile>,
     paths: Vec<PathReport>,
     directories: Vec<DirectoryReport>,
     visited_directories: HashSet<(u64, u64)>,
@@ -351,6 +458,11 @@ impl Analyzer {
         let current = opened.blocks().checked_mul(512).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "allocated byte count overflow")
         })?;
+
+        // Exclude sensitive paths before reading or encoding any file data.
+        if let Some(reason) = self.profile.and_then(|profile| profile_exclusion(profile, path)) {
+            return Ok(skipped_with_sizes(path, self.kind, reason, logical, current, block));
+        }
 
         if opened.st_flags() & libc::UF_COMPRESSED != 0 {
             return Ok(skipped_with_sizes(
@@ -940,6 +1052,23 @@ fn codec_name(kind: Kind) -> &'static str {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn audit_profiles_reject_code_and_outside_roots() {
+        let audit = profile_exclusion;
+        assert_eq!(audit(Profile::Caches, Path::new("/Users/a/Library/Caches/data.log")), None);
+        assert_eq!(audit(Profile::Caches, Path::new("/Users/a/Library/Caches/Foo.app/Contents/Resources/a.json")), Some("cache_contains_code_bundle"));
+        assert_eq!(audit(Profile::Caches, Path::new("/Users/a/Caches/data.log")), Some("outside_library_caches"));
+        assert_eq!(audit(Profile::Caches, Path::new("/Users/a/Library/Caches/../MacOS/app")), Some("profile_parent_traversal"));
+        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/icon.icns")), None);
+        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/MacOS/Foo")), Some("bundle_non_resource"));
+        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/_CodeSignature/CodeResources")), Some("bundle_non_resource"));
+        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/Nested.bundle/file")), Some("bundle_nested_code_or_signature"));
+        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/helper.dylib")), Some("bundle_executable_resource"));
+        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/../MacOS/Foo")), Some("profile_parent_traversal"));
+        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/icon.app")), Some("bundle_nested_code_or_signature"));
+        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/data.json")), Some("outside_app_bundle"));
+    }
 
     #[test]
     fn overlapping_roots_are_deduplicated_lexically() {
