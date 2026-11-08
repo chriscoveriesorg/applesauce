@@ -8,6 +8,8 @@ on:
       - 'hack/summarize-benchmarks.py'
       - 'hack/validate-benchmark-matrix.py'
       - 'hack/test_criterion_confidence.py'
+      - 'hack/prepare_benchmark_evidence.py'
+      - 'hack/test_prepare_benchmark_evidence.py'
       - '.github/workflows/benchmark-evidence-tests.yml'
   push:
     branches: [main]
@@ -17,6 +19,8 @@ on:
       - 'hack/summarize-benchmarks.py'
       - 'hack/validate-benchmark-matrix.py'
       - 'hack/test_criterion_confidence.py'
+      - 'hack/prepare_benchmark_evidence.py'
+      - 'hack/test_prepare_benchmark_evidence.py'
       - '.github/workflows/benchmark-evidence-tests.yml'
 
 permissions:
@@ -34,6 +38,10 @@ jobs:
         run: |
           python3 -m py_compile hack/criterion-confidence.py hack/test_criterion_confidence.py
           python3 -m unittest discover -s hack -p 'test_criterion_confidence.py' -v
+      - name: Verify per-run Criterion evidence isolation
+        run: |
+          python3 -m py_compile hack/prepare_benchmark_evidence.py hack/test_prepare_benchmark_evidence.py
+          python3 -m unittest discover -s hack -p 'test_prepare_benchmark_evidence.py' -v
       - name: Verify benchmark fail-closed controls
         run: |
           python3 -m unittest discover \
