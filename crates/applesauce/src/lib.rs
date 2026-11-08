@@ -287,6 +287,33 @@ impl FileCompressor {
         )
     }
 
+    /// Opt-in native compression: measure a bounded sample from each opened
+    /// source, then encode the full file with one supported stable codec.
+    /// The existing whole-file ratio and verification gates still apply.
+    #[tracing::instrument(skip_all)]
+    pub fn recursive_compress_auto<'a, P>(
+        &mut self,
+        paths: impl IntoIterator<Item = &'a Path>,
+        minimum_compression_ratio: f64,
+        level: u32,
+        progress: &P,
+        verify: bool,
+    ) -> Stats
+    where
+        P: Progress + Send + Sync,
+        P::Task: Send + Sync + 'static,
+    {
+        self.bg_threads.scan(
+            Mode::CompressAuto {
+                minimum_compression_ratio,
+                level,
+            },
+            paths,
+            progress,
+            verify,
+        )
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn recursive_decompress<'a, P>(
         &mut self,
