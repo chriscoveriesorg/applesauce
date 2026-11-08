@@ -140,7 +140,10 @@ def compare(confidence_csv: Path, suite: str):
             # Fixed decimal places could silently serialize them as 0.00000000.
             raven_payload_ratio=f"{r_ratio:.8g}",
             mesh_payload_ratio=f"{m_ratio:.8g}",
-            raven_savings_vs_mesh_pct=f"{savings_pct:.2f}",
+            raven_savings_vs_mesh_pct=(
+                repr(savings_pct) if savings_pct != 0 and
+                float(f"{savings_pct:.2f}") == 0 else f"{savings_pct:.2f}"
+            ),
         )
         for op in ("encode", "decode"):
             r_mid, r_low, r_high = timings(raven, op)
