@@ -136,8 +136,10 @@ def compare(confidence_csv: Path, suite: str):
             raise ValueError("nonfinite Raven/Mesh payload savings")
         result = dict(zip(GROUP, key))
         result.update(
-            raven_payload_ratio=f"{r_ratio:.8f}",
-            mesh_payload_ratio=f"{m_ratio:.8f}",
+            # Significant digits preserve tiny but valid positive ratios.
+            # Fixed decimal places could silently serialize them as 0.00000000.
+            raven_payload_ratio=f"{r_ratio:.8g}",
+            mesh_payload_ratio=f"{m_ratio:.8g}",
             raven_savings_vs_mesh_pct=f"{savings_pct:.2f}",
         )
         for op in ("encode", "decode"):
