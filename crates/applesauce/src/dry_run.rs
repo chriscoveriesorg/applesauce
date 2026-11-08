@@ -70,7 +70,7 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
         Profile::Bundles => {
             let Some(app_index) = parts
                 .iter()
-                .position(|part| part.as_bytes().ends_with(b".app"))
+                .position(|part| ascii_suffix(part, b".app"))
             else {
                 return Some("outside_app_bundle");
             };
@@ -103,7 +103,7 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
             if resources.last().is_some_and(|file| {
                 EXECUTABLE_SUFFIXES
                     .iter()
-                    .any(|suffix| file.as_bytes().ends_with(suffix))
+                    .any(|suffix| ascii_suffix(file, suffix))
             }) {
                 return Some("bundle_executable_resource");
             }
@@ -126,7 +126,16 @@ fn code_container(name: &OsStr) -> bool {
     ];
     CODE_SUFFIXES
         .iter()
-        .any(|suffix| name.as_bytes().ends_with(suffix))
+        .any(|suffix| ascii_suffix(name, suffix))
+}
+
+/// A case-insensitive suffix test for ASCII code extensions on macOS volumes.
+/// Compare raw OsStr bytes without converting a non-UTF-8 filename to a string.
+fn ascii_suffix(name: &OsStr, suffix: &[u8]) -> bool {
+    let bytes = name.as_bytes();
+    bytes
+        .get(bytes.len().saturating_sub(suffix.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1149,6 +1158,21 @@ mod tests {
                 Profile::Bundles,
                 "/Applications/Foo.app/Contents/Resources/helper.dylib",
                 Some("bundle_executable_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/Helper.DYLIB",
+                Some("bundle_executable_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/Nested.PLUGIN/file",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.APP/Contents/Resources/Nested.Framework/data",
+                Some("bundle_nested_code_or_signature"),
             ),
             (
                 Profile::Bundles,
