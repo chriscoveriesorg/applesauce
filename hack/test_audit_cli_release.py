@@ -238,7 +238,7 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         for length in (9, 15, 17):
             with self.subTest(length=length):
                 self.make_archive("aarch64", ARCHES["aarch64"],
-                                  unknown_command_size=length)
+                                  unknown_command_size=length, entry_offset=128)
                 self.log.unlink(missing_ok=True)
                 run = self.run_audit()
                 self.assertNotEqual(run.returncode, 0)
