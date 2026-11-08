@@ -61,7 +61,7 @@ class CodecCompareTests(unittest.TestCase):
     def save(self, rows=None, columns=None):
         with self.input.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(
-                stream, fieldnames=columns or compare.confidence.COLUMNS
+                stream, fieldnames=columns or compare.confidence.COLUMNS, extrasaction="ignore"
             )
             writer.writeheader()
             writer.writerows(self.rows if rows is None else rows)
