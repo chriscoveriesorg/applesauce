@@ -83,7 +83,8 @@ fn native_auto_real_allocation_benchmark() {
         .into_bytes();
     let mut mixed = vec![b'Z'; 2 * 1024 * 1024];
     let mut state = 0x1234_5678_u32;
-    for byte in &mut mixed[..mixed.len() / 2] {
+    let random_half = mixed.len() / 2;
+    for byte in &mut mixed[..random_half] {
         state ^= state << 13;
         state ^= state >> 17;
         state ^= state << 5;
@@ -116,7 +117,7 @@ fn native_auto_real_allocation_benchmark() {
                 assert_success(&output);
                 assert_eq!(fs::read(&path).unwrap(), original, "{fixture} {codec}");
                 let info = applesauce::info::get(&path).unwrap();
-                assert_eq!(info.stat_size as usize, original.len());
+                assert_eq!(info.stat_size, u64::try_from(original.len()).unwrap());
                 println!(
                     "{fixture},{codec},{iteration},{},{},{elapsed},{}",
                     info.stat_size, info.on_disk_size, info.is_compressed
