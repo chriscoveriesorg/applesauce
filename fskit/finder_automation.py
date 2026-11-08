@@ -45,8 +45,11 @@ def run_finder(interpreter, script, mount, name, size, destination, evidence, ti
             except ProcessLookupError:
                 pass
             process.wait()
-            print("Finder automation timed out after {} seconds; inspect {} and {}".format(
-                timeout, stdout_path, stderr_path), file=sys.stderr)
+            message = "Finder automation timed out after {} seconds; inspect {} and {}".format(
+                timeout, stdout_path, stderr_path)
+            stderr.write((message + "\n").encode("utf-8"))
+            stderr.flush()
+            print(message, file=sys.stderr)
             return 124
 
 
@@ -87,7 +90,8 @@ class FinderRunnerTests(unittest.TestCase):
             evidence.mkdir()
             self.assertEqual(run_finder(sys.executable, script, "/Volumes/Test",
                                         "source.lzraven", "9", root, evidence, 0.05), 124)
-            self.assertTrue((evidence / "finder-error.txt").exists())
+            self.assertIn("Finder automation timed out",
+                          (evidence / "finder-error.txt").read_text())
 
     def test_existing_evidence_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
