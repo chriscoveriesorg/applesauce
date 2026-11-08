@@ -2,6 +2,7 @@
 import csv
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -170,6 +171,59 @@ class ConfidenceTests(unittest.TestCase):
                 )
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
+
+    def test_export_refuses_output_aliases_without_deleting_inputs(self):
+        manifest, _ = self.complete_smoke()
+        for source in (manifest, self.summary):
+            with self.subTest(source=source.name):
+                original = source.read_bytes()
+                with self.assertRaisesRegex(ValueError, "aliases"):
+                    confidence.write_confidence(
+                        self.summary, self.criterion, source, manifest, "smoke"
+                    )
+                self.assertEqual(source.read_bytes(), original)
+
+        hardlink = self.root / "hardlink-to-summary.csv"
+        os.link(self.summary, hardlink)
+        before = self.summary.read_bytes()
+        with self.assertRaisesRegex(ValueError, "aliases"):
+            confidence.write_confidence(
+                self.summary, self.criterion, hardlink, manifest, "smoke"
+            )
+        self.assertEqual(self.summary.read_bytes(), before)
+        self.assertTrue(hardlink.exists())
+
+        symlink = self.root / "link-to-manifest.csv"
+        symlink.symlink_to(manifest)
+        original = manifest.read_bytes()
+        with self.assertRaisesRegex(ValueError, "aliases"):
+            confidence.write_confidence(
+                self.summary, self.criterion, symlink, manifest, "smoke"
+            )
+        self.assertEqual(manifest.read_bytes(), original)
+        self.assertTrue(symlink.is_symlink())
+
+    def test_estimates_refuse_fifo_symlink_and_oversized_files(self):
+        path = self.estimate_path("encode")
+        path.write_bytes(b"x" * (confidence.MAX_ESTIMATE_BYTES + 1))
+        with self.assertRaisesRegex(ValueError, "oversized"):
+            confidence.confidence_rows(self.summary, self.criterion)
+
+        path.write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "empty"):
+            confidence.confidence_rows(self.summary, self.criterion)
+
+        path.unlink()
+        path.symlink_to(self.estimate_path("decode"))
+        with self.assertRaises(OSError):
+            confidence.confidence_rows(self.summary, self.criterion)
+
+        path.unlink()
+        os.mkfifo(path)
+        # Reading a FIFO with no writer would otherwise block indefinitely.
+        with self.assertRaisesRegex(ValueError, "regular file"):
+            confidence.confidence_rows(self.summary, self.criterion)
+
 
     def test_full_matrix_provenance_gate(self):
         manifest, rows = self.complete_smoke()
