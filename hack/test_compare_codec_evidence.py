@@ -2,6 +2,7 @@
 import csv
 import importlib.util
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -133,6 +134,21 @@ class CodecCompareTests(unittest.TestCase):
                 self.save(rows)
                 with self.assertRaisesRegex(ValueError, "invalid|disagrees|reversed"):
                     compare.compare(self.input, "smoke")
+
+    def test_unsafe_confidence_inputs_fail_without_hanging(self):
+        self.input.unlink()
+        self.input.symlink_to(self.output)
+        with self.assertRaises(OSError):
+            compare.compare(self.input, "smoke")
+        self.input.unlink()
+        self.input.write_bytes(b"x" * (compare.MAX_CONFIDENCE_BYTES + 1))
+        with self.assertRaisesRegex(ValueError, "oversized"):
+            compare.compare(self.input, "smoke")
+        self.input.unlink()
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.input)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                compare.compare(self.input, "smoke")
 
     def test_unknown_schema_or_suite_is_refused(self):
         self.save(columns=compare.confidence.COLUMNS[:-1])
