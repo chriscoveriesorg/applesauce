@@ -118,7 +118,7 @@ python3 hack/prepare_benchmark_evidence.py
 mkdir -p target/applesauce-bench
 export APPLESAUCE_BENCH_SUITE=standard
 export APPLESAUCE_BENCH_MANIFEST="$PWD/target/applesauce-bench/manifest.csv"
-cargo bench --locked -p applesauce-core --bench modern_buffer -- \
+/usr/bin/time -l cargo bench --locked -p applesauce-core --bench modern_buffer -- \
   --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30
 python3 hack/validate-benchmark-matrix.py \
   "$APPLESAUCE_BENCH_MANIFEST" "$APPLESAUCE_BENCH_SUITE"
@@ -129,6 +129,12 @@ python3 hack/criterion-confidence.py \
   "$APPLESAUCE_BENCH_MANIFEST" target/applesauce-bench/summary.csv \
   target/criterion target/applesauce-bench/confidence.csv \
   "$APPLESAUCE_BENCH_SUITE"
+python3 hack/compare-codec-evidence.py \
+  target/applesauce-bench/confidence.csv "$APPLESAUCE_BENCH_SUITE" \
+  target/applesauce-bench/raven-mesh-comparison.csv
+python3 hack/rank-codec-evidence.py \
+  target/applesauce-bench/confidence.csv "$APPLESAUCE_BENCH_SUITE" \
+  target/applesauce-bench/all-codecs-ranking.csv
 ```
 
 If modifying a codec or its build flags, capture exact commit/runner metadata
