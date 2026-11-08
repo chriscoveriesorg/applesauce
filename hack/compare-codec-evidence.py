@@ -54,11 +54,15 @@ def timings(row, operation):
     high = positive_number(row[f"{operation}_ci95_upper_ns"], "upper time")
     if low > center or center > high:
         raise ValueError("reversed or inconsistent median time interval")
-    speed = positive_number(row[f"{operation}_median_mib_per_s"], "median throughput")
     size = int(row["input_bytes"])
-    if not math.isclose(speed, size * 1e9 / 1048576 / center,
-                        rel_tol=1e-5, abs_tol=0.0002):
-        raise ValueError("confidence throughput disagrees with median time")
+    bytes_per_second = size * 1e9 / 1048576
+    for field, elapsed in (("median", center), ("ci95_lower", high),
+                           ("ci95_upper", low)):
+        throughput = positive_number(row[f"{operation}_{field}_mib_per_s"],
+                                     f"{field} throughput")
+        if not math.isclose(throughput, bytes_per_second / elapsed,
+                            rel_tol=1e-5, abs_tol=0.0002):
+            raise ValueError("confidence throughput disagrees with timing interval")
     return center, low, high
 
 
