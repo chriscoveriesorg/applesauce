@@ -146,6 +146,21 @@ class CodecCompareTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid|disagrees|reversed"):
                     compare.compare(self.input, "smoke")
 
+    def test_tiny_positive_payload_ratios_remain_nonzero_in_csv(self):
+        rows = [dict(row) for row in self.rows]
+        for row in rows:
+            if row["codec"] == "lzraven":
+                row["encoded_over_input_ratio"] = "1e-12"
+            elif row["codec"] == "lzmesh":
+                row["encoded_over_input_ratio"] = "2e-12"
+        self.save(rows)
+        result = compare.compare(self.input, "smoke")
+        self.assertEqual(len(result), 4)
+        for pair in result:
+            self.assertEqual(float(pair["raven_payload_ratio"]), 1e-12)
+            self.assertEqual(float(pair["mesh_payload_ratio"]), 2e-12)
+            self.assertEqual(pair["raven_savings_vs_mesh_pct"], "50.00")
+
     def test_overflowing_payload_savings_is_rejected(self):
         rows = [dict(row) for row in self.rows]
         for row in rows:
