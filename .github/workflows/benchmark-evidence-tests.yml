@@ -15,6 +15,8 @@ on:
       - 'hack/test_criterion_confidence.py'
       - 'hack/prepare_benchmark_evidence.py'
       - 'hack/test_prepare_benchmark_evidence.py'
+      - 'hack/parse-benchmark-resources.py'
+      - 'hack/test_parse_benchmark_resources.py'
       - '.github/workflows/benchmark-codecs.yml'
       - '.github/workflows/benchmark-evidence-tests.yml'
   push:
@@ -32,6 +34,8 @@ on:
       - 'hack/test_criterion_confidence.py'
       - 'hack/prepare_benchmark_evidence.py'
       - 'hack/test_prepare_benchmark_evidence.py'
+      - 'hack/parse-benchmark-resources.py'
+      - 'hack/test_parse_benchmark_resources.py'
       - '.github/workflows/benchmark-codecs.yml'
       - '.github/workflows/benchmark-evidence-tests.yml'
 
@@ -62,6 +66,10 @@ jobs:
         run: |
           python3 -m py_compile hack/prepare_benchmark_evidence.py hack/test_prepare_benchmark_evidence.py
           python3 -m unittest discover -s hack -p 'test_prepare_benchmark_evidence.py' -v
+      - name: Verify whole-invocation resource evidence
+        run: |
+          python3 -m py_compile hack/parse-benchmark-resources.py hack/test_parse_benchmark_resources.py
+          python3 -m unittest discover -s hack -p 'test_parse_benchmark_resources.py' -v
       - name: Verify benchmark fail-closed controls
         run: |
           python3 -m unittest discover \
