@@ -171,6 +171,16 @@ class CodecCompareTests(unittest.TestCase):
         self.assertLess(float(compare.format_speedup(1.0 - 1e-9)), 1.0)
         self.assertEqual(compare.format_speedup(9.0), "9.000")
 
+    def test_small_speedups_are_not_materially_rounded(self):
+        # Fixed three-decimal rounding doubles a valid 0.0005 ratio.
+        for value in (0.0005, 0.00051, 0.00449, 0.0149):
+            with self.subTest(value=value):
+                reported = float(compare.format_speedup(value))
+                self.assertLessEqual(abs(reported - value) / value, 0.01)
+        # Keep the established normal-range CSV representation.
+        self.assertEqual(compare.format_speedup(9.0), "9.000")
+        self.assertEqual(compare.format_speedup(0.0 + 0.0000001), repr(0.0000001))
+
     def test_tiny_positive_speedup_bounds_remain_nonzero(self):
         rows = [dict(row) for row in self.rows]
         for row in rows:
