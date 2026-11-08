@@ -61,7 +61,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Validate bounded dist installer retries offline
-        run: python3 -m unittest discover -s hack -p 'test_install_cargo_dist.py'
+        run: python3 -m unittest discover -s hack -p 'test_install_cargo_dist*.py'
       - name: Install dist
         # The pinned installer fetches another release asset internally. Retry
         # a transient CDN 504 without executing a partial installer or changing
