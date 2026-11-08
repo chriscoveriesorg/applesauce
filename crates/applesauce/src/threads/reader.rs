@@ -111,11 +111,23 @@ fn select_native_codec(
             continue;
         };
         let mut output = vec![0u8; BLOCK_SIZE + 1024];
+        let mut decoded = vec![0u8; BLOCK_SIZE];
         let mut total = 0usize;
         let mut valid = true;
         for window in &windows {
             match encoder.compress(&mut output, window, level) {
-                Ok(n) => total += n,
+                Ok(n) => match encoder.decompress(&mut decoded, &output[..n]) {
+                    Ok(decoded_size)
+                        if decoded_size == window.len() && decoded[..decoded_size] == window[..] =>
+                    {
+                        total += n;
+                    }
+                    _ => {
+                        tracing::debug!(codec = %kind, "native auto sample roundtrip failed");
+                        valid = false;
+                        break;
+                    }
+                },
                 Err(error) => {
                     tracing::debug!(codec = %kind, %error, "native auto sample failed");
                     valid = false;
