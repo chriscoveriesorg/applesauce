@@ -241,6 +241,17 @@ corruption refusal and independent staged-replacement refusal. Arbitrary
 temporary paths and path traversal are rejected. Full physical acceptance
 and independent review remain outstanding.
 
+The signed acceptance helper runs Finder's AppleScript copy-out under a fixed
+180-second deadline. Permission prompts, an unresponsive Finder, or stalled
+FSKit reads fail acceptance with status 124 and retain `finder-readback.txt`
+and `finder-error.txt` in the private evidence directory. The runner kills
+its isolated AppleScript process group after the deadline and refuses to
+reuse an existing evidence log. Both the transferred signed bundle and
+checkout-only readback use this helper, whose bytes are covered by
+`SHA256SUMS`. Portable and macOS CI exercise success, error, timeout and
+non-overwrite cases. Grant Apple Events permissions interactively on the
+authorized disposable host and rerun; timeouts never count as a mounted pass.
+
 ## Reproducible mounted-file acceptance
 
 The unsigned build and Swift typecheck cannot prove that macOS will register
