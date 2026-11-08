@@ -10,8 +10,38 @@ use std::os::macos::fs::MetadataExt;
 use std::os::unix::fs::MetadataExt as UnixMetadataExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::{cmp, io, ptr};
+use std::{cmp, fmt, io, ptr};
 use tempfile::NamedTempFile;
+
+/// Compression ratio rejection is an expected skip, not a failed filesystem write.
+/// Preserve its identity through io::Error so other writer failures remain visible.
+#[derive(Debug)]
+struct BelowMinimumRatio(f64);
+
+impl fmt::Display for BelowMinimumRatio {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "did not compress to at least {}% of original size", self.0 * 100.0)
+    }
+}
+
+impl std::error::Error for BelowMinimumRatio {}
+
+fn record_write_result(
+    progress: &dyn crate::progress::Task,
+    path: &Path,
+    result: &io::Result<()>,
+) {
+    match result {
+        Ok(()) => {}
+        Err(error)
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<BelowMinimumRatio>()) => {}
+        Err(error) => {
+            progress.error(&format!("Error writing {}: {error}", path.display()));
+        }
+    }
+}
 
 pub(super) type Sender = crossbeam_channel::Sender<WorkItem>;
 
@@ -78,10 +108,7 @@ impl Handler {
                 minimum_compression_ratio,
             ) {
                 context.progress.not_compressible_enough(&context.path);
-                return Err(io::Error::other(format!(
-                    "did not compress to at least {}% of original size",
-                    minimum_compression_ratio * 100.0
-                )));
+                return Err(io::Error::other(BelowMinimumRatio(minimum_compression_ratio)));
             }
 
             let Chunk { block, orig_size } = chunk;
@@ -259,6 +286,10 @@ impl WorkHandler<WorkItem> for Handler {
             }
         };
 
+        // Errors from verification, temporary-file publication, metadata and
+        // block decoding must reach CLI progress reporting. The ratio gate
+        // is a deliberate non-error skip.
+        record_write_result(context.progress.as_ref(), &context.path, &res);
         if res.is_ok() {
             context.report_new_stats();
             let compressing = context.operation.mode.is_compressing();
@@ -388,7 +419,13 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_identical_files, ensure_source_path_matches_open_file};
+    use super::{
+        ensure_identical_files, ensure_source_path_matches_open_file, record_write_result,
+        BelowMinimumRatio,
+    };
+    use crate::progress::Task;
+    use std::path::Path;
+    use std::sync::Mutex;
     use std::fs::{self, File};
     use std::io::{BufReader, Cursor, ErrorKind};
     use std::os::unix::fs::symlink;
@@ -539,4 +576,52 @@ mod tests {
             );
         }
     }
+
+    #[derive(Default)]
+    struct RecordingTask(Mutex<Vec<String>>);
+
+    impl Task for RecordingTask {
+        fn increment(&self, _amount: u64) {}
+
+        fn error(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+
+    #[test]
+    fn writer_failures_are_reported_but_expected_ratio_skips_are_not() {
+        let progress = RecordingTask::default();
+        let file = Path::new("generated-file");
+
+        record_write_result(&progress, file, &Ok(()));
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::other(BelowMinimumRatio(0.95))),
+        );
+        assert!(progress.0.lock().unwrap().is_empty());
+
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "restored file verification failed",
+            )),
+        );
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "temporary file publication denied",
+            )),
+        );
+        let errors = progress.0.lock().unwrap();
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("generated-file"));
+        assert!(errors[0].contains("restored file verification failed"));
+        assert!(errors[1].contains("temporary file publication denied"));
+    }
+
 }
