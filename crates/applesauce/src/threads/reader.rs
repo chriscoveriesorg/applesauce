@@ -118,7 +118,8 @@ fn select_native_codec(
             match encoder.compress(&mut output, window, level) {
                 Ok(n) => match encoder.decompress(&mut decoded, &output[..n]) {
                     Ok(decoded_size)
-                        if decoded_size == window.len() && decoded[..decoded_size] == window[..] =>
+                        if decoded_size == window.len()
+                            && decoded[..decoded_size] == window[..] =>
                     {
                         total += n;
                     }
