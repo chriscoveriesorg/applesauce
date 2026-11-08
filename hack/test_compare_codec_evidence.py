@@ -93,6 +93,17 @@ class CodecCompareTests(unittest.TestCase):
                            capture_output=True, text=True, timeout=5).returncode, 1
         )
 
+    def test_output_hardlink_to_confidence_is_refused(self):
+        original = self.input.read_bytes()
+        os.link(self.input, self.output)
+        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
+                   str(self.output)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("must differ", result.stderr)
+        self.assertEqual(self.input.read_bytes(), original)
+        self.assertEqual(self.output.read_bytes(), original)
+
     def test_failed_rerun_does_not_retain_stale_comparison(self):
         self.output.write_text("stale prior-run evidence", encoding="utf-8")
         self.save(self.rows[:-1])
