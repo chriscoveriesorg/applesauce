@@ -161,6 +161,28 @@ class CodecCompareTests(unittest.TestCase):
             self.assertEqual(float(pair["mesh_payload_ratio"]), 2e-12)
             self.assertEqual(pair["raven_savings_vs_mesh_pct"], "50.00")
 
+    def test_tiny_positive_speedup_bounds_remain_nonzero(self):
+        rows = [dict(row) for row in self.rows]
+        for row in rows:
+            if row["codec"] != "lzraven":
+                continue
+            size = int(row["input_bytes"])
+            center = 1e-6
+            low, high = center * 0.9, center * 1.1
+            mibs = size * 1e9 / 1048576
+            row["encode_median_ns"] = str(center)
+            row["encode_ci95_lower_ns"] = str(low)
+            row["encode_ci95_upper_ns"] = str(high)
+            row["encode_median_mib_per_s"] = str(mibs / center)
+            row["encode_ci95_lower_mib_per_s"] = str(mibs / high)
+            row["encode_ci95_upper_mib_per_s"] = str(mibs / low)
+        self.save(rows)
+        for result in compare.compare(self.input, "smoke"):
+            for field in ("encode_mesh_speedup_x", "encode_bound_low_x",
+                          "encode_bound_high_x"):
+                self.assertGreater(float(result[field]), 0, field)
+            self.assertEqual(result["encode_separation"], "raven-faster")
+
     def test_overflowing_payload_savings_is_rejected(self):
         rows = [dict(row) for row in self.rows]
         for row in rows:
