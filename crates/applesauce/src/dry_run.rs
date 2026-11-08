@@ -1169,7 +1169,7 @@ mod tests {
     fn profile_audit_refuses_parent_traversal_before_touching_root() {
         let path = PathBuf::from("nonexistent-root/../outside");
         for profile in [Profile::Caches, Profile::Bundles] {
-            let audit = analyze_with_profile(&[path.clone()], Kind::Zlib, 0.95, 5, Some(profile));
+            let audit = analyze_with_profile(std::slice::from_ref(&path), Kind::Zlib, 0.95, 5, Some(profile));
             assert!(!audit.complete);
             assert_eq!(audit.paths.len(), 1);
             assert_eq!(audit.paths[0].reason, "error");
