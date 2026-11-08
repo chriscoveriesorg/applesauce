@@ -95,7 +95,7 @@ Artifacts include:
 | `all-codecs-ranking.csv` | Each codec's relative payload, encode and decode rank and slowdown against the fastest in the same-host, same-fixture five-codec cohort |
 | `all-codecs-ranking.md` | Compact mixed-JSONL ranking for all five codecs at 1 MiB and 8 MiB, whole and independent 64 KiB |
 | `summary.md` | Small same-host Chat JSONL vs entropy comparison |
-| `criterion.log` | Complete runner output, including measurement warnings and skips |
+| `criterion.log` | Complete runner output, including measurement warnings/skips and macOS `/usr/bin/time -l` suite-level user/system CPU and peak resident memory statistics; these aggregate figures do not attribute allocations to individual codecs |
 
 The pure-Python
 [`hack/summarize-benchmarks.py`](summarize-benchmarks.py) exits nonzero when
