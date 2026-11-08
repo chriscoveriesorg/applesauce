@@ -5,6 +5,8 @@ on:
     paths:
       - 'hack/benchmarks/2026-11-06-m1max-macos27.2/*.py'
       - 'hack/criterion-confidence.py'
+      - 'hack/compare-codec-evidence.py'
+      - 'hack/test_compare_codec_evidence.py'
       - 'hack/summarize-benchmarks.py'
       - 'hack/validate-benchmark-matrix.py'
       - 'hack/test_criterion_confidence.py'
@@ -17,6 +19,8 @@ on:
     paths:
       - 'hack/benchmarks/2026-11-06-m1max-macos27.2/*.py'
       - 'hack/criterion-confidence.py'
+      - 'hack/compare-codec-evidence.py'
+      - 'hack/test_compare_codec_evidence.py'
       - 'hack/summarize-benchmarks.py'
       - 'hack/validate-benchmark-matrix.py'
       - 'hack/test_criterion_confidence.py'
