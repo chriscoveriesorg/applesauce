@@ -96,6 +96,7 @@ Artifacts include:
 | `all-codecs-ranking.md` | Compact mixed-JSONL ranking for all five codecs at 1 MiB and 8 MiB, whole and independent 64 KiB |
 | `summary.md` | Small same-host Chat JSONL vs entropy comparison |
 | `criterion.log` | Complete runner output, including measurement warnings/skips and macOS `/usr/bin/time -l` suite-level user/system CPU and peak resident memory statistics; these aggregate figures do not attribute allocations to individual codecs |
+| `resource-usage.json` | Machine-readable whole-command wall/user/system seconds and peak RSS bytes, tied to the SHA-256 of `criterion.log`; includes Cargo/build overhead and does not measure codec allocations |
 
 The pure-Python
 [`hack/summarize-benchmarks.py`](summarize-benchmarks.py) exits nonzero when
@@ -118,8 +119,12 @@ python3 hack/prepare_benchmark_evidence.py
 mkdir -p target/applesauce-bench
 export APPLESAUCE_BENCH_SUITE=standard
 export APPLESAUCE_BENCH_MANIFEST="$PWD/target/applesauce-bench/manifest.csv"
+set -o pipefail
 /usr/bin/time -l cargo bench --locked -p applesauce-core --bench modern_buffer -- \
-  --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30
+  --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30 \
+  2>&1 | tee target/applesauce-bench/criterion.log
+python3 hack/parse-benchmark-resources.py \
+  target/applesauce-bench/criterion.log target/applesauce-bench/resource-usage.json
 python3 hack/validate-benchmark-matrix.py \
   "$APPLESAUCE_BENCH_MANIFEST" "$APPLESAUCE_BENCH_SUITE"
 python3 hack/summarize-benchmarks.py \
@@ -146,6 +151,8 @@ small changes. Report the regression/improvement only after independently
 reproducing it on a controlled host. The public hosted workflow intentionally
 **does not fail CI on percentage speed changes**. It fails on broken builds,
 round trips, missing reports or invalid contracts.
+
+The CPU/RSS report parses Darwin's `/usr/bin/time -l` trailer from the timed `cargo bench` command. It rejects missing or repeated fields and nonregular, altered or oversized logs; the report is only emitted on successful complete telemetry. This summarizes the whole command, including build, process launches and the benchmark harness. Per-codec allocation counts need a separate allocator profiler. Earlier artifacts without a time trailer cannot be retroactively assigned resource numbers.
 
 Confidence intervals are the Criterion bootstrap **95% intervals for median execution time**, not cross-host uncertainty bounds. Throughput is the reciprocal of elapsed time, so its lower bound uses the **upper time bound** and its upper bound uses the **lower time bound**. The separate exporter independently validates the full golden-fixture matrix and every manifest field against the summary. It then refuses malformed estimates, missing cases, summary/estimate disagreement and non-95% bounds. It does not claim CPU utilization, allocation counts, or a speedup from one hosted run. Those require additional instrumentation and controlled repeats.
 
