@@ -66,3 +66,62 @@ fn auto_dry_run_refuses_without_mutating_generated_file() {
     assert_eq!(fs::read(&path).unwrap(), original);
     assert!(!applesauce::info::get(&path).unwrap().is_compressed);
 }
+
+#[test]
+#[ignore = "manual APFS benchmark: records real allocation and wall time"]
+fn native_auto_real_allocation_benchmark() {
+    use std::time::Instant;
+
+    // Every test input is generated and written under the checkout's volume.
+    // Independent paths prevent APFS compression state from leaking between
+    // repetitions. Timings are observations, never a CI pass/fail threshold.
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let repeated = vec![b'A'; 2 * 1024 * 1024];
+    let jsonl = (0..40_000)
+        .map(|index| format!("{{\"i\":{index},\"type\":\"synthetic\",\"value\":\"abcabcabcabc\"}}\n"))
+        .collect::<String>()
+        .into_bytes();
+    let mut mixed = vec![b'Z'; 2 * 1024 * 1024];
+    let mut state = 0x1234_5678_u32;
+    for byte in &mut mixed[..mixed.len() / 2] {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        *byte = (state >> 8) as u8;
+    }
+
+    println!("fixture,codec,repeat,logical_bytes,allocated_bytes,elapsed_microseconds,compressed");
+    for (fixture, original) in [
+        ("repeated", repeated),
+        ("jsonl", jsonl),
+        ("mixed", mixed),
+    ] {
+        for codec in ["zlib", "lzvn", "lzfse", "auto"] {
+            for iteration in 0..3 {
+                let path = dir.path().join(format!("{fixture}-{codec}-{iteration}.bin"));
+                fs::write(&path, &original).unwrap();
+                let start = Instant::now();
+                let output = run(
+                    &[
+                        "compress",
+                        "--compression",
+                        codec,
+                        "--minimum-compression-ratio",
+                        "1.10",
+                        "--verify",
+                    ],
+                    &path,
+                );
+                let elapsed = start.elapsed().as_micros();
+                assert_success(&output);
+                assert_eq!(fs::read(&path).unwrap(), original, "{fixture} {codec}");
+                let info = applesauce::info::get(&path).unwrap();
+                assert_eq!(info.stat_size as usize, original.len());
+                println!(
+                    "{fixture},{codec},{iteration},{},{},{elapsed},{}",
+                    info.stat_size, info.on_disk_size, info.is_compressed
+                );
+            }
+        }
+    }
+}
