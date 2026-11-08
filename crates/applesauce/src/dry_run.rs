@@ -1055,19 +1055,71 @@ mod tests {
 
     #[test]
     fn audit_profiles_reject_code_and_outside_roots() {
-        let audit = profile_exclusion;
-        assert_eq!(audit(Profile::Caches, Path::new("/Users/a/Library/Caches/data.log")), None);
-        assert_eq!(audit(Profile::Caches, Path::new("/Users/a/Library/Caches/Foo.app/Contents/Resources/a.json")), Some("cache_contains_code_bundle"));
-        assert_eq!(audit(Profile::Caches, Path::new("/Users/a/Caches/data.log")), Some("outside_library_caches"));
-        assert_eq!(audit(Profile::Caches, Path::new("/Users/a/Library/Caches/../MacOS/app")), Some("profile_parent_traversal"));
-        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/icon.icns")), None);
-        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/MacOS/Foo")), Some("bundle_non_resource"));
-        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/_CodeSignature/CodeResources")), Some("bundle_non_resource"));
-        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/Nested.bundle/file")), Some("bundle_nested_code_or_signature"));
-        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/helper.dylib")), Some("bundle_executable_resource"));
-        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/../MacOS/Foo")), Some("profile_parent_traversal"));
-        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/Foo.app/Contents/Resources/icon.app")), Some("bundle_nested_code_or_signature"));
-        assert_eq!(audit(Profile::Bundles, Path::new("/Applications/data.json")), Some("outside_app_bundle"));
+        let cases: &[(Profile, &str, Option<&str>)] = &[
+            (
+                Profile::Caches,
+                "/Users/a/Library/Caches/data.log",
+                None,
+            ),
+            (
+                Profile::Caches,
+                "/Users/a/Library/Caches/Foo.app/Contents/Resources/a.json",
+                Some("cache_contains_code_bundle"),
+            ),
+            (
+                Profile::Caches,
+                "/Users/a/Caches/data.log",
+                Some("outside_library_caches"),
+            ),
+            (
+                Profile::Caches,
+                "/Users/a/Library/Caches/../MacOS/app",
+                Some("profile_parent_traversal"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/icon.icns",
+                None,
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/MacOS/Foo",
+                Some("bundle_non_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/_CodeSignature/CodeResources",
+                Some("bundle_non_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/Nested.bundle/file",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/helper.dylib",
+                Some("bundle_executable_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/../MacOS/Foo",
+                Some("profile_parent_traversal"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/icon.app",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/data.json",
+                Some("outside_app_bundle"),
+            ),
+        ];
+        for &(profile, path, expected) in cases {
+            assert_eq!(profile_exclusion(profile, Path::new(path)), expected, "{path}");
+        }
     }
 
     #[test]
