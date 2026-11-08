@@ -414,6 +414,44 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RootErrorProgress {
+        errors: Mutex<Vec<(PathBuf, String)>>,
+    }
+
+    impl Progress for RootErrorProgress {
+        type Task = NoProgress;
+
+        fn error(&self, path: &Path, message: &str) {
+            self.errors
+                .lock()
+                .unwrap()
+                .push((path.to_owned(), message.to_owned()));
+        }
+
+        fn file_task(&self, _path: &Path, _size: u64) -> Self::Task {
+            NoProgress
+        }
+    }
+
+    #[test]
+    fn explicit_missing_root_is_reported_as_an_operation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.ascf");
+        let reporter = RootErrorProgress::default();
+        let mut compressor = FileCompressor::new();
+
+        // Decompression of a nonexistent root must fail through Progress::error
+        // rather than silently returning zero work and successful statistics.
+        compressor.recursive_decompress(iter::once(missing.as_path()), true, &reporter, true);
+
+        let errors = reporter.errors.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, missing);
+        assert!(errors[0].1.contains("unable to inspect input root"));
+        assert!(!missing.exists());
+    }
+
     #[derive(Debug)]
     struct EntryInfo {
         path: PathBuf,
