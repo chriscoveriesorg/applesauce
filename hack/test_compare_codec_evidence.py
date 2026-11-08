@@ -197,6 +197,27 @@ class CodecCompareTests(unittest.TestCase):
         for pair in compare.compare(self.input, "smoke"):
             self.assertLess(float(pair["raven_savings_vs_mesh_pct"]), 0)
 
+    def test_small_nonzero_savings_are_not_materially_rounded(self):
+        # Two-decimal rounding inflates a genuine 0.006% saving to 0.01%.
+        rows = [dict(row) for row in self.rows]
+        for row in rows:
+            if row["codec"] == "lzraven":
+                row["encoded_over_input_ratio"] = "0.99994"
+            elif row["codec"] == "lzmesh":
+                row["encoded_over_input_ratio"] = "1.0"
+        self.save(rows)
+        for pair in compare.compare(self.input, "smoke"):
+            saving = float(pair["raven_savings_vs_mesh_pct"])
+            expected = 100 * (1.0 - 0.99994)
+            self.assertLessEqual(abs(saving - expected) / expected, 0.01)
+        # Normal-size savings keep their established two-decimal rendering.
+        for row in rows:
+            if row["codec"] == "lzraven":
+                row["encoded_over_input_ratio"] = "0.5"
+        self.save(rows)
+        for pair in compare.compare(self.input, "smoke"):
+            self.assertEqual(pair["raven_savings_vs_mesh_pct"], "50.00")
+
     def test_near_unity_speedups_preserve_direction(self):
         # A reported 1.000x must not contradict a faster/slower verdict.
         self.assertEqual(compare.format_speedup(1.0), "1.000")
