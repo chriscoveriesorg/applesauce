@@ -135,6 +135,34 @@ fn open_regular(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+// Check that the pathname still identifies the opened input before publishing
+// a separate archive or restoration. A replaced path may have identical size
+// and timestamps while the held descriptor still reads the old inode.
+fn ensure_open_path_identity(path: &Path, opened: &File) -> io::Result<()> {
+    let current = open_regular(path)?;
+    let original = opened.metadata()?;
+    let at_path = current.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if original.dev() != at_path.dev() || original.ino() != at_path.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive source pathname was replaced during the operation",
+            ));
+        }
+    }
+    if original.len() != at_path.len()
+        || original.modified().ok() != at_path.modified().ok()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive source pathname metadata changed during the operation",
+        ));
+    }
+    Ok(())
+}
+
 fn unused_output(output: &Path) -> io::Result<()> {
     match fs::symlink_metadata(output) {
         Ok(_) => Err(io::Error::new(
@@ -357,6 +385,7 @@ fn create(
             "staged archive size changed after verification",
         ));
     }
+    ensure_open_path_identity(source_path, &source)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -447,6 +476,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
             "staged restore failed read-back verification",
         ));
     }
+    ensure_open_path_identity(archive_path, &source)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -499,6 +529,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
             "staged logical range failed read-back verification",
         ));
     }
+    ensure_open_path_identity(archive_path, &source)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -548,6 +579,42 @@ mod tests {
             "lzvn",
         ])
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_source_path_replacement_refused_before_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("held-original");
+        let replacement = dir.path().join("replacement");
+        fs::write(&source, b"AAAA").unwrap();
+        fs::write(&replacement, b"BBBB").unwrap();
+        let mut held = open_regular(&source).unwrap();
+        ensure_open_path_identity(&source, &held).unwrap();
+
+        // Same length, distinct inode: metadata-length checks alone would
+        // accept publishing an archive of a now-obsolete pathname.
+        fs::rename(&replacement, &source).unwrap();
+        assert_eq!(
+            ensure_open_path_identity(&source, &held)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut bytes = [0_u8; 4];
+        held.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"AAAA");
+
+        // A removed or symlink-substituted pathname must also fail closed.
+        fs::remove_file(&source).unwrap();
+        assert_eq!(
+            ensure_open_path_identity(&source, &held)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        std::os::unix::fs::symlink(dir.path().join("held-original"), &source).unwrap();
+        assert!(ensure_open_path_identity(&source, &held).is_err());
     }
 
     #[test]
