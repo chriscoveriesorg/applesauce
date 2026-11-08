@@ -464,7 +464,11 @@ impl Analyzer {
             .and_then(|profile| profile_exclusion(profile, path))
         {
             // Preserve the existing hard-link accounting without opening the file.
-            let reason = if scanned.nlink() > 1 { "hard_link" } else { reason };
+            let reason = if scanned.nlink() > 1 {
+                "hard_link"
+            } else {
+                reason
+            };
             let report = skipped(path, "file", self.kind, reason, Some(scanned));
             let result = accumulate_report(&report);
             self.paths.push(report);
