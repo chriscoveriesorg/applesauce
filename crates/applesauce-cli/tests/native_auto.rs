@@ -93,8 +93,12 @@ fn native_auto_real_allocation_benchmark() {
 
     println!("fixture,codec,repeat,logical_bytes,allocated_bytes,elapsed_microseconds,compressed");
     for (fixture, original) in [("repeated", repeated), ("jsonl", jsonl), ("mixed", mixed)] {
-        for codec in ["zlib", "lzvn", "lzfse", "auto"] {
-            for iteration in 0..3 {
+        let codecs = ["zlib", "lzvn", "lzfse", "auto"];
+        // Rotating the order counters systematic warm-cache and startup bias:
+        // each codec occupies every position once per fixture.
+        for iteration in 0..codecs.len() {
+            for offset in 0..codecs.len() {
+                let codec = codecs[(offset + iteration) % codecs.len()];
                 let path = dir.path().join(format!("{fixture}-{codec}-{iteration}.bin"));
                 fs::write(&path, &original).unwrap();
                 let start = Instant::now();
