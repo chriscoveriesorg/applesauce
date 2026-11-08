@@ -659,14 +659,9 @@ fn command_check() {
 
 #[test]
 fn native_auto_codec_is_explicit_and_does_not_change_defaults() {
-    let parsed = Cli::try_parse_from([
-        "applesauce",
-        "compress",
-        "--compression",
-        "auto",
-        "fixture",
-    ])
-    .unwrap();
+    let parsed =
+        Cli::try_parse_from(["applesauce", "compress", "--compression", "auto", "fixture"])
+            .unwrap();
     let Commands::Compress(compress) = parsed.command else {
         panic!("expected compress");
     };
