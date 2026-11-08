@@ -131,7 +131,9 @@ def compare(confidence_csv: Path, suite: str):
         raven, mesh = pair["lzraven"], pair["lzmesh"]
         r_ratio = positive_number(raven["encoded_over_input_ratio"], "Raven payload ratio")
         m_ratio = positive_number(mesh["encoded_over_input_ratio"], "Mesh payload ratio")
-        savings_pct = 100 * (1 - r_ratio / m_ratio)
+        # Subtract before dividing: 1 - (r/m) can round to zero for
+        # adjacent positive floats, hiding a real payload difference.
+        savings_pct = 100 * ((m_ratio - r_ratio) / m_ratio)
         if not math.isfinite(savings_pct):
             raise ValueError("nonfinite Raven/Mesh payload savings")
         result = dict(zip(GROUP, key))
