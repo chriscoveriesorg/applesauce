@@ -98,8 +98,14 @@ struct Decompress {
     ///
     /// Only for deliberate recovery on an OS that cannot decode the source.
     /// Restored bytes still undergo format and size checks before publication.
-    #[arg(long, conflicts_with = "verify")]
+    #[arg(long, conflicts_with = "verify", requires = "manual")]
     no_verify: bool,
+}
+
+impl Decompress {
+    fn verification_enabled(&self) -> bool {
+        self.verify || !self.no_verify
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -403,15 +409,11 @@ fn main() {
         Commands::Compress(Compress { dry_run: true, .. }) => {
             unreachable!("dry-run handled before tracing")
         }
-        Commands::Decompress(Decompress {
-            paths,
-            manual,
-            verify,
-            no_verify,
-        }) => {
-            // Always compare staged plaintext against the kernel-visible source
-            // before replacing it, unless the operator explicitly opts out.
-            let verify = verify || !no_verify;
+        Commands::Decompress(decompress) => {
+            // Compare staged plaintext against the kernel-visible source before
+            // publishing, except for explicit manual recovery on older hosts.
+            let verify = decompress.verification_enabled();
+            let Decompress { paths, manual, .. } = decompress;
             if !verify {
                 tracing::warn!(
                     "Decompression verification disabled: restored bytes cannot be independently compared to kernel-visible source bytes"
@@ -680,15 +682,31 @@ fn decompress_verifies_by_default_and_requires_explicit_opt_out() {
         let Commands::Decompress(decompress) = parsed.command else {
             panic!("expected decompress command");
         };
-        assert!(decompress.verify || !decompress.no_verify);
+        assert!(decompress.verification_enabled());
     }
 
-    let parsed =
-        Cli::try_parse_from(["applesauce", "decompress", "--no-verify", "fixture"]).unwrap();
+    let parsed = Cli::try_parse_from([
+        "applesauce",
+        "decompress",
+        "--manual",
+        "--no-verify",
+        "fixture",
+    ])
+    .unwrap();
     let Commands::Decompress(decompress) = parsed.command else {
         panic!("expected decompress command");
     };
-    assert!(!decompress.verify && decompress.no_verify);
+    assert!(!decompress.verification_enabled());
+    assert!(decompress.no_verify);
+
+    // Unsafe opt-out is meaningful only for manual decoding on older systems.
+    assert!(Cli::try_parse_from([
+        "applesauce",
+        "decompress",
+        "--no-verify",
+        "fixture"
+    ])
+    .is_err());
 
     assert!(Cli::try_parse_from([
         "applesauce",
