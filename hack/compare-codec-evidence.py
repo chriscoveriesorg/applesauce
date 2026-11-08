@@ -65,7 +65,7 @@ def timings(row, operation):
         throughput = positive_number(row[f"{operation}_{field}_mib_per_s"],
                                      f"{field} throughput")
         if not math.isclose(throughput, bytes_per_second / elapsed,
-                            rel_tol=1e-5, abs_tol=0.0002):
+                            rel_tol=1e-5, abs_tol=0.000051):
             raise ValueError("confidence throughput disagrees with timing interval")
     return center, low, high
 
