@@ -106,7 +106,11 @@ and SHA-256 verification checks remain mandatory. Explicit `--codec lzraven` ret
 No automatic native APFS codec selection or `decmpfs` writer is involved.
 
 The writer rereads and hashes the original, verifies every staged chunk and
-publishes a new file only after verification. Archives that cannot save space
+reopens the input pathname immediately before publishing to reject a replaced
+source (including same-sized inode swaps on macOS/Linux). Full and ranged
+restoration apply the same pathname check before publishing their new output.
+A concurrent rename after the final check remains a normal filesystem race.
+Archives that cannot save space
 are refused unless you set `--allow-expansion`. Use `--chunk-bytes 1048576`
 to select a power-of-two chunk size between 64 KiB and 8 MiB. Keep the original
 log until you have validated its restoration. The archive is not an APFS
