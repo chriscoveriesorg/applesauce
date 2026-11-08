@@ -152,9 +152,7 @@ fn ensure_open_path_identity(path: &Path, opened: &File) -> io::Result<()> {
             ));
         }
     }
-    if original.len() != at_path.len()
-        || original.modified().ok() != at_path.modified().ok()
-    {
+    if original.len() != at_path.len() || original.modified().ok() != at_path.modified().ok() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "archive source pathname metadata changed during the operation",
