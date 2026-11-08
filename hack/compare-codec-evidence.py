@@ -217,7 +217,9 @@ def main():
         return 2
     try:
         source, suite, output = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-        if output.resolve() == source.resolve():
+        if output.resolve() == source.resolve() or (
+            output.exists() and os.path.samefile(output, source)
+        ):
             raise ValueError("comparison output must differ from confidence evidence")
         # The workflow retains artifacts even after a failed job. Avoid
         # presenting a previous run's paired comparison as current evidence.
