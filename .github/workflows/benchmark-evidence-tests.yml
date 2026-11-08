@@ -44,6 +44,10 @@ jobs:
         run: |
           python3 -m py_compile hack/criterion-confidence.py hack/test_criterion_confidence.py
           python3 -m unittest discover -s hack -p 'test_criterion_confidence.py' -v
+      - name: Verify matched Raven/Mesh evidence
+        run: |
+          python3 -m py_compile hack/compare-codec-evidence.py hack/test_compare_codec_evidence.py
+          python3 -m unittest discover -s hack -p 'test_compare_codec_evidence.py' -v
       - name: Verify per-run Criterion evidence isolation
         run: |
           python3 -m py_compile hack/prepare_benchmark_evidence.py hack/test_prepare_benchmark_evidence.py
