@@ -144,6 +144,13 @@ struct Compress {
     #[arg(long, conflicts_with = "verify")]
     dry_run: bool,
 
+    /// Audit only: restrict candidates to Library/Caches or .app resources
+    ///
+    /// A resource candidate still needs separate codesign and launch testing.
+    /// Profiles are intentionally unavailable for mutating compression.
+    #[arg(long, value_enum, requires = "dry_run")]
+    profile: Option<DryRunProfile>,
+
     /// Emit JSON: the versioned dry-run projection with --dry-run, otherwise the
     /// actual-storage report after compression
     #[arg(long)]
@@ -161,6 +168,21 @@ struct Info {
     /// Emit the versioned actual-storage JSON report
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Copy, Clone, clap::ValueEnum, PartialEq, Eq)]
+enum DryRunProfile {
+    Caches,
+    Bundles,
+}
+
+impl From<DryRunProfile> for applesauce::dry_run::Profile {
+    fn from(value: DryRunProfile) -> Self {
+        match value {
+            DryRunProfile::Caches => Self::Caches,
+            DryRunProfile::Bundles => Self::Bundles,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum, PartialEq, Eq)]
@@ -248,11 +270,12 @@ fn main() {
                 eprintln!("applesauce: {kind} is unavailable in this build or on this host");
                 std::process::exit(1);
             }
-            let report = applesauce::dry_run::analyze(
+            let report = applesauce::dry_run::analyze_with_profile(
                 &args.paths,
                 kind,
                 args.minimum_compression_ratio,
                 args.level,
+                args.profile.map(Into::into),
             );
             if args.json {
                 let stdout = io::stdout();
@@ -357,6 +380,7 @@ fn main() {
             level,
             verify,
             dry_run: false,
+            profile: _,
             json,
         }) => {
             let kind: Kind = compression.into();
@@ -634,6 +658,31 @@ fn truncate_single_segment() {
 fn command_check() {
     use clap::CommandFactory;
     Cli::command().debug_assert()
+}
+
+#[test]
+fn profile_audit_requires_dry_run_and_does_not_affect_normal_compression() {
+    for profile in ["caches", "bundles"] {
+        let command = Cli::try_parse_from([
+            "applesauce", "compress", "--dry-run", "--profile", profile, "fixture",
+        ])
+        .unwrap();
+        let Commands::Compress(args) = command.command else {
+            panic!("expected compress");
+        };
+        assert!(args.dry_run);
+        assert!(args.profile.is_some());
+
+        assert!(Cli::try_parse_from([
+            "applesauce", "compress", "--profile", profile, "fixture",
+        ])
+        .is_err());
+    }
+    let command = Cli::try_parse_from(["applesauce", "compress", "fixture"]).unwrap();
+    let Commands::Compress(args) = command.command else {
+        panic!("expected compress");
+    };
+    assert!(args.profile.is_none());
 }
 
 #[test]
