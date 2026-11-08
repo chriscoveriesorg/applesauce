@@ -5,8 +5,8 @@ use applesauce_core::compressor::Kind;
 use applesauce_core::BLOCK_SIZE;
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::FileExt;
 use std::num::NonZeroUsize;
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::{io, thread};
 
