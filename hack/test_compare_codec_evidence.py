@@ -146,6 +146,18 @@ class CodecCompareTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid|disagrees|reversed"):
                     compare.compare(self.input, "smoke")
 
+    def test_throughput_tamper_beyond_export_rounding_is_rejected(self):
+        # The confidence exporter rounds throughput to four decimals.
+        # A 0.00015 modification exceeds its maximum 0.00005 error,
+        # but the previous 0.0002 absolute tolerance accepted it.
+        rows = [dict(row) for row in self.rows]
+        raven = next(row for row in rows if row["codec"] == "lzraven")
+        field = "encode_ci95_lower_mib_per_s"
+        raven[field] = str(float(raven[field]) + 0.00015)
+        self.save(rows)
+        with self.assertRaisesRegex(ValueError, "throughput disagrees"):
+            compare.compare(self.input, "smoke")
+
     def test_tiny_positive_payload_ratios_remain_nonzero_in_csv(self):
         rows = [dict(row) for row in self.rows]
         for row in rows:
