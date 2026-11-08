@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'hack/benchmarks/2026-11-06-m1max-macos27.2/*.py'
+      - 'hack/benchmark-standard.md'
       - 'hack/criterion-confidence.py'
       - 'hack/compare-codec-evidence.py'
       - 'hack/test_compare_codec_evidence.py'
@@ -20,6 +21,7 @@ on:
     branches: [main]
     paths:
       - 'hack/benchmarks/2026-11-06-m1max-macos27.2/*.py'
+      - 'hack/benchmark-standard.md'
       - 'hack/criterion-confidence.py'
       - 'hack/compare-codec-evidence.py'
       - 'hack/test_compare_codec_evidence.py'
