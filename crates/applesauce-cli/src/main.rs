@@ -700,13 +700,7 @@ fn decompress_verifies_by_default_and_requires_explicit_opt_out() {
     assert!(decompress.no_verify);
 
     // Unsafe opt-out is meaningful only for manual decoding on older systems.
-    assert!(Cli::try_parse_from([
-        "applesauce",
-        "decompress",
-        "--no-verify",
-        "fixture"
-    ])
-    .is_err());
+    assert!(Cli::try_parse_from(["applesauce", "decompress", "--no-verify", "fixture"]).is_err());
 
     assert!(Cli::try_parse_from([
         "applesauce",
