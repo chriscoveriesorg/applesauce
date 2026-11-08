@@ -1,7 +1,7 @@
 use crate::seq_queue::Slot;
 use crate::threads::{compressing, writer, BgWork, Context, Mode, WorkHandler};
 use crate::{rfork_storage, seq_queue, try_read_all};
-use applesauce_core::compressor::{Compressor, Kind};
+use applesauce_core::compressor::Kind;
 use applesauce_core::BLOCK_SIZE;
 use std::fs::File;
 use std::io::Read;
