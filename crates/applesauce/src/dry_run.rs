@@ -135,16 +135,19 @@ fn ascii_suffix(name: &OsStr, suffix: &[u8]) -> bool {
         .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
-
 /// Detect executable payloads which lack a recognisable filename extension or
 /// executable permission bits. Read just four bytes from the already-opened
 /// descriptor without changing its cursor; no decoder or writer is invoked.
 fn executable_magic(file: &File) -> io::Result<bool> {
     const MACHO: [[u8; 4]; 8] = [
-        [0xfe, 0xed, 0xfa, 0xce], [0xce, 0xfa, 0xed, 0xfe],
-        [0xfe, 0xed, 0xfa, 0xcf], [0xcf, 0xfa, 0xed, 0xfe],
-        [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca],
-        [0xca, 0xfe, 0xba, 0xbf], [0xbf, 0xba, 0xfe, 0xca],
+        [0xfe, 0xed, 0xfa, 0xce],
+        [0xce, 0xfa, 0xed, 0xfe],
+        [0xfe, 0xed, 0xfa, 0xcf],
+        [0xcf, 0xfa, 0xed, 0xfe],
+        [0xca, 0xfe, 0xba, 0xbe],
+        [0xbe, 0xba, 0xfe, 0xca],
+        [0xca, 0xfe, 0xba, 0xbf],
+        [0xbf, 0xba, 0xfe, 0xca],
     ];
     let mut header = [0u8; 4];
     let mut n = 0;
@@ -158,7 +161,7 @@ fn executable_magic(file: &File) -> io::Result<bool> {
     let bytes = &header[..n];
     Ok(bytes.starts_with(b"#!")
         || bytes.starts_with(b"MZ")
-        || bytes.starts_with(b"\\x7fELF")
+        || bytes.starts_with(&[0x7f, b'E', b'L', b'F'])
         || (n == 4 && MACHO.contains(&header)))
 }
 
@@ -1282,7 +1285,7 @@ mod tests {
         fs::write(&resource, b"test resource").unwrap();
         fs::write(&extensionless_executable, b"test executable with no suffix").unwrap();
         fs::write(&hidden_macho, [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]).unwrap();
-        fs::write(&hidden_script, b"#!/bin/sh\\necho example").unwrap();
+        fs::write(&hidden_script, b"#!/bin/sh\necho example").unwrap();
         // Excluded sealed code may not be readable by the current user.
         // The audit must skip it by pathname policy without ever opening it.
         use std::os::unix::fs::PermissionsExt as _;
