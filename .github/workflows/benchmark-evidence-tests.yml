@@ -10,6 +10,7 @@ on:
       - 'hack/test_criterion_confidence.py'
       - 'hack/prepare_benchmark_evidence.py'
       - 'hack/test_prepare_benchmark_evidence.py'
+      - '.github/workflows/benchmark-codecs.yml'
       - '.github/workflows/benchmark-evidence-tests.yml'
   push:
     branches: [main]
@@ -21,6 +22,7 @@ on:
       - 'hack/test_criterion_confidence.py'
       - 'hack/prepare_benchmark_evidence.py'
       - 'hack/test_prepare_benchmark_evidence.py'
+      - '.github/workflows/benchmark-codecs.yml'
       - '.github/workflows/benchmark-evidence-tests.yml'
 
 permissions:
