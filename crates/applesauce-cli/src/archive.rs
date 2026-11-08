@@ -571,11 +571,20 @@ mod tests {
         assert_eq!(prefer_auto_codec(usize::MAX, 1), Codec::Lzmesh);
         assert_eq!(prefer_auto_codec(usize::MAX, usize::MAX), Codec::Lzmesh);
         assert_eq!(prefer_auto_codec(usize::MAX - 1, usize::MAX), Codec::Lzmesh);
-        assert_eq!(prefer_auto_codec(usize::MAX / 2, usize::MAX), Codec::Lzraven);
+        assert_eq!(
+            prefer_auto_codec(usize::MAX / 2, usize::MAX),
+            Codec::Lzraven
+        );
         // Round exactly at the threshold, including the largest usize values.
         let multiple = usize::MAX / 100;
-        assert_eq!(prefer_auto_codec(multiple * 80, multiple * 100), Codec::Lzraven);
-        assert_eq!(prefer_auto_codec(multiple * 80 + 1, multiple * 100), Codec::Lzmesh);
+        assert_eq!(
+            prefer_auto_codec(multiple * 80, multiple * 100),
+            Codec::Lzraven
+        );
+        assert_eq!(
+            prefer_auto_codec(multiple * 80 + 1, multiple * 100),
+            Codec::Lzmesh
+        );
     }
 
     #[test]
