@@ -943,10 +943,20 @@ mod tests {
 
         // All archive entrypoints open the same untrusted pathname. With
         // O_NONBLOCK missing from open_regular, the first assertion hangs.
-        assert_eq!(open_regular(&fifo).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            open_regular(&fifo).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         let archive_output = dir.path().join("output.ascf");
         let restored_output = dir.path().join("restored.jsonl");
-        assert!(create(&fifo, &archive_output, Some(Codec::Lzraven), 64 * 1024, false).is_err());
+        assert!(create(
+            &fifo,
+            &archive_output,
+            Some(Codec::Lzraven),
+            64 * 1024,
+            false
+        )
+        .is_err());
         assert!(info(&fifo).is_err());
         assert!(verify(&fifo).is_err());
         assert!(extract(&fifo, &restored_output).is_err());
