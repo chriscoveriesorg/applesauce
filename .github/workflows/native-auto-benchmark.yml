@@ -1,0 +1,37 @@
+# Disposable-file performance acceptance for native codec auto selection.
+# Runs only on the feature branch to avoid a perpetual macOS CI cost.
+name: Native auto APFS benchmark
+
+on:
+  push:
+    branches:
+      - feat/native-codec-auto-issue89-20261109
+    paths:
+      - crates/applesauce/src/threads/reader.rs
+      - crates/applesauce-cli/tests/native_auto.rs
+      - .github/workflows/native-auto-benchmark.yml
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure actual APFS allocation and wall time on disposable files
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p applesauce-cli --release --test native_auto native_auto_real_allocation_benchmark -- --ignored --nocapture 2>&1 | tee native-auto-benchmark.log
+      - name: Archive measured evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-auto-benchmark
+          path: native-auto-benchmark.log
+          retention-days: 7
+          if-no-files-found: error
