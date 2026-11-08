@@ -109,6 +109,10 @@ jobs:
             "$BENCH_RESULTS/confidence.csv" "$APPLESAUCE_BENCH_SUITE" \
             "$BENCH_RESULTS/raven-mesh-comparison.csv" \
             | tee "$BENCH_RESULTS/raven-mesh-comparison.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 hack/rank-codec-evidence.py \
+            "$BENCH_RESULTS/confidence.csv" "$APPLESAUCE_BENCH_SUITE" \
+            "$BENCH_RESULTS/all-codecs-ranking.csv" \
+            | tee "$BENCH_RESULTS/all-codecs-ranking.md" >> "$GITHUB_STEP_SUMMARY"
           printf '\nRaw Criterion estimates and samples are available in the downloadable artifact.\n' \
             >> "$GITHUB_STEP_SUMMARY"
       - name: Retain raw evidence even on failure
