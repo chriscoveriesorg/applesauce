@@ -10,6 +10,8 @@ import csv
 import importlib.util
 import math
 import os
+import stat
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -30,6 +32,8 @@ confidence = load_module("criterion-confidence.py", "applesauce_confidence")
 matrix = confidence._matrix
 
 GROUP = ("suite", "workload", "input_bytes", "input_sha256", "layout", "scratch_mode")
+MAX_CONFIDENCE_BYTES = 1024 * 1024
+
 OUT_FIELDS = (
     *GROUP, "raven_payload_ratio", "mesh_payload_ratio",
     "raven_savings_vs_mesh_pct",
@@ -66,9 +70,36 @@ def timings(row, operation):
     return center, low, high
 
 
+def read_confidence(path: Path):
+    """Read only bounded, stable regular-file benchmark evidence."""
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"):
+        raise OSError("safe confidence reads require O_NOFOLLOW and O_NONBLOCK")
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("confidence evidence must be a regular file")
+        if not 0 < before.st_size <= MAX_CONFIDENCE_BYTES:
+            raise ValueError("empty or oversized confidence evidence")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            data = stream.read(before.st_size + 1)
+        after = os.fstat(fd)
+        attrs = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if len(data) != before.st_size or any(
+            getattr(before, attr) != getattr(after, attr) for attr in attrs
+        ):
+            raise ValueError("confidence evidence changed while reading")
+        named = os.stat(path, follow_symlinks=False)
+        if (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino):
+            raise ValueError("confidence evidence path was replaced")
+        return data.decode("utf-8")
+    finally:
+        os.close(fd)
+
+
 def compare(confidence_csv: Path, suite: str):
     expected = matrix.expected_cases(suite)
-    with confidence_csv.open(newline="", encoding="utf-8") as stream:
+    with io.StringIO(read_confidence(confidence_csv), newline="") as stream:
         reader = csv.DictReader(stream)
         if tuple(reader.fieldnames or ()) != confidence.COLUMNS:
             raise ValueError("unknown confidence.csv schema")
