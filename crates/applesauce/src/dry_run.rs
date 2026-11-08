@@ -15,7 +15,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::macos::fs::MetadataExt as MacMetadataExt;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
@@ -133,6 +133,33 @@ fn ascii_suffix(name: &OsStr, suffix: &[u8]) -> bool {
     bytes
         .get(bytes.len().saturating_sub(suffix.len())..)
         .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
+
+/// Detect executable payloads which lack a recognisable filename extension or
+/// executable permission bits. Read just four bytes from the already-opened
+/// descriptor without changing its cursor; no decoder or writer is invoked.
+fn executable_magic(file: &File) -> io::Result<bool> {
+    const MACHO: [[u8; 4]; 8] = [
+        [0xfe, 0xed, 0xfa, 0xce], [0xce, 0xfa, 0xed, 0xfe],
+        [0xfe, 0xed, 0xfa, 0xcf], [0xcf, 0xfa, 0xed, 0xfe],
+        [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca],
+        [0xca, 0xfe, 0xba, 0xbf], [0xbf, 0xba, 0xfe, 0xca],
+    ];
+    let mut header = [0u8; 4];
+    let mut n = 0;
+    while n < header.len() {
+        let read = file.read_at(&mut header[n..], n as u64)?;
+        if read == 0 {
+            break;
+        }
+        n += read;
+    }
+    let bytes = &header[..n];
+    Ok(bytes.starts_with(b"#!")
+        || bytes.starts_with(b"MZ")
+        || bytes.starts_with(b"\\x7fELF")
+        || (n == 4 && MACHO.contains(&header)))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -494,6 +521,24 @@ impl Analyzer {
             Ok(opened) => opened,
             Err(error) => return self.push_error(path, "file", error),
         };
+        if self.profile == Some(Profile::Bundles) {
+            match executable_magic(&file) {
+                Ok(true) => {
+                    let report = skipped(
+                        path,
+                        "file",
+                        self.kind,
+                        "bundle_executable_resource",
+                        Some(&opened),
+                    );
+                    let result = accumulate_report(&report);
+                    self.paths.push(report);
+                    return result;
+                }
+                Ok(false) => {}
+                Err(error) => return self.push_error(path, "file", error),
+            }
+        }
         if opened.nlink() > 1 {
             self.paths
                 .push(skipped(path, "file", self.kind, "hard_link", Some(&opened)));
@@ -1227,6 +1272,8 @@ mod tests {
         let signature = app.join("Contents/_CodeSignature/CodeResources");
         let resource = app.join("Contents/Resources/localization.strings");
         let extensionless_executable = app.join("Contents/Resources/run-helper");
+        let hidden_macho = app.join("Contents/Resources/library-data");
+        let hidden_script = app.join("Contents/Resources/embedded-config");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         fs::create_dir_all(signature.parent().unwrap()).unwrap();
         fs::create_dir_all(resource.parent().unwrap()).unwrap();
@@ -1234,6 +1281,8 @@ mod tests {
         fs::write(&signature, b"test signature").unwrap();
         fs::write(&resource, b"test resource").unwrap();
         fs::write(&extensionless_executable, b"test executable with no suffix").unwrap();
+        fs::write(&hidden_macho, [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]).unwrap();
+        fs::write(&hidden_script, b"#!/bin/sh\\necho example").unwrap();
         // Excluded sealed code may not be readable by the current user.
         // The audit must skip it by pathname policy without ever opening it.
         use std::os::unix::fs::PermissionsExt as _;
@@ -1262,7 +1311,16 @@ mod tests {
         assert_eq!(executable_entry.reason, "bundle_executable_resource");
         assert!(!executable_entry.would_compress);
         assert_eq!(executable_entry.raw_compressed_bytes, None);
-        assert_eq!(audit.paths.len(), 4);
+        for magic_file in [hidden_macho, hidden_script] {
+            let entry = audit
+                .paths
+                .iter()
+                .find(|entry| entry.path.display == magic_file.to_string_lossy())
+                .unwrap();
+            assert_eq!(entry.reason, "bundle_executable_resource");
+            assert_eq!(entry.raw_compressed_bytes, None);
+        }
+        assert_eq!(audit.paths.len(), 6);
     }
 
     #[test]
