@@ -131,11 +131,14 @@ def compare(confidence_csv: Path, suite: str):
         raven, mesh = pair["lzraven"], pair["lzmesh"]
         r_ratio = positive_number(raven["encoded_over_input_ratio"], "Raven payload ratio")
         m_ratio = positive_number(mesh["encoded_over_input_ratio"], "Mesh payload ratio")
+        savings_pct = 100 * (1 - r_ratio / m_ratio)
+        if not math.isfinite(savings_pct):
+            raise ValueError("nonfinite Raven/Mesh payload savings")
         result = dict(zip(GROUP, key))
         result.update(
             raven_payload_ratio=f"{r_ratio:.8f}",
             mesh_payload_ratio=f"{m_ratio:.8f}",
-            raven_savings_vs_mesh_pct=f"{100 * (1 - r_ratio / m_ratio):.2f}",
+            raven_savings_vs_mesh_pct=f"{savings_pct:.2f}",
         )
         for op in ("encode", "decode"):
             r_mid, r_low, r_high = timings(raven, op)
