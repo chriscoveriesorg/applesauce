@@ -174,7 +174,10 @@ fn hash_reader(source: &mut impl Read) -> io::Result<[u8; 32]> {
 /// so account for each window's actual codec overhead in the comparison.
 /// No sample implies native APFS decoder support.
 fn prefer_auto_codec(raven_bytes: usize, mesh_bytes: usize) -> Codec {
-    if raven_bytes.saturating_mul(100) <= mesh_bytes.saturating_mul(80) {
+    // Compare exact cross-products: saturating usize multiplication makes
+    // two very large lengths both equal usize::MAX and may select Raven even
+    // when it saves no bytes. u128 handles every possible usize input.
+    if (raven_bytes as u128) * 100 <= (mesh_bytes as u128) * 80 {
         Codec::Lzraven
     } else {
         Codec::Lzmesh
@@ -566,6 +569,13 @@ mod tests {
         assert_eq!(prefer_auto_codec(81, 100), Codec::Lzmesh);
         assert_eq!(prefer_auto_codec(100, 80), Codec::Lzmesh);
         assert_eq!(prefer_auto_codec(usize::MAX, 1), Codec::Lzmesh);
+        assert_eq!(prefer_auto_codec(usize::MAX, usize::MAX), Codec::Lzmesh);
+        assert_eq!(prefer_auto_codec(usize::MAX - 1, usize::MAX), Codec::Lzmesh);
+        assert_eq!(prefer_auto_codec(usize::MAX / 2, usize::MAX), Codec::Lzraven);
+        // Round exactly at the threshold, including the largest usize values.
+        let multiple = usize::MAX / 100;
+        assert_eq!(prefer_auto_codec(multiple * 80, multiple * 100), Codec::Lzraven);
+        assert_eq!(prefer_auto_codec(multiple * 80 + 1, multiple * 100), Codec::Lzmesh);
     }
 
     #[test]
