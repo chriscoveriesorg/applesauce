@@ -459,10 +459,16 @@ impl Analyzer {
     fn visit_file(&mut self, path: &Path, scanned: &Metadata) -> Accumulator {
         // A policy exclusion needs only the no-follow stat from visit(). Do not
         // open excluded code/signature files: they may be deliberately unreadable.
-        if let Some(reason) = self
-            .profile
-            .and_then(|profile| profile_exclusion(profile, path))
-        {
+        // Extensionless Mach-O binaries and scripts may live in Resources.
+        // Their executable mode is available from the no-follow stat, so we
+        // can exclude them before opening even an unreadable file.
+        let exclusion = self.profile.and_then(|profile| {
+            profile_exclusion(profile, path).or_else(|| {
+                (profile == Profile::Bundles && scanned.mode() & 0o111 != 0)
+                    .then_some("bundle_executable_resource")
+            })
+        });
+        if let Some(reason) = exclusion {
             // Preserve the existing hard-link accounting without opening the file.
             let reason = if scanned.nlink() > 1 {
                 "hard_link"
@@ -1194,17 +1200,24 @@ mod tests {
         let executable = app.join("Contents/MacOS/Fixture");
         let signature = app.join("Contents/_CodeSignature/CodeResources");
         let resource = app.join("Contents/Resources/localization.strings");
+        let extensionless_executable = app.join("Contents/Resources/run-helper");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         fs::create_dir_all(signature.parent().unwrap()).unwrap();
         fs::create_dir_all(resource.parent().unwrap()).unwrap();
         fs::write(&executable, b"test executable").unwrap();
         fs::write(&signature, b"test signature").unwrap();
         fs::write(&resource, b"test resource").unwrap();
+        fs::write(&extensionless_executable, b"test executable with no suffix").unwrap();
         // Excluded sealed code may not be readable by the current user.
         // The audit must skip it by pathname policy without ever opening it.
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o000)).unwrap();
         fs::set_permissions(&signature, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::set_permissions(
+            &extensionless_executable,
+            fs::Permissions::from_mode(0o111),
+        )
+        .unwrap();
 
         let audit = analyze_with_profile(&[app], Kind::Zlib, 0.95, 5, Some(Profile::Bundles));
         assert_eq!(audit.profile, Some("bundles"));
@@ -1219,7 +1232,15 @@ mod tests {
             assert!(!entry.would_compress);
             assert_eq!(entry.raw_compressed_bytes, None);
         }
-        assert_eq!(audit.paths.len(), 3);
+        let executable_entry = audit
+            .paths
+            .iter()
+            .find(|entry| entry.path.display == extensionless_executable.to_string_lossy())
+            .unwrap();
+        assert_eq!(executable_entry.reason, "bundle_executable_resource");
+        assert!(!executable_entry.would_compress);
+        assert_eq!(executable_entry.raw_compressed_bytes, None);
+        assert_eq!(audit.paths.len(), 4);
     }
 
     #[test]
