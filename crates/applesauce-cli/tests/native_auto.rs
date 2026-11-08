@@ -78,7 +78,7 @@ fn native_auto_real_allocation_benchmark() {
     let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let repeated = vec![b'A'; 2 * 1024 * 1024];
     let jsonl = (0..40_000)
-        .map(|index| format!("{{\"i\":{index},\"type\":\"synthetic\",\"value\":\"abcabcabcabc\"}}\n"))
+        .map(|index| format!("{{\"i\":{index},\"v\":\"abcabcabcabc\"}}\n"))
         .collect::<String>()
         .into_bytes();
     let mut mixed = vec![b'Z'; 2 * 1024 * 1024];
@@ -92,11 +92,7 @@ fn native_auto_real_allocation_benchmark() {
     }
 
     println!("fixture,codec,repeat,logical_bytes,allocated_bytes,elapsed_microseconds,compressed");
-    for (fixture, original) in [
-        ("repeated", repeated),
-        ("jsonl", jsonl),
-        ("mixed", mixed),
-    ] {
+    for (fixture, original) in [("repeated", repeated), ("jsonl", jsonl), ("mixed", mixed)] {
         for codec in ["zlib", "lzvn", "lzfse", "auto"] {
             for iteration in 0..3 {
                 let path = dir.path().join(format!("{fixture}-{codec}-{iteration}.bin"));
