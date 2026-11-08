@@ -355,6 +355,23 @@ struct Analyzer {
 
 impl Analyzer {
     fn visit(&mut self, path: &Path, root: bool) -> Accumulator {
+        // Refuse a profile root with lexical parent traversal before any
+        // metadata lookup or directory enumeration outside its audit scope.
+        if root
+            && self.profile.is_some()
+            && path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return self.push_error(
+                path,
+                "unknown",
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "profile audit root cannot contain parent traversal",
+                ),
+            );
+        }
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) => return self.push_error(path, "unknown", error),
@@ -1142,6 +1159,18 @@ mod tests {
                 expected,
                 "{path}"
             );
+        }
+    }
+
+    #[test]
+    fn profile_audit_refuses_parent_traversal_before_touching_root() {
+        let path = PathBuf::from("nonexistent-root/../outside");
+        for profile in [Profile::Caches, Profile::Bundles] {
+            let audit = analyze_with_profile(&[path.clone()], Kind::Zlib, 0.95, 5, Some(profile));
+            assert!(!audit.complete);
+            assert_eq!(audit.paths.len(), 1);
+            assert_eq!(audit.paths[0].reason, "error");
+            assert_eq!(audit.paths[0].error.as_ref().unwrap().kind, "invalid_input");
         }
     }
 
