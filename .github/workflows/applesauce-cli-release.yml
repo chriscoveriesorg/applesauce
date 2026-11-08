@@ -60,11 +60,14 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Validate bounded dist installer retries offline
+        run: python3 -m unittest discover -s hack -p 'test_install_cargo_dist.py'
       - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
+        # The pinned installer fetches another release asset internally. Retry
+        # a transient CDN 504 without executing a partial installer or changing
+        # the requested dist version.
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/cargo-dist-installer.sh | sh"
+        run: bash hack/install-cargo-dist.sh
       - name: Cache dist
         uses: actions/upload-artifact@v7
         with:
