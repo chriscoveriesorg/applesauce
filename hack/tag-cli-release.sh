@@ -54,10 +54,17 @@ if [[ "$fetch_url" != "$remote" || "$push_url" != "$remote" ]]; then
   exit 1
 fi
 
-git fetch --no-tags origin main >&2
+# FETCH_HEAD is the main branch obtained from this network fetch. A locally
+# cached refs/remotes/origin/main may be stale or remapped by an unusual
+# remote.origin.fetch configuration and must not certify a release.
+git fetch --no-tags origin refs/heads/main >&2
+fetched_main=$(git rev-parse --verify 'FETCH_HEAD^{commit}') || {
+  echo 'Could not identify the freshly fetched origin main commit' >&2
+  exit 1
+}
 git cat-file -e "${source_sha}^{commit}"
-if ! git merge-base --is-ancestor "$source_sha" refs/remotes/origin/main; then
-  echo 'Requested source commit is not reachable from origin/main' >&2
+if ! git merge-base --is-ancestor "$source_sha" "$fetched_main"; then
+  echo 'Requested source commit is not reachable from freshly fetched origin main' >&2
   exit 1
 fi
 
