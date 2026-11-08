@@ -427,7 +427,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
     use std::fs::{self, File};
-    use std::io::{BufReader, Cursor, ErrorKind};
+    use std::io::{self, BufReader, Cursor, ErrorKind};
     use std::os::unix::fs::symlink;
     use std::time::{Duration, SystemTime};
 
