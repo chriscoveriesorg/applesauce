@@ -203,6 +203,39 @@ class ConfidenceTests(unittest.TestCase):
         self.assertEqual(manifest.read_bytes(), original)
         self.assertTrue(symlink.is_symlink())
 
+    def test_confidence_output_never_deletes_raw_criterion_measurements(self):
+        manifest, _ = self.complete_smoke()
+        estimate = self.estimate_path("encode")
+        original = estimate.read_bytes()
+        with self.assertRaisesRegex(ValueError, "raw Criterion"):
+            confidence.write_confidence(
+                self.summary, self.criterion, estimate, manifest, "smoke"
+            )
+        self.assertEqual(estimate.read_bytes(), original)
+
+        # A symlinked parent can redirect an apparently separate output into
+        # the Criterion tree. Reject it before unlinking anything.
+        alias = self.root / "criterion-alias"
+        alias.symlink_to(self.criterion, target_is_directory=True)
+        destination = (
+            alias / "apple-buffer_smoke_65536_mixed-jsonl_whole"
+            / "lzraven-reused-scratch" / "encode" / "new" / "estimates.json"
+        )
+        with self.assertRaisesRegex(ValueError, "raw Criterion"):
+            confidence.write_confidence(
+                self.summary, self.criterion, destination, manifest, "smoke"
+            )
+        self.assertEqual(estimate.read_bytes(), original)
+
+        # Also refuse creating a fresh CSV inside a previously untouched
+        # Criterion case directory.
+        new_output = estimate.parent / "confidence.csv"
+        with self.assertRaisesRegex(ValueError, "raw Criterion"):
+            confidence.write_confidence(
+                self.summary, self.criterion, new_output, manifest, "smoke"
+            )
+        self.assertFalse(new_output.exists())
+
     def test_estimates_refuse_fifo_symlink_and_oversized_files(self):
         path = self.estimate_path("encode")
         path.write_bytes(b"x" * (confidence.MAX_ESTIMATE_BYTES + 1))
