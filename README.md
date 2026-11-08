@@ -188,6 +188,7 @@ applesauce compress --dry-run --profile bundles --json /Applications/Example.app
 considers regular files beneath a `Library/Caches` directory pair and skips
 nested app/framework/plugin bundles. The bundles classifier considers only
 `Contents/Resources` within a `.app`; it excludes executable extensions,
+regular files with executable permission bits (including extensionless tools),
 nested code containers and signature directories. Skipped files are never
 encoded. Candidate bundle resources are **not certified safe to compress**:
 the entire sealed resource set may affect an app's code signature. Real bundle
