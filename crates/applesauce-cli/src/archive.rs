@@ -121,6 +121,13 @@ fn parse_logical_range(input: &str) -> Result<(u64, u64), String> {
 }
 
 fn open_regular(path: &Path) -> io::Result<File> {
+    // Reject obvious devices, FIFOs, sockets and links before opening them.
+    // This reduces unwanted device-side effects and lets callers fail early.
+    // The O_NOFOLLOW/O_NONBLOCK flags and descriptor metadata check below
+    // remain mandatory: the pathname can change after this preflight.
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(invalid("archive input must be a regular file"));
+    }
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
