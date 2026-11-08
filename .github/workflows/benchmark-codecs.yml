@@ -87,7 +87,9 @@ jobs:
           printf 'Criterion: %s warmup=%ss measurement=%ss samples=%s\n' \
             "$APPLESAUCE_BENCH_SUITE" "$warmup" "$measurement" "$samples" \
             | tee "$BENCH_RESULTS/config.txt"
-          cargo bench --locked -p applesauce-core --bench modern_buffer -- \
+          # macOS time -l adds suite-level user/system CPU time and peak RSS.
+          # This is whole-invocation telemetry, not a per-codec allocation count.
+          /usr/bin/time -l cargo bench --locked -p applesauce-core --bench modern_buffer -- \
             --noplot --warm-up-time "$warmup" \
             --measurement-time "$measurement" --sample-size "$samples" \
             2>&1 | tee "$BENCH_RESULTS/criterion.log"
