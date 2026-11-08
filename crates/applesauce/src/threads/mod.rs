@@ -128,13 +128,18 @@ pub enum Mode {
         minimum_compression_ratio: f64,
         level: u32,
     },
+    /// Opt-in native per-file codec selection; the reader chooses after open.
+    CompressAuto {
+        minimum_compression_ratio: f64,
+        level: u32,
+    },
     DecompressManually,
     DecompressByReading,
 }
 
 impl Mode {
     pub fn is_compressing(self) -> bool {
-        matches!(self, Self::Compress { .. })
+        matches!(self, Self::Compress { .. } | Self::CompressAuto { .. })
     }
 }
 
