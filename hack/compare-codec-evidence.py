@@ -157,13 +157,19 @@ def compare(confidence_csv: Path, suite: str):
                           else "raven-faster" if high < 1.0
                           else "overlap")
             result.update({
-                f"{op}_mesh_speedup_x": f"{speedup:.3f}",
-                f"{op}_bound_low_x": f"{low:.3f}",
-                f"{op}_bound_high_x": f"{high:.3f}",
+                f"{op}_mesh_speedup_x": format_speedup(speedup),
+                f"{op}_bound_low_x": format_speedup(low),
+                f"{op}_bound_high_x": format_speedup(high),
                 f"{op}_separation": separation,
             })
         output.append(result)
     return output
+
+
+def format_speedup(value):
+    """Keep tiny positive speedups nonzero in the published CSV."""
+    fixed = f"{value:.3f}"
+    return fixed if float(fixed) > 0 else f"{value:.3g}"
 
 
 def markdown(rows):
