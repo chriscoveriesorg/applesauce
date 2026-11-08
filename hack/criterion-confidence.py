@@ -210,8 +210,19 @@ def write_confidence(summary_csv: Path, criterion: Path, output: Path,
     # This workflow uploads its evidence directory even after a failed run.
     # A reused runner can retain a prior confidence.csv; remove it before
     # validation so an incomplete current run cannot publish stale evidence.
-    # Refuse deleting evidence when the requested output aliases an input.
-    # This includes same-path, hardlink and symlink aliases.
+    # Refuse placing confidence.csv inside raw Criterion evidence, including
+    # paths reached through a symlinked parent. In particular, an accidental
+    # estimates.json output argument must not delete a measured input before
+    # the reader can validate it. Also reject same-path/hardlink aliases to
+    # manifest and summary below.
+    root = criterion.resolve(strict=True)
+    destination = output.resolve(strict=False)
+    lexical_root = criterion.absolute()
+    lexical_destination = output.absolute()
+    if (destination == root or root in destination.parents
+            or lexical_destination == lexical_root
+            or lexical_root in lexical_destination.parents):
+        raise ValueError("confidence output must not overwrite raw Criterion evidence")
     for source in (summary_csv, manifest):
         if output.exists() and os.path.samefile(output, source):
             raise ValueError("confidence output aliases source benchmark evidence")
