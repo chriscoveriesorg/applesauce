@@ -615,7 +615,7 @@ mod tests {
             .write(true)
             .open(&replacement)
             .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .set_times(fs::FileTimes::new().set_modified(original_modified))
             .unwrap();
         assert_eq!(
             held.metadata().unwrap().modified().unwrap(),
