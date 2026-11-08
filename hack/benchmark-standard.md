@@ -90,6 +90,8 @@ Artifacts include:
 | `criterion/**/new/estimates.json` and `sample.json` | Raw Criterion timing estimates, confidence intervals and samples for encode and decode |
 | `summary.csv` | Full-case median ns and derived encode/decode MiB/s joined by exact case key |
 | `confidence.csv` | Every case's validated 95% median-time interval and correctly inverted encode/decode MiB/s bounds; `summary.csv` schema unchanged |
+| `raven-mesh-comparison.csv` | Same-host matched-fixture Raven/Mesh payload savings and encode/decode median speedup, with bounds derived from marginal timing intervals |
+| `raven-mesh-comparison.md` | Concise mixed-JSONL/representative paired comparison for operator review |
 | `summary.md` | Small same-host Chat JSONL vs entropy comparison |
 | `criterion.log` | Complete runner output, including measurement warnings and skips |
 
