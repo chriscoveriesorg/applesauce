@@ -7,6 +7,7 @@ support or statistically established differences between codec timings.
 """
 import csv
 import importlib.util
+import io
 import math
 import os
 from pathlib import Path
@@ -32,7 +33,9 @@ FIELDS = (
 
 def rank_cases(source: Path, suite: str):
     expected = compare.matrix.expected_cases(suite)
-    with source.open(newline="", encoding="utf-8") as stream:
+    # Reuse the bounded, pinned regular-file gate of the paired-codec
+    # reporter so FIFOs and substituted evidence cannot block this job.
+    with io.StringIO(compare.read_confidence(source), newline="") as stream:
         reader = csv.DictReader(stream)
         if tuple(reader.fieldnames or ()) != compare.confidence.COLUMNS:
             raise ValueError("unknown confidence evidence schema")
