@@ -166,6 +166,9 @@ class CodecCompareTests(unittest.TestCase):
         self.assertEqual(compare.format_speedup(1.0), "1.000")
         self.assertGreater(float(compare.format_speedup(1.0001)), 1.0)
         self.assertLess(float(compare.format_speedup(0.9999)), 1.0)
+        # Eight significant digits previously rounded these back to 1.0.
+        self.assertGreater(float(compare.format_speedup(1.0 + 1e-9)), 1.0)
+        self.assertLess(float(compare.format_speedup(1.0 - 1e-9)), 1.0)
         self.assertEqual(compare.format_speedup(9.0), "9.000")
 
     def test_tiny_positive_speedup_bounds_remain_nonzero(self):
