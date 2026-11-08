@@ -146,6 +146,17 @@ class CodecCompareTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid|disagrees|reversed"):
                     compare.compare(self.input, "smoke")
 
+    def test_overflowing_payload_savings_is_rejected(self):
+        rows = [dict(row) for row in self.rows]
+        for row in rows:
+            if row["codec"] == "lzraven":
+                row["encoded_over_input_ratio"] = "1e300"
+            elif row["codec"] == "lzmesh":
+                row["encoded_over_input_ratio"] = "1e-300"
+        self.save(rows)
+        with self.assertRaisesRegex(ValueError, "nonfinite.*savings"):
+            compare.compare(self.input, "smoke")
+
     def test_unsafe_confidence_inputs_fail_without_hanging(self):
         self.input.unlink()
         self.input.symlink_to(self.output)
