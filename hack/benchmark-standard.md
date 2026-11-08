@@ -107,6 +107,10 @@ an apparently complete benchmark.
 From the checkout root:
 
 ```sh
+# This deletes only generated target/criterion and target/applesauce-bench
+# under the selected checkout, preserving Cargo build caches.
+export GITHUB_WORKSPACE="$PWD"
+python3 hack/prepare_benchmark_evidence.py
 mkdir -p target/applesauce-bench
 export APPLESAUCE_BENCH_SUITE=standard
 export APPLESAUCE_BENCH_MANIFEST="$PWD/target/applesauce-bench/manifest.csv"
