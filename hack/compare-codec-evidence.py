@@ -143,8 +143,10 @@ def compare(confidence_csv: Path, suite: str):
             raven_payload_ratio=repr(r_ratio),
             mesh_payload_ratio=repr(m_ratio),
             raven_savings_vs_mesh_pct=(
-                repr(savings_pct) if savings_pct != 0 and
-                float(f"{savings_pct:.2f}") == 0 else f"{savings_pct:.2f}"
+                repr(savings_pct) if savings_pct != 0 and (
+                    abs(float(f"{savings_pct:.2f}") - savings_pct) /
+                    abs(savings_pct) > 0.01
+                ) else f"{savings_pct:.2f}"
             ),
         )
         for op in ("encode", "decode"):
