@@ -99,7 +99,9 @@ fn native_auto_real_allocation_benchmark() {
         for iteration in 0..codecs.len() {
             for offset in 0..codecs.len() {
                 let codec = codecs[(offset + iteration) % codecs.len()];
-                let path = dir.path().join(format!("{fixture}-{codec}-{iteration}.bin"));
+                let path = dir
+                    .path()
+                    .join(format!("{fixture}-{codec}-{iteration}.bin"));
                 fs::write(&path, &original).unwrap();
                 let start = Instant::now();
                 let output = run(
