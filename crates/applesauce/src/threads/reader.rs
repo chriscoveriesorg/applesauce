@@ -128,7 +128,12 @@ fn select_native_codec(
         }
     }
     best.map(|(kind, _)| (kind, sampled_bytes, windows.len()))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "no native codec could encode the sample"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "no native codec could encode the sample",
+            )
+        })
 }
 
 impl Handler {
@@ -337,11 +342,25 @@ mod tests {
     #[test]
     fn auto_sampling_has_fixed_budget_and_nonoverlapping_windows() {
         use super::sample_windows;
-        for length in [1, 63, 65_536, 65_537, 131_071, 131_072, 196_607, 196_608, 1_000_000, u32::MAX as u64] {
+        for length in [
+            1,
+            63,
+            65_536,
+            65_537,
+            131_071,
+            131_072,
+            196_607,
+            196_608,
+            1_000_000,
+            u32::MAX as u64,
+        ] {
             let geometry = sample_windows(length);
             assert!(!geometry.is_empty());
             assert!(geometry.len() <= 3);
-            assert_eq!(geometry.iter().map(|(_, bytes)| bytes).sum::<usize>(), length.min(65_536) as usize);
+            assert_eq!(
+                geometry.iter().map(|(_, bytes)| bytes).sum::<usize>(),
+                length.min(65_536) as usize
+            );
             let mut end = 0;
             for (offset, bytes) in geometry {
                 assert!(offset >= end);
