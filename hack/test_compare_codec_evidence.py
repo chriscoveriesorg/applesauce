@@ -113,7 +113,8 @@ class CodecCompareTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 rows = [dict(row) for row in self.rows]
-                rows[0][field] = bad
+                raven = next(row for row in rows if row["codec"] == "lzraven")
+                raven[field] = bad
                 self.save(rows)
                 with self.assertRaisesRegex(ValueError, "invalid|disagrees|reversed"):
                     compare.compare(self.input, "smoke")
