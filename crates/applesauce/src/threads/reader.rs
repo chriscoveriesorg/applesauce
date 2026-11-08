@@ -365,7 +365,7 @@ mod tests {
             196_607,
             196_608,
             1_000_000,
-            u32::MAX as u64,
+            u64::from(u32::MAX),
         ] {
             let geometry = sample_windows(length);
             assert!(!geometry.is_empty());
@@ -393,7 +393,7 @@ mod tests {
         let content: Vec<u8> = (0..(4 * BLOCK_SIZE + 17))
             .map(|n| b"deterministic native codec test fixture"[n % 39])
             .collect();
-        std::io::Write::write_all(&mut input, &content).unwrap();
+        io::Write::write_all(&mut input, &content).unwrap();
         input.seek(SeekFrom::Start(23)).unwrap();
         let (selected, measured, windows) =
             select_native_codec(&input, content.len() as u64, 5).unwrap();
