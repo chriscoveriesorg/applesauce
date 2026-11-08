@@ -176,8 +176,15 @@ impl BackgroundThreads {
         let volumes = Volumes::new();
         let mut walker = scan::Walker::new(progress);
         for path in paths {
-            let Ok(metadata) = path.metadata() else {
-                continue;
+            let metadata = match path.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    // Every explicitly requested root is part of the operation.
+                    // Silently dropping a missing or unreadable root could make
+                    // restoration appear successful without touching any file.
+                    progress.error(path, &format!("unable to inspect input root: {error}"));
+                    continue;
+                }
             };
             if let Err(e) = volumes.add_root_dir(path, &metadata) {
                 warn!(
