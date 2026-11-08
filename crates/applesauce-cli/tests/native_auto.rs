@@ -37,7 +37,13 @@ fn auto_compresses_multiple_files_with_transparent_verified_reads() {
         let path = dir.path().join(name);
         fs::write(&path, &original).unwrap();
 
-        let compressed = run(&["compress", "--compression", "auto", "--verify"], &path);
+        // Exercise both CLI paths. Auto must verify before publication even
+        // when --verify is omitted, including through the library API.
+        let compressed = if name == "repeat.txt" {
+            run(&["compress", "--compression", "auto"], &path)
+        } else {
+            run(&["compress", "--compression", "auto", "--verify"], &path)
+        };
         assert_success(&compressed);
         assert!(applesauce::info::get(&path).unwrap().is_compressed);
         assert_eq!(
