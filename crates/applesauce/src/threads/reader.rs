@@ -1,9 +1,11 @@
 use crate::seq_queue::Slot;
 use crate::threads::{compressing, writer, BgWork, Context, Mode, WorkHandler};
 use crate::{rfork_storage, seq_queue, try_read_all};
+use applesauce_core::compressor::{Compressor, Kind};
 use applesauce_core::BLOCK_SIZE;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::fs::FileExt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::{io, thread};
@@ -49,6 +51,86 @@ fn read_chunk<R: Read>(reader: R, limit: usize) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// At most 64 KiB of logical input is sampled, using independent head/tail
+/// windows or head/middle/tail windows for larger files. The source cursor is
+/// unchanged; the normal reader starts at byte zero after selection.
+fn sample_windows(file_size: u64) -> Vec<(u64, usize)> {
+    const BUDGET: usize = BLOCK_SIZE;
+    if file_size <= BUDGET as u64 {
+        return vec![(0, file_size as usize)];
+    }
+    if file_size < (BUDGET * 3) as u64 {
+        let half = BUDGET / 2;
+        return vec![(0, half), (file_size - half as u64, half)];
+    }
+    let side = BUDGET / 3;
+    let tail = BUDGET - side * 2;
+    vec![
+        (0, side),
+        (file_size / 2 - (side / 2) as u64, side),
+        (file_size - tail as u64, tail),
+    ]
+}
+
+fn read_sample(file: &File, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+    let mut data = vec![0; length];
+    let mut done = 0usize;
+    while done < data.len() {
+        let absolute = offset
+            .checked_add(done as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "sample offset overflow"))?;
+        let read = file.read_at(&mut data[done..], absolute)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source truncated while sampling",
+            ));
+        }
+        done += read;
+    }
+    Ok(data)
+}
+
+/// Deterministic ratio-first selection across stable native codecs, excluding
+/// experimental LZBitmap. An individual failed trial cannot silently win.
+fn select_native_codec(
+    file: &File,
+    file_size: u64,
+    level: u32,
+) -> io::Result<(Kind, usize, usize)> {
+    let geometry = sample_windows(file_size);
+    let windows: Vec<Vec<u8>> = geometry
+        .iter()
+        .map(|(start, length)| read_sample(file, *start, *length))
+        .collect::<io::Result<_>>()?;
+    let sampled_bytes = windows.iter().map(Vec::len).sum();
+    let mut best: Option<(Kind, usize)> = None;
+    // Ordered tie break: prefer the existing default on equal encoded bytes.
+    for kind in [Kind::Lzfse, Kind::Lzvn, Kind::Zlib] {
+        let Some(mut encoder) = kind.compressor() else {
+            continue;
+        };
+        let mut output = vec![0u8; BLOCK_SIZE + 1024];
+        let mut total = 0usize;
+        let mut valid = true;
+        for window in &windows {
+            match encoder.compress(&mut output, window, level) {
+                Ok(n) => total += n,
+                Err(error) => {
+                    tracing::debug!(codec = %kind, %error, "native auto sample failed");
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if valid && best.is_none_or(|(_, previous)| total < previous) {
+            best = Some((kind, total));
+        }
+    }
+    best.map(|(kind, _)| (kind, sampled_bytes, windows.len()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "no native codec could encode the sample"))
+}
+
 impl Handler {
     fn new(compressor: compressing::Sender, writer: writer::Sender) -> Self {
         Self { compressor, writer }
@@ -59,10 +141,14 @@ impl Handler {
         context: &Arc<Context>,
         file: &File,
         expected_len: u64,
+        selected_kind: Option<Kind>,
         tx: &seq_queue::Sender<writer::Chunk, io::Error>,
     ) -> io::Result<()> {
         match context.operation.mode {
-            Mode::Compress { kind, .. } => {
+            Mode::Compress { .. } | Mode::CompressAuto { .. } => {
+                let kind = selected_kind.ok_or_else(|| {
+                    io::Error::other("native compression requires a selected codec")
+                })?;
                 let compressor = self.compressor.clone();
                 self.with_file_chunks(file, expected_len, tx, |slot, data| {
                     let _enter = tracing::debug_span!("waiting to send to compressor").entered();
@@ -184,9 +270,34 @@ impl WorkHandler<WorkItem> for Handler {
                 return;
             }
         };
+        let file_size = context.orig_metadata.len();
+        let selected_kind = match context.operation.mode {
+            Mode::Compress { kind, .. } => Some(kind),
+            Mode::CompressAuto { level, .. } => {
+                match select_native_codec(&file, file_size, level) {
+                    Ok((kind, sampled_bytes, windows)) => {
+                        tracing::info!(
+                            codec = %kind,
+                            sampled_bytes,
+                            windows,
+                            "auto-selected native compression codec for {}",
+                            context.path.display()
+                        );
+                        Some(kind)
+                    }
+                    Err(error) => {
+                        context.progress.error(&format!(
+                            "Error selecting a codec for {}: {error}",
+                            context.path.display()
+                        ));
+                        return;
+                    }
+                }
+            }
+            Mode::DecompressManually | Mode::DecompressByReading => None,
+        };
         let file = Arc::new(file);
 
-        let file_size = context.orig_metadata.len();
         let (tx, rx) = seq_queue::bounded(
             thread::available_parallelism()
                 .map(NonZeroUsize::get)
@@ -199,12 +310,13 @@ impl WorkHandler<WorkItem> for Handler {
                 .send(writer::WorkItem {
                     context: Arc::clone(&context),
                     file: Arc::clone(&file),
+                    compression_kind: selected_kind,
                     blocks: rx,
                 })
                 .unwrap();
         }
 
-        let result = self.read_file_into(&context, &file, file_size, &tx);
+        let result = self.read_file_into(&context, &file, file_size, selected_kind, &tx);
         // ensure the file is dropped before tx is finished
         drop(file);
         if let Err(e) = &result {
@@ -221,6 +333,46 @@ mod tests {
     use super::read_chunk;
     use applesauce_core::BLOCK_SIZE;
     use std::io::{self, Cursor, Read};
+
+    #[test]
+    fn auto_sampling_has_fixed_budget_and_nonoverlapping_windows() {
+        use super::sample_windows;
+        for length in [1, 63, 65_536, 65_537, 131_071, 131_072, 196_607, 196_608, 1_000_000, u32::MAX as u64] {
+            let geometry = sample_windows(length);
+            assert!(!geometry.is_empty());
+            assert!(geometry.len() <= 3);
+            assert_eq!(geometry.iter().map(|(_, bytes)| bytes).sum::<usize>(), length.min(65_536) as usize);
+            let mut end = 0;
+            for (offset, bytes) in geometry {
+                assert!(offset >= end);
+                end = offset + bytes as u64;
+                assert!(end <= length);
+            }
+        }
+    }
+
+    #[test]
+    fn native_auto_selection_preserves_open_descriptor_cursor_and_roundtrips() {
+        use super::select_native_codec;
+        use applesauce_core::compressor::Kind;
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut input = tempfile::tempfile().unwrap();
+        let content: Vec<u8> = (0..(4 * BLOCK_SIZE + 17))
+            .map(|n| b"deterministic native codec test fixture"[n % 39])
+            .collect();
+        std::io::Write::write_all(&mut input, &content).unwrap();
+        input.seek(SeekFrom::Start(23)).unwrap();
+        let (selected, measured, windows) =
+            select_native_codec(&input, content.len() as u64, 5).unwrap();
+        assert!(matches!(selected, Kind::Zlib | Kind::Lzvn | Kind::Lzfse));
+        assert!(selected.supported());
+        assert_eq!(measured, BLOCK_SIZE);
+        assert_eq!(windows, 3);
+        let mut next = [0; 7];
+        input.read_exact(&mut next).unwrap();
+        assert_eq!(&next[..], &content[23..30]);
+    }
 
     #[test]
     fn chunk_reader_preserves_generated_bytes_and_boundaries() {
