@@ -87,12 +87,19 @@ struct Decompress {
     #[arg(long)]
     manual: bool,
 
-    /// Verify restored bytes against the compressed source's logical contents before replacing it
+    /// Explicitly request verification (already enabled by default)
     ///
-    /// Requires the OS to read the compressed source, including with --manual.
-    /// If kernel decoding is unavailable, verification fails without replacing the source.
-    #[arg(long)]
+    /// The original compressed file must be readable through the kernel, including
+    /// when --manual is used. A failure leaves the compressed source intact.
+    #[arg(long, conflicts_with = "no_verify")]
     verify: bool,
+
+    /// Disable verification against kernel-visible original bytes (unsafe)
+    ///
+    /// Only for deliberate recovery on an OS that cannot decode the source.
+    /// Restored bytes still undergo format and size checks before publication.
+    #[arg(long, conflicts_with = "verify")]
+    no_verify: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -400,7 +407,16 @@ fn main() {
             paths,
             manual,
             verify,
+            no_verify,
         }) => {
+            // Always compare staged plaintext against the kernel-visible source
+            // before replacing it, unless the operator explicitly opts out.
+            let verify = verify || !no_verify;
+            if !verify {
+                tracing::warn!(
+                    "Decompression verification disabled: restored bytes cannot be independently compared to kernel-visible source bytes"
+                );
+            }
             let mut compressor = applesauce::FileCompressor::new();
             let stats = compressor.recursive_decompress(
                 paths.iter().map(Path::new),
@@ -412,6 +428,13 @@ fn main() {
             tracing::info!("Finished decompressing");
             if verbosity >= Verbosity::Normal {
                 display_stats(&stats, false);
+            }
+            // A failed verification must make the command fail, even though
+            // each failing file's temporary output was discarded.
+            let errors = progress_bars.errors();
+            if !errors.is_empty() {
+                eprintln!("applesauce: {} decompression error(s)", errors.len());
+                std::process::exit(1);
             }
         }
         Commands::Info(_) => unreachable!("info handled before tracing"),
@@ -644,4 +667,35 @@ fn compression_ratio_parser_accepts_only_finite_values() {
     for value in ["NaN", "nan", "inf", "+inf", "-inf"] {
         assert!(parse_finite_ratio(value).is_err(), "accepted {value}");
     }
+}
+
+#[test]
+fn decompress_verifies_by_default_and_requires_explicit_opt_out() {
+    for args in [
+        vec!["applesauce", "decompress", "fixture"],
+        vec!["applesauce", "decompress", "--manual", "fixture"],
+        vec!["applesauce", "decompress", "--verify", "fixture"],
+    ] {
+        let parsed = Cli::try_parse_from(args).unwrap();
+        let Commands::Decompress(decompress) = parsed.command else {
+            panic!("expected decompress command");
+        };
+        assert!(decompress.verify || !decompress.no_verify);
+    }
+
+    let parsed =
+        Cli::try_parse_from(["applesauce", "decompress", "--no-verify", "fixture"]).unwrap();
+    let Commands::Decompress(decompress) = parsed.command else {
+        panic!("expected decompress command");
+    };
+    assert!(!decompress.verify && decompress.no_verify);
+
+    assert!(Cli::try_parse_from([
+        "applesauce",
+        "decompress",
+        "--verify",
+        "--no-verify",
+        "fixture"
+    ])
+    .is_err());
 }
