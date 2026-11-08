@@ -648,6 +648,8 @@ mod tests {
         fs::remove_file(&source).unwrap();
         use std::os::unix::ffi::OsStrExt;
         let fifo_path = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo_path is a live, NUL-terminated CString in an isolated
+        // temporary test directory, and mkfifo only reads its pathname bytes.
         assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
         // O_NONBLOCK is necessary even after the symlink_metadata precheck:
         // the pathname could change to a FIFO between preflight and open.
