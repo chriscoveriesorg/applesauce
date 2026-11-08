@@ -93,6 +93,12 @@ jobs:
             --noplot --warm-up-time "$warmup" \
             --measurement-time "$measurement" --sample-size "$samples" \
             2>&1 | tee "$BENCH_RESULTS/criterion.log"
+      - name: Capture whole-invocation CPU and peak RSS (not per-codec allocations)
+        run: |
+          set -euo pipefail
+          python3 hack/parse-benchmark-resources.py \
+            "$BENCH_RESULTS/criterion.log" "$BENCH_RESULTS/resource-usage.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Produce complete per-case CSV and concise comparison
         run: |
           set -euo pipefail
