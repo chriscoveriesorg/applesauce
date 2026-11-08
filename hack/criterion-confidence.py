@@ -10,6 +10,7 @@ import importlib.util
 import json
 import math
 import os
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -39,6 +40,7 @@ COLUMNS = IDENTITY + tuple(
     for operation in ("encode", "decode")
     for metric in METRICS
 )
+MAX_ESTIMATE_BYTES = 1024 * 1024  # Criterion JSON is normally only kilobytes.
 SUMMARY_COLUMNS = _summary.FIELDS + tuple(
     f"{operation}_{metric}"
     for operation in ("encode", "decode")
@@ -55,6 +57,32 @@ def finite_positive(value, description):
     return converted
 
 
+def read_estimates(path: Path):
+    """Read bounded, unchanged regular Criterion estimates without FIFO hangs."""
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"):
+        raise OSError("safe Criterion reads require O_NOFOLLOW and O_NONBLOCK")
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"{path}: Criterion estimates must be a regular file")
+        if not 0 < before.st_size <= MAX_ESTIMATE_BYTES:
+            raise ValueError(f"{path}: empty or oversized Criterion estimates")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            data = stream.read(before.st_size + 1)
+        after = os.fstat(fd)
+        attrs = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (len(data) != before.st_size
+                or any(getattr(before, name) != getattr(after, name) for name in attrs)):
+            raise ValueError(f"{path}: Criterion estimates changed while reading")
+        named = os.stat(path, follow_symlinks=False)
+        if (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino):
+            raise ValueError(f"{path}: Criterion estimates path was replaced")
+        return json.loads(data)
+    finally:
+        os.close(fd)
+
+
 def read_median_interval(root: Path, row: dict, operation: str):
     group = "_".join((
         "apple-buffer", row["suite"], row["input_bytes"],
@@ -64,8 +92,7 @@ def read_median_interval(root: Path, row: dict, operation: str):
         root / group / f'{row["codec"]}-{row["scratch_mode"]}'
         / operation / "new" / "estimates.json"
     )
-    with path.open(encoding="utf-8") as stream:
-        estimates = json.load(stream)
+    estimates = read_estimates(path)
     median = estimates["median"]
     center = finite_positive(median["point_estimate"], f"{path}: median")
     interval = median["confidence_interval"]
@@ -183,6 +210,11 @@ def write_confidence(summary_csv: Path, criterion: Path, output: Path,
     # This workflow uploads its evidence directory even after a failed run.
     # A reused runner can retain a prior confidence.csv; remove it before
     # validation so an incomplete current run cannot publish stale evidence.
+    # Refuse deleting evidence when the requested output aliases an input.
+    # This includes same-path, hardlink and symlink aliases.
+    for source in (summary_csv, manifest):
+        if output.exists() and os.path.samefile(output, source):
+            raise ValueError("confidence output aliases source benchmark evidence")
     output.unlink(missing_ok=True)
     validate_source(summary_csv, manifest, suite)
     rows = confidence_rows(summary_csv, criterion)
