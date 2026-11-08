@@ -92,6 +92,19 @@ class CodecCompareTests(unittest.TestCase):
                            capture_output=True, text=True, timeout=5).returncode, 1
         )
 
+    def test_failed_rerun_does_not_retain_stale_comparison(self):
+        self.output.write_text("stale prior-run evidence", encoding="utf-8")
+        self.save(self.rows[:-1])
+        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
+                   str(self.output)]
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=5
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("incomplete", result.stderr)
+        self.assertFalse(self.output.exists())
+        self.assertTrue(self.input.exists())
+
     def test_incomplete_duplicate_and_forged_fixtures_fail(self):
         self.save(self.rows[:-1])
         with self.assertRaisesRegex(ValueError, "incomplete"):
