@@ -50,7 +50,7 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                      name="applesauce-cli/applesauce", mode=0o755,
                      bad_load_size=False, extra_link=False, extra_members=(),
                      subtype=None, platform=1, build_tool_count=0,
-                     entry_offset=None, duplicate_entry=False, reserved=0,
+                     entry_offset=96, duplicate_entry=False, reserved=0,
                      unknown_command_size=None, legacy_extra_bytes=0):
         path = self.downloads / f"applesauce-cli-v0.5.31-{arch}-apple-darwin.tar.xz"
         with tarfile.open(path, "w:xz") as tar:
@@ -260,6 +260,16 @@ class AuditReleaseAssetsTests(unittest.TestCase):
         run = self.run_audit()
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("inconsistent Mach-O build tool table", run.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
+
+    def test_rejects_macho_without_entry_command_before_remote_verification(self):
+        # CPU, filetype and macOS platform are insufficient to certify a
+        # runnable binary if the entry command was omitted altogether.
+        self.make_archive("aarch64", ARCHES["aarch64"], entry_offset=None)
+        run = self.run_audit()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("missing Mach-O LC_MAIN entry point", run.stderr)
         self.assertFalse(any(c[:2] == ["release", "verify-asset"]
                              for c in self.calls()))
 
