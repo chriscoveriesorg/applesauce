@@ -184,6 +184,9 @@ def main():
         source, suite, output = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
         if output.resolve() == source.resolve():
             raise ValueError("comparison output must differ from confidence evidence")
+        # The workflow retains artifacts even after a failed job. Avoid
+        # presenting a previous run's paired comparison as current evidence.
+        output.unlink(missing_ok=True)
         result = compare(source, suite)
         emit(result, output)
     except (OSError, ValueError, KeyError, OverflowError) as exc:
