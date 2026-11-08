@@ -158,6 +158,27 @@ class CodecCompareTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "throughput disagrees"):
             compare.compare(self.input, "smoke")
 
+    def test_high_throughput_tamper_cannot_hide_in_relative_tolerance(self):
+        # The exporter writes four decimals, so permitted absolute error
+        # must not grow with throughput. Old 1e-5 relative tolerance
+        # accepted a 0.01 MiB/s alteration at sufficiently high rates.
+        rows = [dict(row) for row in self.rows]
+        raven = next(row for row in rows if row["codec"] == "lzraven")
+        size = int(raven["input_bytes"])
+        elapsed = 1.0
+        expected = size * 1e9 / 1048576 / elapsed
+        raven["encode_median_ns"] = str(elapsed)
+        raven["encode_ci95_lower_ns"] = str(elapsed)
+        raven["encode_ci95_upper_ns"] = str(elapsed)
+        for field in ("median", "ci95_lower", "ci95_upper"):
+            raven[f"encode_{field}_mib_per_s"] = f"{expected:.4f}"
+        self.save(rows)
+        self.assertEqual(len(compare.compare(self.input, "smoke")), 4)
+        raven["encode_median_mib_per_s"] = f"{expected + 0.01:.4f}"
+        self.save(rows)
+        with self.assertRaisesRegex(ValueError, "throughput disagrees"):
+            compare.compare(self.input, "smoke")
+
     def test_tiny_positive_payload_ratios_remain_nonzero_in_csv(self):
         rows = [dict(row) for row in self.rows]
         for row in rows:
