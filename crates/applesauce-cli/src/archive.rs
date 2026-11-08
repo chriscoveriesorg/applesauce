@@ -211,6 +211,50 @@ fn read_auto_samples(source: &mut File, source_len: u64) -> io::Result<Vec<Vec<u
     Ok(samples)
 }
 
+/// Use one Apple scratch allocation per codec, plus one bounded pair of
+/// encoded/decoded buffers for all windows. Raven's scratch request can be
+/// much larger than a 21 KiB window, so allocating on every trial is wasteful.
+/// The identical byte lengths and guarded round-trip preserve the selection
+/// policy independently of Apple's API-managed scratch path.
+fn auto_encoded_lengths(samples: &[Vec<u8>]) -> io::Result<[usize; 2]> {
+    let max_len = samples
+        .iter()
+        .map(Vec::len)
+        .max()
+        .filter(|length| *length > 0)
+        .ok_or_else(|| invalid("auto codec samples must be nonempty"))?;
+    let capacity = max_len
+        .checked_mul(2)
+        .and_then(|size| size.checked_add(64 * 1024))
+        .ok_or_else(|| invalid("auto codec sample capacity overflow"))?;
+    let mut encoded = vec![0_u8; capacity];
+    let mut decoded = vec![0_u8; max_len + 1];
+    let mut encoded_lengths = [0_usize; 2];
+
+    for (index, codec) in [Codec::Lzraven, Codec::Lzmesh].into_iter().enumerate() {
+        let mut scratch = codec.reusable_scratch()?;
+        for sample in samples {
+            if sample.is_empty() {
+                return Err(invalid("auto codec samples must be nonempty"));
+            }
+            let encoded_limit = sample.len() * 2 + 64 * 1024;
+            let count = scratch.encode_into(&mut encoded[..encoded_limit], sample)?;
+            let decoded_len =
+                scratch.decode_into(&mut decoded[..sample.len() + 1], &encoded[..count])?;
+            if decoded_len != sample.len() || decoded[..decoded_len] != sample[..] {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "auto codec sample failed exact-byte round-trip",
+                ));
+            }
+            encoded_lengths[index] = encoded_lengths[index]
+                .checked_add(count)
+                .ok_or_else(|| invalid("auto codec sample length overflow"))?;
+        }
+    }
+    Ok(encoded_lengths)
+}
+
 fn sample_auto_codec(source: &mut File, source_len: u64) -> io::Result<Codec> {
     for codec in [Codec::Lzraven, Codec::Lzmesh] {
         if !codec.is_supported() {
@@ -221,22 +265,7 @@ fn sample_auto_codec(source: &mut File, source_len: u64) -> io::Result<Codec> {
         }
     }
     let samples = read_auto_samples(source, source_len)?;
-    let mut encoded_lengths = [0_usize; 2];
-    for (index, codec) in [Codec::Lzraven, Codec::Lzmesh].into_iter().enumerate() {
-        for sample in &samples {
-            let encoded = codec.encode(sample)?;
-            // Reject a damaged or unavailable encoder before selecting a codec.
-            if codec.decode_exact(&encoded, sample.len())?.as_slice() != sample.as_slice() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "auto codec sample failed exact-byte round-trip",
-                ));
-            }
-            encoded_lengths[index] = encoded_lengths[index]
-                .checked_add(encoded.len())
-                .ok_or_else(|| invalid("auto codec sample length overflow"))?;
-        }
-    }
+    let encoded_lengths = auto_encoded_lengths(&samples)?;
     let selected = prefer_auto_codec(encoded_lengths[0], encoded_lengths[1]);
     eprintln!(
         "archive --codec auto: {} sampled bytes across {} window(s), raven {} bytes, mesh {} bytes; selected {}",
@@ -579,6 +608,57 @@ mod tests {
                 .map(|(_, length)| length)
                 .sum::<usize>(),
             AUTO_SAMPLE_BYTES
+        );
+    }
+
+    #[test]
+    fn auto_reused_scratch_matches_api_managed_sample_lengths() {
+        if !Codec::Lzraven.is_supported() || !Codec::Lzmesh.is_supported() {
+            return;
+        }
+        // Three heterogeneous, independently encoded windows on a generated
+        // source. The sample's exact payload lengths must be identical with
+        // API-owned and reused scratch for both Apple codecs.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("generated-auto-scratch");
+        let mut bytes = vec![b'A'; AUTO_SAMPLE_BYTES * 4];
+        bytes[AUTO_SAMPLE_BYTES..AUTO_SAMPLE_BYTES * 3].fill(b'B');
+        bytes[AUTO_SAMPLE_BYTES * 3..].fill(b'C');
+        fs::write(&path, &bytes).unwrap();
+        let mut source = open_regular(&path).unwrap();
+        let samples = read_auto_samples(&mut source, bytes.len() as u64).unwrap();
+        assert_eq!(source.stream_position().unwrap(), 0);
+        let reference: Vec<usize> = [Codec::Lzraven, Codec::Lzmesh]
+            .into_iter()
+            .map(|codec| {
+                samples
+                    .iter()
+                    .map(|sample| {
+                        let encoded = codec.encode(sample).unwrap();
+                        assert_eq!(
+                            codec.decode_exact(&encoded, sample.len()).unwrap(),
+                            *sample
+                        );
+                        encoded.len()
+                    })
+                    .sum::<usize>()
+            })
+            .collect();
+        let reused = auto_encoded_lengths(&samples).unwrap();
+        assert_eq!(reused.as_slice(), reference.as_slice());
+        assert_eq!(
+            prefer_auto_codec(reused[0], reused[1]),
+            prefer_auto_codec(reference[0], reference[1])
+        );
+        assert_eq!(
+            auto_encoded_lengths(&[]).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            auto_encoded_lengths(&[Vec::new()])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
         );
     }
 
