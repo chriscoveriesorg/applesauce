@@ -164,7 +164,7 @@ applesauce compress -c ZLIB example.txt
 ### Opt-in per-file native codec selection
 
 ```console
-applesauce compress -c auto --verify PATH...
+applesauce compress -c auto PATH...
 ```
 
 `-c auto` selects a supported native `lzfse`, `lzvn`, or `zlib` codec separately
@@ -175,9 +175,13 @@ medium inputs, or head/middle/tail windows for larger inputs. The codec whose
 sample has the fewest encoded bytes wins, with ties favouring LZFSE, then
 LZVN, then zlib. The source descriptor's read cursor is unchanged.
 
-The full file is encoded normally after selection, and the existing real
-compressed-size gate (`--minimum-compression-ratio`), staging and `--verify`
-continue to apply. This opt-in heuristic does not guarantee that a sample's
+The full file is encoded normally after selection. Every auto-selected
+file undergoes **mandatory whole-file verification** against the source's
+kernel-visible bytes before staged publication, including when invoked through
+the Rust library with `verify=false`. An explicit `--verify` is accepted but
+unnecessary with auto. The normal real compressed-size gate
+(`--minimum-compression-ratio`) continues to apply. This opt-in heuristic does
+not guarantee that a sample's
 winner is the smallest final file, particularly for heterogeneous sources.
 `lzbitmap` and Raven/Mesh never enter native auto selection. Selected codec,
 sample bytes and window count are logged for each file at INFO verbosity;
