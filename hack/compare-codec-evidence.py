@@ -169,6 +169,10 @@ def compare(confidence_csv: Path, suite: str):
 def format_speedup(value):
     """Keep tiny positive speedups nonzero in the published CSV."""
     fixed = f"{value:.3f}"
+    # Rounding across unity must not contradict the separation verdict.
+    # Retain extra precision only for near-unity values that round to 1.000.
+    if fixed == "1.000" and value != 1.0:
+        return f"{value:.8g}"
     return fixed if float(fixed) > 0 else f"{value:.3g}"
 
 
