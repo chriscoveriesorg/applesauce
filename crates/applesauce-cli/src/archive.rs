@@ -139,7 +139,28 @@ fn open_regular(path: &Path) -> io::Result<File> {
 // a separate archive or restoration. A replaced path may have identical size
 // and timestamps while the held descriptor still reads the old inode.
 fn ensure_open_path_identity(path: &Path, opened: &File) -> io::Result<()> {
-    let current = open_regular(path)?;
+    // Refuse nonregular pathnames before opening, then make the descriptor
+    // open nonblocking so a FIFO swapped into the path cannot stall publish.
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive source pathname is no longer a regular file",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let current = options.open(path)?;
+    if !current.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive source pathname was replaced by a nonregular file",
+        ));
+    }
     let original = opened.metadata()?;
     let at_path = current.metadata()?;
     #[cfg(unix)]
@@ -623,6 +644,13 @@ mod tests {
             io::ErrorKind::NotFound
         );
         std::os::unix::fs::symlink(dir.path().join("held-original"), &source).unwrap();
+        assert!(ensure_open_path_identity(&source, &held).is_err());
+        fs::remove_file(&source).unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let fifo_path = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        // O_NONBLOCK is necessary even after the symlink_metadata precheck:
+        // the pathname could change to a FIFO between preflight and open.
         assert!(ensure_open_path_identity(&source, &held).is_err());
     }
 
