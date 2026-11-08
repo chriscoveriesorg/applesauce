@@ -134,6 +134,9 @@ class TagCliReleaseTests(unittest.TestCase):
         self.git("add", "different-root")
         self.git("commit", "-m", "generated unrelated main")
         unrelated = self.git("rev-parse", "HEAD").stdout.strip()
+        # Transfer the detached history using a new test-only branch, then
+        # move main inside the disposable bare repo without a force push.
+        self.git("push", str(self.remote), "HEAD:refs/heads/disconnected")
         self.git("--git-dir", str(self.remote), "update-ref",
                  "refs/heads/main", unrelated)
         self.env["FETCH_HEAD_ONLY"] = "1"
