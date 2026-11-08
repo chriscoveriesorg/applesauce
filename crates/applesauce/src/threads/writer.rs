@@ -20,17 +20,17 @@ struct BelowMinimumRatio(f64);
 
 impl fmt::Display for BelowMinimumRatio {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "did not compress to at least {}% of original size", self.0 * 100.0)
+        write!(
+            f,
+            "did not compress to at least {}% of original size",
+            self.0 * 100.0
+        )
     }
 }
 
 impl std::error::Error for BelowMinimumRatio {}
 
-fn record_write_result(
-    progress: &dyn crate::progress::Task,
-    path: &Path,
-    result: &io::Result<()>,
-) {
+fn record_write_result(progress: &dyn crate::progress::Task, path: &Path, result: &io::Result<()>) {
     match result {
         Ok(()) => {}
         Err(error)
@@ -108,7 +108,9 @@ impl Handler {
                 minimum_compression_ratio,
             ) {
                 context.progress.not_compressible_enough(&context.path);
-                return Err(io::Error::other(BelowMinimumRatio(minimum_compression_ratio)));
+                return Err(io::Error::other(BelowMinimumRatio(
+                    minimum_compression_ratio,
+                )));
             }
 
             let Chunk { block, orig_size } = chunk;
@@ -424,11 +426,11 @@ mod tests {
         BelowMinimumRatio,
     };
     use crate::progress::Task;
-    use std::path::Path;
-    use std::sync::Mutex;
     use std::fs::{self, File};
     use std::io::{self, BufReader, Cursor, ErrorKind};
     use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -623,5 +625,4 @@ mod tests {
         assert!(errors[0].contains("restored file verification failed"));
         assert!(errors[1].contains("temporary file publication denied"));
     }
-
 }
