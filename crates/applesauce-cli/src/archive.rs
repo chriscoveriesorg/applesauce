@@ -126,7 +126,10 @@ fn open_regular(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // O_NONBLOCK is required before checking metadata: opening an input
+        // FIFO for reading would otherwise wait indefinitely for a writer.
+        // Ordinary regular-file reads remain blocking as usual.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {
@@ -918,6 +921,31 @@ mod tests {
             std::os::unix::fs::symlink(source, &symlink).unwrap();
             assert!(open_regular(&symlink).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_inputs_are_rejected_without_opening_a_blocking_reader() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("untrusted-input-fifo");
+        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the pathname points into an isolated temporary test directory.
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+        // All archive entrypoints open the same untrusted pathname. With
+        // O_NONBLOCK missing from open_regular, the first assertion hangs.
+        assert_eq!(open_regular(&fifo).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        let archive_output = dir.path().join("output.ascf");
+        let restored_output = dir.path().join("restored.jsonl");
+        assert!(create(&fifo, &archive_output, Some(Codec::Lzraven), 64 * 1024, false).is_err());
+        assert!(info(&fifo).is_err());
+        assert!(verify(&fifo).is_err());
+        assert!(extract(&fifo, &restored_output).is_err());
+        assert!(extract_range(&fifo, &restored_output, (0, 1)).is_err());
+        assert!(!archive_output.exists());
+        assert!(!restored_output.exists());
     }
 
     #[test]
