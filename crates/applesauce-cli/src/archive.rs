@@ -591,9 +591,20 @@ mod tests {
         fs::write(&replacement, b"BBBB").unwrap();
         let mut held = open_regular(&source).unwrap();
         ensure_open_path_identity(&source, &held).unwrap();
+        let original_modified = held.metadata().unwrap().modified().unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        assert_eq!(
+            held.metadata().unwrap().modified().unwrap(),
+            fs::metadata(&replacement).unwrap().modified().unwrap()
+        );
 
-        // Same length, distinct inode: metadata-length checks alone would
-        // accept publishing an archive of a now-obsolete pathname.
+        // Matching length and modified time, but a distinct inode: the
+        // original metadata-only check would accept this swapped pathname.
         fs::rename(&replacement, &source).unwrap();
         assert_eq!(
             ensure_open_path_identity(&source, &held)
