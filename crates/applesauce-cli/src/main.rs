@@ -664,7 +664,12 @@ fn command_check() {
 fn profile_audit_requires_dry_run_and_does_not_affect_normal_compression() {
     for profile in ["caches", "bundles"] {
         let command = Cli::try_parse_from([
-            "applesauce", "compress", "--dry-run", "--profile", profile, "fixture",
+            "applesauce",
+            "compress",
+            "--dry-run",
+            "--profile",
+            profile,
+            "fixture",
         ])
         .unwrap();
         let Commands::Compress(args) = command.command else {
@@ -673,10 +678,10 @@ fn profile_audit_requires_dry_run_and_does_not_affect_normal_compression() {
         assert!(args.dry_run);
         assert!(args.profile.is_some());
 
-        assert!(Cli::try_parse_from([
-            "applesauce", "compress", "--profile", profile, "fixture",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["applesauce", "compress", "--profile", profile, "fixture",])
+                .is_err()
+        );
     }
     let command = Cli::try_parse_from(["applesauce", "compress", "fixture"]).unwrap();
     let Commands::Compress(args) = command.command else {
