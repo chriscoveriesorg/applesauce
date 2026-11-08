@@ -256,6 +256,13 @@ def check_macho(archive, arch):
                         raise AuditError(f"{archive.name}: unaccounted Mach-O load command bytes")
                     if not macos_marker_seen:
                         raise AuditError(f"{archive.name}: missing macOS Mach-O platform marker")
+                    # This fork publishes current Rust/cargo-dist executables,
+                    # which use LC_MAIN. A Mach-O header with only an OS version
+                    # command is not enough to establish an executable entry.
+                    # Legacy LC_UNIXTHREAD executables need a separate, explicit
+                    # validator before they can be accepted here.
+                    if not main_entry_seen:
+                        raise AuditError(f"{archive.name}: missing Mach-O LC_MAIN entry point")
                     remaining = member.size - 32 - sizeofcmds
                     while remaining:
                         block = binary.read(min(1024 * 1024, remaining))
