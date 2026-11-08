@@ -208,6 +208,7 @@ fskit/InstalledModuleWitness.swift
 fskit/installed-module-witness
 fskit/verify_mount.py
 fskit/finder_mount_witness.py
+fskit/finder_automation.py
 fskit/unmount_acceptance.py
 fskit/acceptance_evidence.py
 fskit/signing_profile.py
@@ -497,6 +498,7 @@ PY
     /bin/cp "$ROOT/fskit/manifest_integrity.py" "$out/fskit/manifest_integrity.py"
     /bin/cp "$ROOT/fskit/verify_mount.py" "$out/fskit/verify_mount.py"
     /bin/cp "$ROOT/fskit/finder_mount_witness.py" "$out/fskit/finder_mount_witness.py"
+    /bin/cp "$ROOT/fskit/finder_automation.py" "$out/fskit/finder_automation.py"
     /bin/cp "$ROOT/fskit/unmount_acceptance.py" "$out/fskit/unmount_acceptance.py"
     /bin/cp "$ROOT/fskit/acceptance_evidence.py" "$out/fskit/acceptance_evidence.py"
     /bin/cp "$ROOT/fskit/signing_profile.py" "$out/fskit/signing_profile.py"
@@ -513,6 +515,9 @@ PY
     /usr/bin/python3 "$out/fskit/finder_mount_witness.py" --self-test \
       > "$out/finder-witness-tests.log" 2>&1 \
       || die "packaged Finder mount witness self-tests failed; see $out/finder-witness-tests.log"
+    /usr/bin/python3 "$out/fskit/finder_automation.py" --self-test \
+      > "$out/finder-automation-tests.log" 2>&1 \
+      || die "packaged bounded Finder automation self-tests failed; see $out/finder-automation-tests.log"
     /usr/bin/python3 "$out/fskit/unmount_acceptance.py" --self-test \
       > "$out/portable-unmount-tests.log" 2>&1 \
       || die "packaged kernel unmount tests failed; see $out/portable-unmount-tests.log"
@@ -709,11 +714,12 @@ PY
     # POSIX readback also means ordinary GUI applications see the volume.
     # An Apple Events permission failure blocks mounted acceptance explicitly.
     /bin/mkdir "$out/finder-copy"
-    /usr/bin/osascript "$bundle/fskit/finder_readback.applescript" "$3" \
-      "source.$codec" "$(/usr/bin/stat -f %z "$bundle/source.$codec.jsonl")" \
-      "$out/finder-copy" \
-      > "$out/finder-readback.txt" 2> "$out/finder-error.txt" \
-      || die "Finder could not copy mounted ASCF bytes; diagnostics: $out/finder-error.txt"
+    /usr/bin/python3 "$bundle/fskit/finder_automation.py" \
+      --script "$bundle/fskit/finder_readback.applescript" --mount "$3" \
+      --name "source.$codec" \
+      --size "$(/usr/bin/stat -f %z "$bundle/source.$codec.jsonl")" \
+      --destination "$out/finder-copy" --evidence "$out" \
+      || die "Finder copy-out failed or timed out; diagnostics: $out/finder-error.txt"
     /usr/bin/cmp -s "$out/finder-copy/source.$codec" "$bundle/source.$codec.jsonl" \
       || die "Finder-copied logical bytes differ from the original source"
     /usr/bin/shasum -a 256 "$out/finder-copy/source.$codec" \
@@ -749,11 +755,11 @@ PY
       --readback-name "$out/readback.json")" \
       || die "FSKit mounted restored filename failed safe readback verification"
     /bin/mkdir "$out/finder-copy"
-    /usr/bin/osascript "$ROOT/fskit/finder_readback.applescript" "$3" \
-      "$restored_name" "$(/usr/bin/stat -f %z "$4")" \
-      "$out/finder-copy" \
-      > "$out/finder-readback.txt" 2> "$out/finder-error.txt" \
-      || die "Finder could not copy mounted ASCF bytes; diagnostics: $out/finder-error.txt"
+    /usr/bin/python3 "$ROOT/fskit/finder_automation.py" \
+      --script "$ROOT/fskit/finder_readback.applescript" --mount "$3" \
+      --name "$restored_name" --size "$(/usr/bin/stat -f %z "$4")" \
+      --destination "$out/finder-copy" --evidence "$out" \
+      || die "Finder copy-out failed or timed out; diagnostics: $out/finder-error.txt"
     /usr/bin/cmp -s "$out/finder-copy/$restored_name" "$4" \
       || die "Finder-copied logical bytes differ from the original source"
     /usr/bin/shasum -a 256 "$out/finder-copy/$restored_name" "$4" \
