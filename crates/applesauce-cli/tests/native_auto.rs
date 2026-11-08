@@ -40,7 +40,11 @@ fn auto_compresses_multiple_files_with_transparent_verified_reads() {
         let compressed = run(&["compress", "--compression", "auto", "--verify"], &path);
         assert_success(&compressed);
         assert!(applesauce::info::get(&path).unwrap().is_compressed);
-        assert_eq!(fs::read(&path).unwrap(), original, "transparent read of {name}");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original,
+            "transparent read of {name}"
+        );
 
         let restored = run(&["decompress", "--verify"], &path);
         assert_success(&restored);
