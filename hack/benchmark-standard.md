@@ -92,6 +92,8 @@ Artifacts include:
 | `confidence.csv` | Every case's validated 95% median-time interval and correctly inverted encode/decode MiB/s bounds; `summary.csv` schema unchanged |
 | `raven-mesh-comparison.csv` | Same-host matched-fixture Raven/Mesh payload savings and encode/decode median speedup, with bounds derived from marginal timing intervals |
 | `raven-mesh-comparison.md` | Concise mixed-JSONL/representative paired comparison for operator review |
+| `all-codecs-ranking.csv` | Each codec's relative payload, encode and decode rank and slowdown against the fastest in the same-host, same-fixture five-codec cohort |
+| `all-codecs-ranking.md` | Compact mixed-JSONL ranking for all five codecs at 1 MiB and 8 MiB, whole and independent 64 KiB |
 | `summary.md` | Small same-host Chat JSONL vs entropy comparison |
 | `criterion.log` | Complete runner output, including measurement warnings and skips |
 
