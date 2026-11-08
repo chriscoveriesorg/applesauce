@@ -23,6 +23,8 @@ pub(super) struct Chunk {
 pub(super) struct WorkItem {
     pub context: Arc<Context>,
     pub file: Arc<File>,
+    /// Selected once per opened input, shared with every compressor block.
+    pub compression_kind: Option<Kind>,
     pub blocks: seq_queue::Receiver<Chunk, io::Error>,
 }
 
@@ -65,6 +67,10 @@ impl Handler {
         let mut total_compressed_size = 0;
         let minimum_compression_ratio = match context.operation.mode {
             Mode::Compress {
+                minimum_compression_ratio,
+                ..
+            }
+            | Mode::CompressAuto {
                 minimum_compression_ratio,
                 ..
             } => minimum_compression_ratio,
@@ -252,8 +258,14 @@ impl WorkHandler<WorkItem> for Handler {
         let context = Arc::clone(&item.context);
         let _entered = tracing::info_span!("writing file", path=%context.path.display()).entered();
 
+        let compression_kind = item.compression_kind;
         let res = match context.operation.mode {
-            Mode::Compress { kind, .. } => self.write_compressed_file(item, kind),
+            Mode::Compress { .. } | Mode::CompressAuto { .. } => {
+                self.write_compressed_file(
+                    item,
+                    compression_kind.expect("native compression requires selected codec"),
+                )
+            }
             Mode::DecompressManually | Mode::DecompressByReading => {
                 self.write_uncompressed_file(item)
             }
