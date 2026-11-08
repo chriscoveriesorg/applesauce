@@ -40,7 +40,10 @@ impl Profile {
 /// Decide from path components, never substring matches. No-follow descriptor
 /// traversal still checks identity; refuse parent traversal in profile mode.
 fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
-    if path.components().any(|component| matches!(component, Component::ParentDir)) {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
         return Some("profile_parent_traversal");
     }
     let parts: Vec<&OsStr> = path
@@ -55,9 +58,10 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
             if parts.iter().any(|part| code_container(part)) {
                 return Some("cache_contains_code_bundle");
             }
-            if parts.windows(2).any(|pair| {
-                pair[0] == OsStr::new("Library") && pair[1] == OsStr::new("Caches")
-            }) {
+            if parts
+                .windows(2)
+                .any(|pair| pair[0] == OsStr::new("Library") && pair[1] == OsStr::new("Caches"))
+            {
                 None
             } else {
                 Some("outside_library_caches")
@@ -87,8 +91,14 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
             // A candidate resource still needs codesign and launch tests
             // on a disposable app before any write is ever authorized.
             const EXECUTABLE_SUFFIXES: [&[u8]; 8] = [
-                b".dylib", b".so", b".a", b".o",
-                b".sh", b".command", b".metallib", b".exe",
+                b".dylib",
+                b".so",
+                b".a",
+                b".o",
+                b".sh",
+                b".command",
+                b".metallib",
+                b".exe",
             ];
             if resources.last().is_some_and(|file| {
                 EXECUTABLE_SUFFIXES
@@ -104,12 +114,20 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
 
 fn code_container(name: &OsStr) -> bool {
     const CODE_SUFFIXES: [&[u8]; 9] = [
-        b".app", b".framework", b".appex", b".xpc", b".bundle",
-        b".plugin", b".qlgenerator", b".kext", b".component",
+        b".app",
+        b".framework",
+        b".appex",
+        b".xpc",
+        b".bundle",
+        b".plugin",
+        b".qlgenerator",
+        b".kext",
+        b".component",
     ];
-    CODE_SUFFIXES.iter().any(|suffix| name.as_bytes().ends_with(suffix))
+    CODE_SUFFIXES
+        .iter()
+        .any(|suffix| name.as_bytes().ends_with(suffix))
 }
-
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EncodedPath {
@@ -460,8 +478,13 @@ impl Analyzer {
         })?;
 
         // Exclude sensitive paths before reading or encoding any file data.
-        if let Some(reason) = self.profile.and_then(|profile| profile_exclusion(profile, path)) {
-            return Ok(skipped_with_sizes(path, self.kind, reason, logical, current, block));
+        if let Some(reason) = self
+            .profile
+            .and_then(|profile| profile_exclusion(profile, path))
+        {
+            return Ok(skipped_with_sizes(
+                path, self.kind, reason, logical, current, block,
+            ));
         }
 
         if opened.st_flags() & libc::UF_COMPRESSED != 0 {
@@ -1056,11 +1079,7 @@ mod tests {
     #[test]
     fn audit_profiles_reject_code_and_outside_roots() {
         let cases: &[(Profile, &str, Option<&str>)] = &[
-            (
-                Profile::Caches,
-                "/Users/a/Library/Caches/data.log",
-                None,
-            ),
+            (Profile::Caches, "/Users/a/Library/Caches/data.log", None),
             (
                 Profile::Caches,
                 "/Users/a/Library/Caches/Foo.app/Contents/Resources/a.json",
@@ -1118,7 +1137,11 @@ mod tests {
             ),
         ];
         for &(profile, path, expected) in cases {
-            assert_eq!(profile_exclusion(profile, Path::new(path)), expected, "{path}");
+            assert_eq!(
+                profile_exclusion(profile, Path::new(path)),
+                expected,
+                "{path}"
+            );
         }
     }
 
@@ -1140,9 +1163,11 @@ mod tests {
         assert_eq!(audit.profile, Some("bundles"));
         assert!(audit.complete);
         for protected in [executable, signature] {
-            let entry = audit.paths.iter().find(|entry| {
-                entry.path.display == protected.to_string_lossy()
-            }).unwrap();
+            let entry = audit
+                .paths
+                .iter()
+                .find(|entry| entry.path.display == protected.to_string_lossy())
+                .unwrap();
             assert_eq!(entry.reason, "bundle_non_resource");
             assert!(!entry.would_compress);
             assert_eq!(entry.raw_compressed_bytes, None);
