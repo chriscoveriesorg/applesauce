@@ -68,7 +68,9 @@ published both archives, download them into a **new empty directory**. The
 auditor checks that exactly one arm64 and one Intel macOS archive are present;
 each contains a regular thin Mach-O \`applesauce\` binary with the expected CPU
 type. The auditor also checks executable mode, baseline CPU subtype, macOS
-platform, Mach-O build-tool records and any LC_MAIN entry offset, then scans
+platform, Mach-O build-tool records and a valid LC_MAIN entry offset (modern
+Rust/cargo-dist Mach-O binaries). Older LC_UNIXTHREAD-only binaries are
+refused until separately validated. It then scans
 every archive member without extracting it. It rejects traversal or absolute
 paths, links, special files, duplicate executables and excessive member sizes
 or total expansion. It reads the complete executable to record an independent
