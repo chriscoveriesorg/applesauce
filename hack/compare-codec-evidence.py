@@ -173,7 +173,13 @@ def format_speedup(value):
     # Retain extra precision only for near-unity values that round to 1.000.
     if fixed == "1.000" and value != 1.0:
         return repr(value)
-    return fixed if float(fixed) > 0 else f"{value:.3g}"
+    # Three decimals can materially distort small, nonzero ratios (for
+    # example 0.0005 -> 0.001). Preserve at least three significant digits
+    # whenever the rounded value differs by more than 1%.
+    rounded = float(fixed)
+    if rounded <= 0 or abs(rounded - value) / value > 0.01:
+        return repr(value)
+    return fixed
 
 
 def markdown(rows):
