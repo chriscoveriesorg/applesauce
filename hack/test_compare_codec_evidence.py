@@ -161,6 +161,23 @@ class CodecCompareTests(unittest.TestCase):
             self.assertEqual(float(pair["mesh_payload_ratio"]), 2e-12)
             self.assertEqual(pair["raven_savings_vs_mesh_pct"], "50.00")
 
+    def test_tiny_nonzero_payload_savings_remains_visible(self):
+        rows = [dict(row) for row in self.rows]
+        for row in rows:
+            if row["codec"] == "lzraven":
+                row["encoded_over_input_ratio"] = "0.99999999"
+            elif row["codec"] == "lzmesh":
+                row["encoded_over_input_ratio"] = "1.0"
+        self.save(rows)
+        for pair in compare.compare(self.input, "smoke"):
+            self.assertGreater(float(pair["raven_savings_vs_mesh_pct"]), 0)
+        for row in rows:
+            if row["codec"] == "lzraven":
+                row["encoded_over_input_ratio"] = "1.00000001"
+        self.save(rows)
+        for pair in compare.compare(self.input, "smoke"):
+            self.assertLess(float(pair["raven_savings_vs_mesh_pct"]), 0)
+
     def test_near_unity_speedups_preserve_direction(self):
         # A reported 1.000x must not contradict a faster/slower verdict.
         self.assertEqual(compare.format_speedup(1.0), "1.000")
