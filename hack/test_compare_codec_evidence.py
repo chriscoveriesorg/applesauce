@@ -123,6 +123,8 @@ class CodecCompareTests(unittest.TestCase):
             ("encode_ci95_lower_ns", "1000000000"),
             ("encode_ci95_upper_ns", "NaN"),
             ("encode_median_mib_per_s", "12345"),
+            ("encode_ci95_lower_mib_per_s", "12345"),
+            ("decode_ci95_upper_mib_per_s", "NaN"),
         ):
             with self.subTest(field=field):
                 rows = [dict(row) for row in self.rows]
