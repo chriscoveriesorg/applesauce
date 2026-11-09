@@ -3,10 +3,11 @@ use crate::threads::{compressing, writer, BgWork, Context, Mode, WorkHandler};
 use crate::{rfork_storage, seq_queue, try_read_all};
 use applesauce_core::compressor::Kind;
 use applesauce_core::BLOCK_SIZE;
-use std::fs::File;
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::Read;
 use std::num::NonZeroUsize;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::path::Path;
 use std::sync::Arc;
 use std::{io, thread};
 
@@ -49,6 +50,19 @@ fn read_chunk<R: Read>(reader: R, limit: usize) -> io::Result<Vec<u8>> {
     buf.try_reserve_exact(limit).map_err(io::Error::other)?;
     reader.take(limit as u64).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+// Revalidate the exact inode scanned by the walker before sampling or
+// queuing compression. No-follow and nonblocking flags stop a swapped symlink
+// or FIFO from being followed/opened while its type is still unknown.
+// The writer repeats the descriptor/path snapshot before publication.
+fn open_scanned_regular_file(path: &Path, scanned: &Metadata) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    writer::ensure_source_path_matches_open_file(&file, path, scanned)?;
+    Ok(file)
 }
 
 /// At most 64 KiB of logical input is sampled, using independent head/tail
@@ -279,7 +293,7 @@ impl WorkHandler<WorkItem> for Handler {
     fn handle_item(&mut self, item: WorkItem) {
         let WorkItem { context } = item;
         let _guard = tracing::info_span!("reading file", path=%context.path.display()).entered();
-        let file = match File::open(&context.path) {
+        let file = match open_scanned_regular_file(&context.path, &context.orig_metadata) {
             Ok(file) => file,
             Err(e) => {
                 context
@@ -479,6 +493,61 @@ mod tests {
         let error = select_native_codec(&source, 200_000, 5).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
         assert_eq!(source.stream_position().unwrap(), 3);
+    }
+
+    #[test]
+    fn native_auto_source_preflight_rejects_swaps_before_sampling() {
+        use super::open_scanned_regular_file;
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selected-source");
+        let old = dir.path().join("old-source");
+        fs::write(&path, b"generated source bytes").unwrap();
+        let scanned = fs::symlink_metadata(&path).unwrap();
+        open_scanned_regular_file(&path, &scanned).unwrap();
+
+        // A same-length replacement with a different inode must not be read
+        // merely because its path and apparent length still match the scan.
+        fs::rename(&path, &old).unwrap();
+        fs::write(&path, b"generated source bytes").unwrap();
+        assert_eq!(
+            open_scanned_regular_file(&path, &scanned)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        // A pathname replaced by a link must not resolve to the old inode.
+        fs::remove_file(&path).unwrap();
+        symlink(&old, &path).unwrap();
+        assert!(open_scanned_regular_file(&path, &scanned).is_err());
+        assert_eq!(fs::read(&old).unwrap(), b"generated source bytes");
+    }
+
+    #[test]
+    fn native_auto_source_preflight_refuses_fifo_without_blocking() {
+        use super::open_scanned_regular_file;
+        use std::ffi::CString;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::FileTypeExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selected-source");
+        fs::write(&path, b"generated regular file").unwrap();
+        let scanned = fs::symlink_metadata(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c_path is a NUL-terminated path inside a disposable directory.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+
+        // O_NONBLOCK allows the descriptor check to reject a FIFO even when
+        // no writer exists. A normal blocking open would hang the worker.
+        assert!(open_scanned_regular_file(&path, &scanned).is_err());
     }
 
     #[test]
