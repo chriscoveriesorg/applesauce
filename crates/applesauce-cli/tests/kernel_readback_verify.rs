@@ -14,7 +14,10 @@ fn verified_compression_reopens_and_hashes_inline_and_resource_fork_files() {
             .map(|index| b"generated kernel readback fixture"[index % 33])
             .collect();
         fs::write(&path, &original).unwrap();
-        let expected_hash = format!("{:x}", Sha256::digest(&original));
+        let expected_hash: String = Sha256::digest(&original)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
 
         let result = Command::new(env!("CARGO_BIN_EXE_applesauce"))
             .args(["-v", "compress", "--verify", "-c", "zlib"])
