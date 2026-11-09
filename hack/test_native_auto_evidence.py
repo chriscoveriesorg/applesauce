@@ -59,6 +59,24 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unstable allocation"):
             module.parse_log(sample_log().replace(",2097152,4096,10000", ",2097152,8192,10000", 1))
 
+    def test_reject_auto_worse_than_best_fixed_codec(self):
+        # Preserve a complete, internally consistent 48-row matrix. A
+        # benchmark that allocates more than the best fixed codec fails
+        # acceptance even when every compression/readback trial succeeded.
+        data = sample_log()
+        for repeat in module.REPEATS:
+            data = data.replace(
+                f"repeated,auto,{repeat},2097152,4096,",
+                f"repeated,auto,{repeat},2097152,12288,",
+            )
+        with self.assertRaisesRegex(ValueError, "auto allocation regression for repeated"):
+            module.parse_log(data)
+
+    def test_equal_allocation_passes_acceptance(self):
+        # Baseline is inclusive: matching the best fixed codec is sufficient.
+        rows = module.parse_log(sample_log())
+        self.assertEqual(rows["repeated", "auto", 0][1], 4096)
+
     def test_reject_duplicated_header(self):
         with self.assertRaisesRegex(ValueError, "duplicate benchmark CSV header"):
             module.parse_log(sample_log() + ",".join(module.HEADER) + "\n")
