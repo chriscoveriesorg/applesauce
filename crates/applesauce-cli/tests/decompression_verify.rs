@@ -52,3 +52,40 @@ fn default_and_manual_decompression_verify_generated_native_files() {
         assert!(!applesauce::info::get(&file).unwrap().is_compressed);
     }
 }
+
+#[test]
+fn a_missing_restore_root_fails_even_if_other_files_are_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("existing.txt");
+    let missing = dir.path().join("missing.txt");
+    let source = vec![b'A'; 128 * 1024];
+    fs::write(&existing, &source).unwrap();
+
+    let compressed = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .args(["compress", "--verify", "-c", "zlib"])
+        .arg(&existing)
+        .output()
+        .unwrap();
+    assert!(
+        compressed.status.success(),
+        "compress failed: {}",
+        String::from_utf8_lossy(&compressed.stderr)
+    );
+    assert!(applesauce::info::get(&existing).unwrap().is_compressed);
+
+    // One failing input must make the entire invocation fail, while verified
+    // restoration of independent valid inputs can still finish safely.
+    let restored = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .arg("decompress")
+        .arg(&existing)
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert!(
+        !restored.status.success(),
+        "decompress silently accepted a nonexistent requested input"
+    );
+    assert_eq!(fs::read(&existing).unwrap(), source);
+    assert!(!applesauce::info::get(&existing).unwrap().is_compressed);
+    assert!(!missing.exists());
+}
