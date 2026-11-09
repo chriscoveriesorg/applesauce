@@ -31,11 +31,18 @@ pub struct ProgressBars {
     bars: MultiProgress,
     verbosity: Verbosity,
     errors: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    kernel_readbacks: Arc<Mutex<Vec<(PathBuf, String)>>>,
 }
 
 impl ProgressBars {
     pub fn errors(&self) -> Vec<(PathBuf, String)> {
         self.errors.lock().unwrap().clone()
+    }
+
+    /// Successful per-file staged and published kernel readback attestations.
+    /// Recorded even when the CLI runs without verbose output.
+    pub fn kernel_readbacks(&self) -> Vec<(PathBuf, String)> {
+        self.kernel_readbacks.lock().unwrap().clone()
     }
 
     pub fn finish(&self) {
@@ -85,6 +92,7 @@ impl ProgressBars {
             bars,
             verbosity,
             errors: Arc::default(),
+            kernel_readbacks: Arc::default(),
         }
     }
 
@@ -109,6 +117,7 @@ enum State {
 
 pub struct ProgressWithTotal {
     errors: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    kernel_readbacks: Arc<Mutex<Vec<(PathBuf, String)>>>,
     path: PathBuf,
     total: ProgressBar,
     single: ProgressBar,
@@ -190,6 +199,7 @@ impl Progress for ProgressBars {
         total.inc_length(size);
         ProgressWithTotal {
             errors: Arc::clone(&self.errors),
+            kernel_readbacks: Arc::clone(&self.kernel_readbacks),
             path: path.to_owned(),
             total,
             single,
@@ -225,6 +235,10 @@ impl Task for ProgressWithTotal {
     }
 
     fn kernel_verified(&self, sha256: &str) {
+        self.kernel_readbacks
+            .lock()
+            .unwrap()
+            .push((self.path.clone(), sha256.to_owned()));
         if self.verbosity >= Verbosity::Verbose {
             // indicatif::ProgressBar::println is suppressed when stderr is
             // redirected. Explicit verification records must survive pipes,

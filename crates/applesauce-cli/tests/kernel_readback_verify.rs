@@ -20,7 +20,7 @@ fn verified_compression_reopens_and_hashes_inline_and_resource_fork_files() {
             .collect();
 
         let result = Command::new(env!("CARGO_BIN_EXE_applesauce"))
-            .args(["-v", "compress", "--verify", "-c", "zlib"])
+            .args(["-v", "compress", "--verify", "--json", "-c", "zlib"])
             .arg(&path)
             .output()
             .unwrap();
@@ -37,6 +37,22 @@ fn verified_compression_reopens_and_hashes_inline_and_resource_fork_files() {
         assert!(
             output.contains(&format!("verified: kernel-read sha256={expected_hash}")),
             "missing post-publication kernel readback for length {length}: {output}"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&result.stdout).expect("actual-storage JSON should parse");
+        let evidence = report["kernel_readbacks"]
+            .as_array()
+            .expect("successful verification should produce JSON evidence");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0]["sha256"].as_str(), Some(expected_hash.as_str()));
+        assert_eq!(
+            evidence[0]["coverage"].as_str(),
+            Some("whole_sha256_and_deterministic_pread")
+        );
+        assert_eq!(evidence[0]["cache_state"].as_str(), Some("potentially_warm"));
+        assert_eq!(
+            evidence[0]["path"]["display"].as_str(),
+            Some(path.to_string_lossy().as_ref())
         );
         assert_eq!(fs::read(&path).unwrap(), original);
     }

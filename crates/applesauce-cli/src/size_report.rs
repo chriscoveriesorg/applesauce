@@ -200,6 +200,15 @@ pub struct OperationError {
     path: EncodedPath,
     error: ReportError,
 }
+/// Successful operation attestations, distinct from a later filesystem scan.
+#[derive(Serialize)]
+struct KernelReadback {
+    path: EncodedPath,
+    sha256: String,
+    coverage: &'static str,
+    cache_state: &'static str,
+}
+
 #[derive(Serialize)]
 pub struct Report {
     schema_version: u32,
@@ -213,9 +222,23 @@ pub struct Report {
     roots: Vec<DirectoryReport>,
     totals: Totals,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    kernel_readbacks: Vec<KernelReadback>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     operation_errors: Vec<OperationError>,
 }
 impl Report {
+    pub fn kernel_verifications(&mut self, records: Vec<(PathBuf, String)>) {
+        self.kernel_readbacks = records
+            .into_iter()
+            .map(|(path, sha256)| KernelReadback {
+                path: EncodedPath::new(&path),
+                sha256,
+                coverage: "whole_sha256_and_deterministic_pread",
+                cache_state: "potentially_warm",
+            })
+            .collect();
+    }
+
     pub fn operation_errors(&mut self, errors: Vec<(PathBuf, String)>) {
         if !errors.is_empty() {
             self.complete = false;
@@ -249,6 +272,7 @@ pub fn analyze(paths: &[PathBuf]) -> Report {
         directories: Vec::new(),
         roots: Vec::new(),
         totals: Subtree::default().totals(),
+        kernel_readbacks: Vec::new(),
         operation_errors: Vec::new(),
     };
     let mut seen_paths = BTreeSet::new();
@@ -695,6 +719,31 @@ mod tests {
         assert_eq!(report.operation_errors.len(), 1);
         assert!(report.totals.complete); // actual measurements remain available
         assert_eq!(fs::read(&file).unwrap(), b"original");
+    }
+
+    #[test]
+    fn verified_kernel_readback_is_reported_as_operation_evidence_even_when_quiet() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("generated");
+        fs::write(&path, b"generated contents").unwrap();
+        let progress = crate::progress::ProgressBars::new(crate::progress::Verbosity::Quiet);
+        progress
+            .file_task(&path, 18)
+            .kernel_verified(&"ab".repeat(32));
+
+        let mut report = analyze(std::slice::from_ref(&path));
+        let before = serde_json::to_value(&report).unwrap();
+        assert!(before.get("kernel_readbacks").is_none());
+        report.kernel_verifications(progress.kernel_readbacks());
+        let proof = serde_json::to_value(&report).unwrap();
+        let proof = &proof["kernel_readbacks"][0];
+        assert_eq!(proof["sha256"].as_str(), Some("abababababababababababababababababababababababababababababababab"));
+        assert_eq!(proof["cache_state"].as_str(), Some("potentially_warm"));
+        assert_eq!(proof["coverage"].as_str(), Some("whole_sha256_and_deterministic_pread"));
+        assert_eq!(
+            proof["path"]["bytes_hex"].as_str(),
+            Some(EncodedPath::new(&path).bytes_hex.as_str())
+        );
     }
 
     #[test]

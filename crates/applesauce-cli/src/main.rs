@@ -396,6 +396,7 @@ fn main() {
             progress_bars.finish();
             let mut report = size_report::analyze(&paths);
             report.operation_errors(progress_bars.errors());
+            report.kernel_verifications(progress_bars.kernel_readbacks());
             if json || verbosity >= Verbosity::Normal {
                 if let Err(error) = size_report::display(&report, json) {
                     eprintln!("applesauce: unable to write size report: {error}");
