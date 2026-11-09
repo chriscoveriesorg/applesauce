@@ -198,6 +198,12 @@ impl BackgroundThreads {
                 progress.error(path, "refusing to restore a symlink input root");
                 continue;
             }
+            if !mode.is_compressing() && !metadata.is_file() && !metadata.is_dir() {
+                // Explicit FIFOs, sockets and devices must fail before the
+                // walker can silently skip them (or attempt to open a FIFO).
+                progress.error(path, "refusing to restore a non-regular input root");
+                continue;
+            }
             if !mode.is_compressing() && metadata.is_file() && metadata.nlink() > 1 {
                 // The recursive scanner already skips hard-linked files. An
                 // explicitly requested hard link must fail visibly instead of
@@ -233,8 +239,20 @@ impl BackgroundThreads {
             };
             let link_count = metadata.nlink();
             if link_count > 1 {
-                // We don't want to break the hard link, so we skip it.
-                progress.file_skipped(&path, SkipReason::HardLink);
+                // An uncompressed shared inode can remain an ordinary skip.
+                // A compressed inode under a requested directory is work the
+                // caller asked us to restore. Refuse it visibly so the CLI
+                // cannot exit successfully with compressed data left behind.
+                if !mode.is_compressing()
+                    && matches!(
+                        info::get_compression_state(&path, &metadata, &operation.volumes),
+                        FileCompressionState::Compressed
+                    )
+                {
+                    progress.error(&path, "refusing to restore a hard-linked compressed file");
+                } else {
+                    progress.file_skipped(&path, SkipReason::HardLink);
+                }
                 return;
             }
             let mut file_info = info::get_file_info(&path, &metadata, &operation.volumes);
