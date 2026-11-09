@@ -629,7 +629,7 @@ mod tests {
         // Exact fit succeeds, but even a one-byte deficit must refuse.
         assert!(require_restore_capacity(8192, 2, 4096).is_ok());
         let err = require_restore_capacity(8193, 2, 4096).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::StorageFull);
+        assert_eq!(err.kind(), ErrorKind::StorageFull);
         assert!(err.to_string().contains("need 8193 bytes"));
         assert!(require_restore_capacity(1, 0, 4096).is_err());
         assert!(require_restore_capacity(0, 0, 4096).is_ok());
