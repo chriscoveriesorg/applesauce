@@ -144,7 +144,8 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 payload = tar.extractfile("applesauce-cli/applesauce").read()
             self.assertIn(hashlib.sha256(payload).hexdigest(), run.stdout)
         calls = self.calls()
-        self.assertEqual(len(calls), 6)\n        self.assertEqual(sum(c[0] == "api" for c in calls), 1)
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(sum(c[0] == "api" for c in calls), 1)
         self.assertEqual(sum(c[:2] == ["release", "verify-asset"] for c in calls), 2)
         attestations = [c for c in calls if c[:2] == ["attestation", "verify"]]
         self.assertEqual(len(attestations), 2)
