@@ -143,8 +143,14 @@ fn unsafe_manual_recovery_warns_even_without_tracing_enabled() {
         String::from_utf8_lossy(&restored.stderr)
     );
     let warning = String::from_utf8_lossy(&restored.stderr);
-    assert!(warning.contains("WARNING: --manual --no-verify"), "{warning}");
-    assert!(warning.contains("back up the compressed source"), "{warning}");
+    assert!(
+        warning.contains("WARNING: --manual --no-verify"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("back up the compressed source"),
+        "{warning}"
+    );
     assert_eq!(fs::read(&file).unwrap(), source);
     assert!(!applesauce::info::get(&file).unwrap().is_compressed);
 }
