@@ -1,7 +1,9 @@
 //! End-to-end CLI smoke test on disposable generated macOS compressed files.
 //! No user paths or experimental native codecs are involved.
 
+use resource_fork::ResourceFork;
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -38,6 +40,17 @@ fn default_and_manual_decompression_verify_generated_native_files() {
             String::from_utf8_lossy(&compressed.stderr)
         );
         assert!(applesauce::info::get(&file).unwrap().is_compressed);
+        // Multiple 64 KiB blocks use the decmpfs resource fork. Verify the
+        // compressed payload exists so the cleanup assertion is meaningful.
+        let compressed_file = fs::File::open(&file).unwrap();
+        let mut compressed_fork = Vec::new();
+        ResourceFork::new(&compressed_file)
+            .read_to_end(&mut compressed_fork)
+            .unwrap();
+        assert!(
+            !compressed_fork.is_empty(),
+            "generated multi-block fixture should be resource-fork-backed"
+        );
         assert_eq!(
             fs::metadata(&file).unwrap().modified().unwrap(),
             original_modified,
@@ -67,6 +80,15 @@ fn default_and_manual_decompression_verify_generated_native_files() {
         );
         assert_eq!(fs::read(&file).unwrap(), fixture);
         assert!(!applesauce::info::get(&file).unwrap().is_compressed);
+        let restored_file = fs::File::open(&file).unwrap();
+        let mut stale_fork = Vec::new();
+        ResourceFork::new(&restored_file)
+            .read_to_end(&mut stale_fork)
+            .unwrap();
+        assert!(
+            stale_fork.is_empty(),
+            "restored plaintext retained a stale compressed resource fork"
+        );
         assert_eq!(
             fs::metadata(&file).unwrap().modified().unwrap(),
             original_modified,
