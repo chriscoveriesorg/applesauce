@@ -33,7 +33,11 @@ class AuditReleaseAssetsTests(unittest.TestCase):
             'if sys.argv[1:3] == ["release", "view"]:\n'
             '    print(json.dumps({"tagName": "applesauce-cli/v0.5.31", "isDraft": False}))\n'
             'elif os.getenv("AUDIT_GH_FAIL") == sys.argv[1]:\n'
-            '    sys.exit(3)\n',
+            '    sys.exit(3)\n'
+            'elif sys.argv[1] == "api":\n'
+            '    print(json.dumps({"ref": os.getenv("AUDIT_TAG_REF", "refs/tags/applesauce-cli/v0.5.31"),\n'
+            '        "object": {"type": os.getenv("AUDIT_TAG_TYPE", "commit"),\n'
+            '                   "sha": os.getenv("AUDIT_TAG_SHA", "1585dceb6c745cebf822588526ee5005255818c9")}}))\n',
             encoding="utf-8",
         )
         gh.chmod(0o755)
@@ -140,7 +144,7 @@ class AuditReleaseAssetsTests(unittest.TestCase):
                 payload = tar.extractfile("applesauce-cli/applesauce").read()
             self.assertIn(hashlib.sha256(payload).hexdigest(), run.stdout)
         calls = self.calls()
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 6)\n        self.assertEqual(sum(c[0] == "api" for c in calls), 1)
         self.assertEqual(sum(c[:2] == ["release", "verify-asset"] for c in calls), 2)
         attestations = [c for c in calls if c[:2] == ["attestation", "verify"]]
         self.assertEqual(len(attestations), 2)
@@ -148,6 +152,33 @@ class AuditReleaseAssetsTests(unittest.TestCase):
             self.assertIn("1585dceb6c745cebf822588526ee5005255818c9", args)
             self.assertIn("refs/tags/applesauce-cli/v0.5.31", args)
             self.assertIn("chriscoveriesorg/applesauce/.github/workflows/applesauce-cli-release.yml", args)
+
+    def test_remote_release_tag_requires_exact_direct_commit(self):
+        # Release-asset signatures alone cannot detect a tag moved after the
+        # original build. Reject a new commit, annotated tag, or wrong ref.
+        cases = (
+            ("AUDIT_TAG_SHA", "f" * 40),
+            ("AUDIT_TAG_TYPE", "tag"),
+            ("AUDIT_TAG_REF", "refs/tags/applesauce-cli/v0.5.30"),
+        )
+        for key, invalid in cases:
+            with self.subTest(key=key):
+                self.env[key] = invalid
+                self.log.unlink(missing_ok=True)
+                result = self.run_audit()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("release tag does not point directly", result.stderr)
+                self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                                     for c in self.calls()))
+                self.env.pop(key)
+        self.env["AUDIT_GH_FAIL"] = "api"
+        self.log.unlink(missing_ok=True)
+        result = self.run_audit()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("gh command failed", result.stderr)
+        self.assertFalse(any(c[:2] == ["release", "verify-asset"]
+                             for c in self.calls()))
+        self.env.pop("AUDIT_GH_FAIL")
 
     def test_extra_archive_filename_token_is_refused_before_provenance(self):
         for suffix in (".tar.xz", ".tar.gz"):
