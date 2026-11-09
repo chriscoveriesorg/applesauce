@@ -226,10 +226,15 @@ impl Task for ProgressWithTotal {
 
     fn kernel_verified(&self, sha256: &str) {
         if self.verbosity >= Verbosity::Verbose {
-            self.total.println(format!(
-                "{}: verified: kernel-read sha256={sha256}",
-                self.path.display()
-            ));
+            // indicatif::ProgressBar::println is suppressed when stderr is
+            // redirected. Explicit verification records must survive pipes,
+            // scripts and CI captures as well as interactive terminals.
+            self.total.suspend(|| {
+                eprintln!(
+                    "{}: verified: kernel-read sha256={sha256}",
+                    self.path.display()
+                );
+            });
         }
     }
 }
