@@ -169,7 +169,7 @@ class CodecCompareTests(unittest.TestCase):
         # A malformed CSV field beyond the parser limit must produce the
         # normal failure contract rather than an uncaught csv.Error.
         self.input.write_text(
-            "suite\\n" + "x" * (csv.field_size_limit() + 1) + "\\n",
+            "suite\n" + "x" * (csv.field_size_limit() + 1) + "\n",
             encoding="utf-8",
         )
         self.output.write_text("stale evidence", encoding="utf-8")
