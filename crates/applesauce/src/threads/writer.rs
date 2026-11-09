@@ -617,21 +617,33 @@ fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> io::Res
     Ok(())
 }
 
+// Restore verification needs byte equality, not a second full-file digest.
+// Keep its hot path free of SHA-256 while compression verification retains a
+// digest for the independent staged and published kernel readback gates.
 fn ensure_identical_files<R1: BufRead, R2: BufRead>(lhs: R1, rhs: R2) -> io::Result<()> {
-    ensure_identical_files_with_sha256(lhs, rhs).map(|_| ())
+    ensure_identical_files_impl(lhs, rhs, None)
 }
 
 fn ensure_identical_files_with_sha256<R1: BufRead, R2: BufRead>(
-    mut lhs: R1,
-    mut rhs: R2,
+    lhs: R1,
+    rhs: R2,
 ) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
+    ensure_identical_files_impl(lhs, rhs, Some(&mut hasher))?;
+    Ok(hasher.finalize().into())
+}
+
+fn ensure_identical_files_impl<R1: BufRead, R2: BufRead>(
+    mut lhs: R1,
+    mut rhs: R2,
+    mut hasher: Option<&mut Sha256>,
+) -> io::Result<()> {
     loop {
         let l = lhs.fill_buf()?;
         let r = rhs.fill_buf()?;
 
         if l.is_empty() && r.is_empty() {
-            return Ok(hasher.finalize().into());
+            return Ok(());
         }
         if l.is_empty() || r.is_empty() {
             return Err(io::Error::new(
@@ -650,7 +662,9 @@ fn ensure_identical_files_with_sha256<R1: BufRead, R2: BufRead>(
                 "Files are not identical",
             ));
         }
-        hasher.update(l);
+        if let Some(digest) = hasher.as_mut() {
+            digest.update(l);
+        }
 
         lhs.consume(min_len);
         rhs.consume(min_len)
