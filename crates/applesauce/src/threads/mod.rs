@@ -176,7 +176,15 @@ impl BackgroundThreads {
         let volumes = Volumes::new();
         let mut walker = scan::Walker::new(progress);
         for path in paths {
-            let metadata = match path.metadata() {
+            // Restoration must inspect the root itself. Following a root
+            // symlink can silently restore a different file or whole tree
+            // than the operator selected.
+            let metadata_result = if mode.is_compressing() {
+                path.metadata()
+            } else {
+                path.symlink_metadata()
+            };
+            let metadata = match metadata_result {
                 Ok(metadata) => metadata,
                 Err(error) => {
                     // Every explicitly requested root is part of the operation.
@@ -186,6 +194,17 @@ impl BackgroundThreads {
                     continue;
                 }
             };
+            if !mode.is_compressing() && metadata.file_type().is_symlink() {
+                progress.error(path, "refusing to restore a symlink input root");
+                continue;
+            }
+            if !mode.is_compressing() && metadata.is_file() && metadata.nlink() > 1 {
+                // The recursive scanner already skips hard-linked files. An
+                // explicitly requested hard link must fail visibly instead of
+                // appearing to have been restored.
+                progress.error(path, "refusing to restore a hard-linked input root");
+                continue;
+            }
             if let Err(e) = volumes.add_root_dir(path, &metadata) {
                 warn!(
                     "failed to find a temp directory for {}: {e}",
