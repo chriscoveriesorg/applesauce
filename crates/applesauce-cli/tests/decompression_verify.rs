@@ -185,3 +185,21 @@ fn explicit_link_restore_roots_exit_nonzero_and_preserve_data() {
     assert!(symlink_root.symlink_metadata().unwrap().file_type().is_symlink());
     assert_eq!(fs::read(&hardlink_root).unwrap(), source);
 }
+
+#[test]
+fn restore_failures_produce_bounded_actionable_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_applesauce"));
+    cmd.arg("decompress");
+    for index in 0..23 {
+        cmd.arg(dir.path().join(format!("missing-{index}.txt")));
+    }
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing-0.txt"), "{stderr}");
+    assert!(stderr.contains("missing-19.txt"), "{stderr}");
+    assert!(!stderr.contains("missing-20.txt"), "{stderr}");
+    assert!(stderr.contains("3 additional decompression error(s)"), "{stderr}");
+    assert!(stderr.contains("23 decompression error(s)"), "{stderr}");
+}
