@@ -116,6 +116,22 @@ class CodecCompareTests(unittest.TestCase):
         self.assertEqual(self.input.read_bytes(), original)
         self.assertTrue(self.output.is_symlink())
 
+    def test_output_symlink_to_unrelated_file_does_not_modify_target(self):
+        # Atomic publication must replace the output link, not follow it
+        # into an unrelated file when generating valid comparison evidence.
+        target = self.root / "unrelated.txt"
+        original = b"unrelated data must remain unchanged\\n"
+        target.write_bytes(original)
+        self.output.symlink_to(target)
+        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
+                   str(self.output)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertFalse(self.output.is_symlink())
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(len(list(csv.DictReader(stream))), 4)
+
     def test_failed_rerun_does_not_retain_stale_comparison(self):
         self.output.write_text("stale prior-run evidence", encoding="utf-8")
         self.save(self.rows[:-1])
