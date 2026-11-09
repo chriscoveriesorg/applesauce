@@ -737,9 +737,15 @@ mod tests {
         report.kernel_verifications(progress.kernel_readbacks());
         let proof = serde_json::to_value(&report).unwrap();
         let proof = &proof["kernel_readbacks"][0];
-        assert_eq!(proof["sha256"].as_str(), Some("abababababababababababababababababababababababababababababababab"));
+        assert_eq!(
+            proof["sha256"].as_str(),
+            Some("abababababababababababababababababababababababababababababababab")
+        );
         assert_eq!(proof["cache_state"].as_str(), Some("potentially_warm"));
-        assert_eq!(proof["coverage"].as_str(), Some("whole_sha256_and_deterministic_pread"));
+        assert_eq!(
+            proof["coverage"].as_str(),
+            Some("whole_sha256_and_deterministic_pread")
+        );
         assert_eq!(
             proof["path"]["bytes_hex"].as_str(),
             Some(EncodedPath::new(&path).bytes_hex.as_str())

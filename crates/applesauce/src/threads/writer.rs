@@ -258,6 +258,10 @@ impl Handler {
                     item.context.path.display()
                 ))
             })?;
+            // Kernel reads may advance access time on APFS. Reapply the
+            // original timestamps and sync while the source is still intact.
+            times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
+            tmp_file.as_file().sync_all()?;
         }
 
         let published = {
@@ -289,6 +293,17 @@ impl Handler {
                     item.context.path.display()
                 )));
             }
+            // The final, post-rename kernel read may also update atime. Preserve
+            // original filesystem timestamps before reporting verified success.
+            // Fail visibly if this post-publication metadata step is denied.
+            times::reset_times(&published, &item.context.orig_times)
+                .and_then(|()| published.sync_all())
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "post-publication timestamp restoration failed: {error}; compressed file remains at {}",
+                        item.context.path.display()
+                    ))
+                })?;
             let hex = expected_sha256
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
