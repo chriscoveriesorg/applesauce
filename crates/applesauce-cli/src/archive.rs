@@ -148,9 +148,27 @@ fn open_regular(path: &Path) -> io::Result<File> {
 // Check that the pathname still identifies the opened input before publishing
 // a separate archive or restoration. A replaced path may have identical size
 // and timestamps while the held descriptor still reads the old inode.
-fn ensure_open_path_identity(path: &Path, opened: &File) -> io::Result<()> {
-    // Refuse nonregular pathnames before opening, then make the descriptor
-    // open nonblocking so a FIFO swapped into the path cannot stall publish.
+// Snapshot captured at open is the trust anchor. Comparing two live fstat
+// results misses in-place rewrites when the writer restores the original mtime.
+fn same_archive_source_snapshot(before: &fs::Metadata, now: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    now.file_type().is_file()
+        && before.dev() == now.dev()
+        && before.ino() == now.ino()
+        && before.nlink() == now.nlink()
+        && before.len() == now.len()
+        && before.mtime() == now.mtime()
+        && before.mtime_nsec() == now.mtime_nsec()
+        && before.ctime() == now.ctime()
+        && before.ctime_nsec() == now.ctime_nsec()
+}
+
+fn ensure_open_path_identity(
+    path: &Path,
+    opened: &File,
+    before: &fs::Metadata,
+) -> io::Result<()> {
+    // Nonblocking opens prevent a substituted FIFO from stalling publication.
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -165,28 +183,12 @@ fn ensure_open_path_identity(path: &Path, opened: &File) -> io::Result<()> {
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let current = options.open(path)?;
-    if !current.metadata()?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "archive source pathname was replaced by a nonregular file",
-        ));
-    }
-    let original = opened.metadata()?;
-    let at_path = current.metadata()?;
-    #[cfg(unix)]
+    if !same_archive_source_snapshot(before, &opened.metadata()?)
+        || !same_archive_source_snapshot(before, &current.metadata()?)
     {
-        use std::os::unix::fs::MetadataExt;
-        if original.dev() != at_path.dev() || original.ino() != at_path.ino() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "archive source pathname was replaced during the operation",
-            ));
-        }
-    }
-    if original.len() != at_path.len() || original.modified().ok() != at_path.modified().ok() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "archive source pathname metadata changed during the operation",
+            "archive input changed since open; refusing publication",
         ));
     }
     Ok(())
@@ -414,7 +416,7 @@ fn create(
             "staged archive size changed after verification",
         ));
     }
-    ensure_open_path_identity(source_path, &source)?;
+    ensure_open_path_identity(source_path, &source, &before)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -505,7 +507,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
             "staged restore failed read-back verification",
         ));
     }
-    ensure_open_path_identity(archive_path, &source)?;
+    ensure_open_path_identity(archive_path, &source, &before)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -558,7 +560,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
             "staged logical range failed read-back verification",
         ));
     }
-    ensure_open_path_identity(archive_path, &source)?;
+    ensure_open_path_identity(archive_path, &source, &before)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -619,7 +621,8 @@ mod tests {
         fs::write(&source, b"AAAA").unwrap();
         fs::write(&replacement, b"BBBB").unwrap();
         let mut held = open_regular(&source).unwrap();
-        ensure_open_path_identity(&source, &held).unwrap();
+        let scanned = held.metadata().unwrap();
+        ensure_open_path_identity(&source, &held, &scanned).unwrap();
         let original_modified = held.metadata().unwrap().modified().unwrap();
         OpenOptions::new()
             .write(true)
@@ -636,7 +639,7 @@ mod tests {
         // original metadata-only check would accept this swapped pathname.
         fs::rename(&replacement, &source).unwrap();
         assert_eq!(
-            ensure_open_path_identity(&source, &held)
+            ensure_open_path_identity(&source, &held, &scanned)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidData
@@ -648,13 +651,13 @@ mod tests {
         // A removed or symlink-substituted pathname must also fail closed.
         fs::remove_file(&source).unwrap();
         assert_eq!(
-            ensure_open_path_identity(&source, &held)
+            ensure_open_path_identity(&source, &held, &scanned)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::NotFound
         );
         std::os::unix::fs::symlink(dir.path().join("held-original"), &source).unwrap();
-        assert!(ensure_open_path_identity(&source, &held).is_err());
+        assert!(ensure_open_path_identity(&source, &held, &scanned).is_err());
         fs::remove_file(&source).unwrap();
         use std::os::unix::ffi::OsStrExt;
         let fifo_path = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
@@ -663,7 +666,54 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
         // O_NONBLOCK is necessary even after the symlink_metadata precheck:
         // the pathname could change to a FIFO between preflight and open.
-        assert!(ensure_open_path_identity(&source, &held).is_err());
+        assert!(ensure_open_path_identity(&source, &held, &scanned).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_publication_guard_refuses_same_inode_rewrite_with_restored_mtime() {
+        use std::os::unix::fs::MetadataExt;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive-source");
+        fs::write(&path, b"AAAA").unwrap();
+        let held = open_regular(&path).unwrap();
+        let before = held.metadata().unwrap();
+        ensure_open_path_identity(&path, &held, &before).unwrap();
+
+        // A same-length, same-inode rewrite followed by resetting mtime
+        // previously passed the two-live-metadata publication check.
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&path, b"BBBB").unwrap();
+        File::open(&path).unwrap()
+            .set_modified(before.modified().unwrap())
+            .unwrap();
+        let changed = held.metadata().unwrap();
+        assert_eq!(before.dev(), changed.dev());
+        assert_eq!(before.ino(), changed.ino());
+        assert_eq!(before.len(), changed.len());
+        assert_eq!(before.modified().unwrap(), changed.modified().unwrap());
+        assert!(
+            before.ctime() != changed.ctime()
+                || before.ctime_nsec() != changed.ctime_nsec(),
+            "test filesystem failed to record changed inode ctime"
+        );
+        assert_eq!(
+            ensure_open_path_identity(&path, &held, &before)
+                .unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"BBBB");
+
+        // Hardlink changes are rejected even when the data is untouched.
+        let baseline = held.metadata().unwrap();
+        fs::hard_link(&path, dir.path().join("second-name")).unwrap();
+        assert_ne!(baseline.nlink(), held.metadata().unwrap().nlink());
+        assert_eq!(
+            ensure_open_path_identity(&path, &held, &baseline)
+                .unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
