@@ -180,10 +180,10 @@ fn explicit_link_restore_roots_exit_nonzero_and_preserve_data() {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("refusing to restore"), "{stderr}");
-        assert_eq!(fs::read(&original).unwrap(), source);
+        assert_eq!(fs::read(&original).unwrap(), source.to_vec());
     }
     assert!(symlink_root.symlink_metadata().unwrap().file_type().is_symlink());
-    assert_eq!(fs::read(&hardlink_root).unwrap(), source);
+    assert_eq!(fs::read(&hardlink_root).unwrap(), source.to_vec());
 }
 
 #[test]
