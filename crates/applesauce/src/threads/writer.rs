@@ -8,8 +8,8 @@ use std::fs::{File, Metadata, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::os::macos::fs::MetadataExt;
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::os::unix::fs::MetadataExt as UnixMetadataExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::{cmp, fmt, io, ptr};
@@ -223,8 +223,8 @@ impl Handler {
             orig_file.rewind()?;
             new_file.rewind()?;
 
-            let verified_hash = ensure_identical_files_with_sha256(orig_file, new_file)
-                .map_err(|e| {
+            let verified_hash =
+                ensure_identical_files_with_sha256(orig_file, new_file).map_err(|e| {
                     io::Error::other(format!(
                         "verification failed: {e}, {} unchanged",
                         item.context.path.display()
@@ -685,9 +685,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let original = dir.path().join("original");
         let published_path = dir.path().join("published");
-        let source_bytes: Vec<u8> = (0..(3 * 65_536 + 19))
-            .map(|i| (i % 251) as u8)
-            .collect();
+        let source_bytes: Vec<u8> = (0..(3 * 65_536 + 19)).map(|i| (i % 251) as u8).collect();
         fs::write(&original, &source_bytes).unwrap();
         fs::write(&published_path, &source_bytes).unwrap();
         let source = File::open(&original).unwrap();
