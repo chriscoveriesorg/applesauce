@@ -317,7 +317,7 @@ class ConfidenceTests(unittest.TestCase):
         self.assertFalse(new_output.exists())
 
     def test_concurrent_output_parent_replacement_cannot_redirect_publication(self):
-        manifest, rows = self.complete_smoke()
+        manifest, _ = self.complete_smoke()
         physical = self.root / "evidence"
         physical.mkdir()
         output = physical / "confidence.csv"
@@ -336,11 +336,15 @@ class ConfidenceTests(unittest.TestCase):
             return validate(*args)
 
         with patch.object(confidence, "validate_source", side_effect=replace_parent):
-            count = confidence.write_confidence(
-                self.summary, self.criterion, output, manifest, "smoke"
-            )
+            with self.assertRaisesRegex(
+                ValueError, "directory changed during publication"
+            ):
+                confidence.write_confidence(
+                    self.summary, self.criterion, output, manifest, "smoke"
+                )
 
-        self.assertEqual(count, len(rows))
+        # Descriptor-anchored publication remains inside the original inode,
+        # but a moved directory must not be reported as a successful export.
         self.assertEqual(
             protected.read_text(encoding="utf-8"), "protected Criterion input"
         )
