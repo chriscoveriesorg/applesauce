@@ -30,6 +30,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Validate benchmark evidence parser
         run: python3 -m unittest -v hack/test_native_auto_evidence.py
+      - name: Verify source-swap preflight regressions on macOS
+        run: cargo test -p applesauce --lib native_auto_source_preflight -- --nocapture
+      - name: Exercise native auto CLI end-to-end on disposable APFS fixtures
+        run: cargo test -p applesauce-cli --test native_auto -- --nocapture
       - name: Measure actual APFS allocation and wall time on disposable files
         shell: bash
         run: |
