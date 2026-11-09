@@ -110,3 +110,41 @@ fn a_missing_restore_root_fails_even_if_other_files_are_restored() {
     assert!(!applesauce::info::get(&existing).unwrap().is_compressed);
     assert!(!missing.exists());
 }
+
+#[test]
+fn unsafe_manual_recovery_warns_even_without_tracing_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("unsafe-recovery.txt");
+    let source = vec![b'R'; 256 * 1024];
+    fs::write(&file, &source).unwrap();
+
+    let compressed = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .args(["compress", "--verify", "-c", "zlib"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        compressed.status.success(),
+        "compress failed: {}",
+        String::from_utf8_lossy(&compressed.stderr)
+    );
+    assert!(applesauce::info::get(&file).unwrap().is_compressed);
+
+    // Ordinary invocations suppress tracing warnings. The unsafe escape hatch
+    // must still emit a human-visible warning on stderr before restoration.
+    let restored = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .args(["decompress", "--manual", "--no-verify"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "unsafe manual recovery failed: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let warning = String::from_utf8_lossy(&restored.stderr);
+    assert!(warning.contains("WARNING: --manual --no-verify"), "{warning}");
+    assert!(warning.contains("back up the compressed source"), "{warning}");
+    assert_eq!(fs::read(&file).unwrap(), source);
+    assert!(!applesauce::info::get(&file).unwrap().is_compressed);
+}
