@@ -224,3 +224,48 @@ fn restore_failures_produce_bounded_actionable_stderr() {
     assert!(stderr.contains("3 additional decompression error(s)"), "{stderr}");
     assert!(stderr.contains("23 decompression error(s)"), "{stderr}");
 }
+
+#[test]
+fn compressed_publication_preserves_original_timestamps_with_and_without_verification() {
+    // The compressed writer must finalize timestamps on the staging inode.
+    // Both modes should preserve birth/modified timestamps across publication.
+    let dir = tempfile::tempdir().unwrap();
+    for verify in [false, true] {
+        let file = dir.path().join(format!("compressed-{verify}.txt"));
+        let source = vec![b'T'; 256 * 1024];
+        fs::write(&file, &source).unwrap();
+        let reference_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_650_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(reference_time)
+            .unwrap();
+
+        let original = fs::metadata(&file).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_applesauce"));
+        command.args(["compress", "-c", "zlib"]);
+        if verify {
+            command.arg("--verify");
+        }
+        let result = command.arg(&file).output().unwrap();
+        assert!(
+            result.status.success(),
+            "compress (verify={verify}) failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(applesauce::info::get(&file).unwrap().is_compressed);
+        let after = fs::metadata(&file).unwrap();
+        assert_eq!(
+            after.modified().unwrap(),
+            original.modified().unwrap(),
+            "compression changed modification time (verify={verify})"
+        );
+        assert_eq!(
+            after.created().unwrap(),
+            original.created().unwrap(),
+            "compression changed creation time (verify={verify})"
+        );
+        assert_eq!(fs::read(&file).unwrap(), source);
+    }
+}
