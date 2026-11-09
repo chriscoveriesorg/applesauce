@@ -190,8 +190,11 @@ nested app/framework/plugin bundles. The bundles classifier considers only
 `Contents/Resources` within a `.app`; it excludes executable extensions,
 regular files with executable permission bits (including extensionless tools),
 Mach-O/fat binaries, ELF/PE images and shebang scripts detected from a four-byte
-header, plus nested code containers and signature directories. Skipped files
-are never encoded. Candidate bundle resources are **not certified safe to compress**:
+header, plus nested code containers and signature directories. Excluded
+code/signature directories are recorded as skipped subtree roots without
+opening or enumerating their descendants, including unreadable directories.
+Parents leading to eligible Resources or Caches remain traversable. Skipped
+files are never encoded. Candidate bundle resources are **not certified safe to compress**:
 the entire sealed resource set may affect an app's code signature. Real bundle
 writes remain outside this feature pending disposable-copy `codesign --verify`
 and launch acceptance. Both profiles refuse parent-directory traversal,
@@ -217,10 +220,12 @@ eligible paths (excluded paths are skipped before encoding);
 `codec` is the selected lowercase encoder name, including on skipped paths.
 Each directory has `path`, `totals`, and nullable `error` fields.
 
-- `paths[]` contains regular files plus skipped/error non-regular inputs.
+- `paths[]` contains regular files plus skipped/error non-regular inputs and
+  skipped directory subtree roots in read-only profile audits.
   `path.display` is for people; `path.bytes_hex` is the authoritative,
   lossless lowercase encoding of Unix pathname bytes, including non-UTF-8
-  names. `entry_type` is `file`, `symlink`, `other`, or `unknown`.
+  names. `entry_type` is `file`, `directory` (excluded subtrees only),
+  `symlink`, `other`, or `unknown`.
 - `codec`, `would_compress`, and stable `reason` describe the decision.
   Reasons are `compress`, `below_minimum_ratio`, `already_compressed`,
   `empty_file`, `too_large`, `filesystem_unsupported`,
