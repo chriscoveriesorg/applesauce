@@ -260,6 +260,11 @@ impl Handler {
             item.context.orig_metadata.st_flags() & !libc::UF_COMPRESSED,
         )?;
 
+        // Commit only a fully written, verified and durable staging file.
+        // A successful rename of unwritten page-cache data is insufficient
+        // protection against loss during a filesystem or power failure.
+        tmp_file.as_file().sync_all()?;
+
         ensure_source_path_matches_open_file(
             &item.file,
             &item.context.path,
