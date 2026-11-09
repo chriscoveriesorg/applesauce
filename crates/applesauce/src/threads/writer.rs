@@ -240,6 +240,26 @@ impl Handler {
         times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
         tmp_file.as_file().sync_all()?;
 
+        // Reopening the staged pathname is a separate kernel decmpfs check:
+        // the earlier comparison used the descriptor opened before compressed
+        // metadata was installed. Refuse publication if a fresh open cannot
+        // reproduce the original logical bytes. The source is still intact.
+        if let Some(expected_sha256) = source_sha256 {
+            verify_published_kernel_reads(
+                item.file.as_ref(),
+                tmp_file.as_file(),
+                tmp_file.path(),
+                uncompressed_file_size,
+                expected_sha256,
+            )
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "staged kernel readback failed: {error}; {} unchanged",
+                    item.context.path.display()
+                ))
+            })?;
+        }
+
         let published = {
             let _entered = tracing::debug_span!("rename tmp file").entered();
             ensure_source_path_matches_open_file(
