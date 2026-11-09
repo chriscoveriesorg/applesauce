@@ -490,8 +490,13 @@ impl Analyzer {
             // Record the excluded subtree at its root. Traversing it can
             // expose signed code, hang on large plugins, or fail on a private
             // signature directory unrelated to eligible resources.
-            self.paths
-                .push(skipped(path, "directory", self.kind, reason, Some(metadata)));
+            self.paths.push(skipped(
+                path,
+                "directory",
+                self.kind,
+                reason,
+                Some(metadata),
+            ));
             self.directories.push(DirectoryReport {
                 path: EncodedPath::new(path),
                 totals: Accumulator::empty().totals(),
@@ -1386,7 +1391,10 @@ mod tests {
         }
         for protected in [&executable, &signature, &nested_signature_file] {
             assert!(
-                !audit.paths.iter().any(|entry| entry.path.display == protected.to_string_lossy()),
+                !audit
+                    .paths
+                    .iter()
+                    .any(|entry| entry.path.display == protected.to_string_lossy()),
                 "excluded directory was traversed: {protected:?}"
             );
         }
@@ -1426,15 +1434,23 @@ mod tests {
         fs::write(&hidden, b"excluded signed content").unwrap();
         fs::write(&ordinary, b"regular cache data").unwrap();
         fs::set_permissions(&code, fs::Permissions::from_mode(0o000)).unwrap();
-        let audit = analyze_with_profile(
-            &[caches], Kind::Zlib, 0.95, 5, Some(Profile::Caches),
-        );
+        let audit = analyze_with_profile(&[caches], Kind::Zlib, 0.95, 5, Some(Profile::Caches));
         assert!(audit.complete);
-        let excluded = audit.paths.iter().find(|entry| entry.path.display == code.to_string_lossy()).unwrap();
+        let excluded = audit
+            .paths
+            .iter()
+            .find(|entry| entry.path.display == code.to_string_lossy())
+            .unwrap();
         assert_eq!(excluded.entry_type, "directory");
         assert_eq!(excluded.reason, "cache_contains_code_bundle");
-        assert!(!audit.paths.iter().any(|entry| entry.path.display == hidden.to_string_lossy()));
-        assert!(audit.paths.iter().any(|entry| entry.path.display == ordinary.to_string_lossy()));
+        assert!(!audit
+            .paths
+            .iter()
+            .any(|entry| entry.path.display == hidden.to_string_lossy()));
+        assert!(audit
+            .paths
+            .iter()
+            .any(|entry| entry.path.display == ordinary.to_string_lossy()));
         fs::set_permissions(&code, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
