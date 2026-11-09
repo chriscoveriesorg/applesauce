@@ -223,12 +223,14 @@ impl Handler {
             orig_file.rewind()?;
             new_file.rewind()?;
 
-            source_sha256 = Some(ensure_identical_files_with_sha256(orig_file, new_file).map_err(|e| {
-                io::Error::other(format!(
-                    "verification failed: {e}, {} unchanged",
-                    item.context.path.display()
-                ))
-            })?);
+            source_sha256 = Some(
+                ensure_identical_files_with_sha256(orig_file, new_file).map_err(|e| {
+                    io::Error::other(format!(
+                        "verification failed: {e}, {} unchanged",
+                        item.context.path.display()
+                    ))
+                })?,
+            );
         }
 
         // A failed timestamp reset must leave the original uncompressed file
@@ -261,7 +263,8 @@ impl Handler {
                 &item.context.path,
                 uncompressed_file_size,
                 expected_sha256,
-            ).map_err(|error| {
+            )
+            .map_err(|error| {
                 io::Error::other(format!(
                     "post-publication kernel readback failed: {error}; compressed file remains at {}",
                     item.context.path.display()
