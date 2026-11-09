@@ -132,6 +132,21 @@ class CodecCompareTests(unittest.TestCase):
         with self.output.open(newline="", encoding="utf-8") as stream:
             self.assertEqual(len(list(csv.DictReader(stream))), 4)
 
+    def test_dangling_output_symlink_does_not_create_target(self):
+        # Atomic publication must replace a dangling link without creating
+        # the file named by that link, even when comparison succeeds.
+        target = self.root / "missing-unrelated-evidence.txt"
+        self.assertFalse(target.exists())
+        self.output.symlink_to(target)
+        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
+                   str(self.output)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(target.exists())
+        self.assertFalse(self.output.is_symlink())
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(len(list(csv.DictReader(stream))), 4)
+
     def test_output_hardlink_to_unrelated_file_does_not_modify_target(self):
         # Publishing through an existing hardlink must not overwrite the
         # other name's inode or change its exact bytes.
