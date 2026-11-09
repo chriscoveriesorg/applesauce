@@ -159,7 +159,7 @@ class ConfidenceTests(unittest.TestCase):
 
     def test_invalid_utf8_estimates_fail_closed_without_traceback(self):
         manifest, _ = self.complete_smoke()
-        self.estimate_path("encode").write_bytes(b"\\xff\\xfe\\x80")
+        self.estimate_path("encode").write_bytes(b"\xff\xfe\x80")
         self.output.write_text("stale evidence", encoding="utf-8")
         command = [
             sys.executable, str(MODULE), str(manifest), str(self.summary),
@@ -172,6 +172,29 @@ class ConfidenceTests(unittest.TestCase):
         self.assertIn("invalid or incomplete Criterion confidence evidence:", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.output.exists())
+
+    def test_estimates_require_utf8_and_unambiguous_json_keys(self):
+        path = self.estimate_path("encode")
+        original = path.read_text(encoding="utf-8")
+        for encoding in ("utf-16", "utf-32"):
+            with self.subTest(encoding=encoding):
+                path.write_bytes(original.encode(encoding))
+                with self.assertRaises(UnicodeDecodeError):
+                    confidence.confidence_rows(self.summary, self.criterion)
+
+        # JSON permits duplicate object keys in many parsers; silently taking
+        # the last estimate can make audit evidence mean different things to
+        # different readers.
+        median = json.loads(original)["median"]
+        path.write_text(
+            '{"median":' + json.dumps(median)
+            + ',"median":' + json.dumps(median) + '}',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            ValueError, "duplicate Criterion estimate JSON key: median"
+        ):
+            confidence.confidence_rows(self.summary, self.criterion)
 
     def test_partial_csv_write_never_publishes_evidence(self):
         manifest, _ = self.complete_smoke()
