@@ -343,7 +343,7 @@ mod tests {
     use crate::progress::{SkipReason, Task};
     use crate::volumes::Volumes;
     use std::collections::HashMap;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, FileTypeExt};
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
