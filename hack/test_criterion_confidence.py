@@ -242,7 +242,7 @@ class ConfidenceTests(unittest.TestCase):
         for source in (manifest, self.summary):
             with self.subTest(source=source.name):
                 original = source.read_bytes()
-                with self.assertRaisesRegex(ValueError, "aliases"):
+                with self.assertRaisesRegex(ValueError, "differ from source"):
                     confidence.write_confidence(
                         self.summary, self.criterion, source, manifest, "smoke"
                     )
@@ -251,7 +251,7 @@ class ConfidenceTests(unittest.TestCase):
         hardlink = self.root / "hardlink-to-summary.csv"
         os.link(self.summary, hardlink)
         before = self.summary.read_bytes()
-        with self.assertRaisesRegex(ValueError, "aliases"):
+        with self.assertRaisesRegex(ValueError, "differ from source"):
             confidence.write_confidence(
                 self.summary, self.criterion, hardlink, manifest, "smoke"
             )
@@ -261,7 +261,7 @@ class ConfidenceTests(unittest.TestCase):
         symlink = self.root / "link-to-manifest.csv"
         symlink.symlink_to(manifest)
         original = manifest.read_bytes()
-        with self.assertRaisesRegex(ValueError, "aliases"):
+        with self.assertRaisesRegex(ValueError, "differ from source"):
             confidence.write_confidence(
                 self.summary, self.criterion, symlink, manifest, "smoke"
             )
@@ -351,6 +351,74 @@ class ConfidenceTests(unittest.TestCase):
         with (moved / "confidence.csv").open(newline="", encoding="utf-8") as stream:
             self.assertEqual(len(list(csv.DictReader(stream))), len(rows))
         self.assertEqual(list(moved.glob(".confidence.csv.*.tmp")), [])
+
+    def test_real_output_directory_swap_during_open_refuses_foreign_cleanup(self):
+        manifest, _ = self.complete_smoke()
+        physical = self.root / "evidence"
+        physical.mkdir()
+        output = physical / "confidence.csv"
+        output.write_text("old derived evidence", encoding="utf-8")
+        moved = self.root / "evidence-moved"
+        incoming = self.root / "foreign-directory"
+        incoming.mkdir()
+        foreign_csv = incoming / "confidence.csv"
+        foreign_csv.write_text("protect foreign CSV", encoding="utf-8")
+        original_open = os.open
+        swapped = False
+
+        def replace_real_directory(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if not swapped and Path(path) == physical:
+                swapped = True
+                physical.rename(moved)
+                incoming.rename(physical)
+            return original_open(path, flags, *args, **kwargs)
+
+        # The former implementation only checked the expected directory
+        # inode AFTER opening the path. It could accept this real-directory
+        # substitution and remove the foreign file as stale evidence.
+        with patch.object(confidence.os, "open", side_effect=replace_real_directory):
+            with self.assertRaisesRegex(ValueError, "changed during open"):
+                confidence.write_confidence(
+                    self.summary, self.criterion, output, manifest, "smoke"
+                )
+        self.assertTrue(swapped)
+        self.assertEqual(output.read_text(encoding="utf-8"), "protect foreign CSV")
+        self.assertEqual(
+            (moved / "confidence.csv").read_text(encoding="utf-8"),
+            "old derived evidence",
+        )
+        self.assertEqual(list(physical.glob(".confidence.csv.*.tmp")), [])
+
+    def test_hardlink_swap_during_open_preserves_input_and_alias(self):
+        manifest, _ = self.complete_smoke()
+        physical = self.root / "evidence"
+        physical.mkdir()
+        output = physical / "confidence.csv"
+        output.write_text("old derived evidence", encoding="utf-8")
+        original_summary = self.summary.read_bytes()
+        original_open = os.open
+        swapped = False
+
+        def replace_with_input_hardlink(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if not swapped and Path(path) == physical:
+                swapped = True
+                output.unlink()
+                os.link(self.summary, output)
+            return original_open(path, flags, *args, **kwargs)
+
+        # Source-alias verification must occur relative to the descriptor
+        # that will be used for unlink, after the directory is opened.
+        with patch.object(confidence.os, "open", side_effect=replace_with_input_hardlink):
+            with self.assertRaisesRegex(ValueError, "differ from source"):
+                confidence.write_confidence(
+                    self.summary, self.criterion, output, manifest, "smoke"
+                )
+        self.assertTrue(swapped)
+        self.assertTrue(os.path.samefile(output, self.summary))
+        self.assertEqual(self.summary.read_bytes(), original_summary)
+        self.assertEqual(output.read_bytes(), original_summary)
 
     def test_output_parent_swap_before_open_fails_without_touching_source(self):
         manifest, _ = self.complete_smoke()
