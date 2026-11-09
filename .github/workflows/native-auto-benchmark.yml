@@ -7,8 +7,12 @@ on:
     branches:
       - feat/native-codec-auto-issue89-20261109
     paths:
-      - crates/applesauce/src/threads/reader.rs
-      - crates/applesauce-cli/tests/native_auto.rs
+      # Every Rust pipeline or dependency change can affect the selected
+      # codec, publication checks, reported allocation or measured timing.
+      # This workflow is still restricted to the feature branch.
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
       - hack/native-auto-evidence.py
       - hack/test_native_auto_evidence.py
       - .github/workflows/native-auto-benchmark.yml
