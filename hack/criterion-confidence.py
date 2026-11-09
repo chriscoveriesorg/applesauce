@@ -57,6 +57,16 @@ def finite_positive(value, description):
     return converted
 
 
+def _unique_json_keys(pairs):
+    """Reject ambiguous Criterion evidence instead of silently taking the last key."""
+    parsed = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError(f"duplicate Criterion estimate JSON key: {key}")
+        parsed[key] = value
+    return parsed
+
+
 def read_estimates(path: Path):
     """Read bounded, unchanged regular Criterion estimates without FIFO hangs."""
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"):
@@ -78,7 +88,7 @@ def read_estimates(path: Path):
         named = os.stat(path, follow_symlinks=False)
         if (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino):
             raise ValueError(f"{path}: Criterion estimates path was replaced")
-        return json.loads(data)
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_unique_json_keys)
     finally:
         os.close(fd)
 
