@@ -452,6 +452,42 @@ mod tests {
         assert!(!missing.exists());
     }
 
+    #[test]
+    fn explicit_link_roots_refuse_restoration_without_touching_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.txt");
+        let symlink_root = dir.path().join("shortcut.txt");
+        let hardlink_root = dir.path().join("other-name.txt");
+        let directory = dir.path().join("directory");
+        let directory_link = dir.path().join("shortcut-dir");
+        fs::write(&original, b"unchanged generated test data").unwrap();
+        symlink(&original, &symlink_root).unwrap();
+        fs::hard_link(&original, &hardlink_root).unwrap();
+        fs::create_dir(&directory).unwrap();
+        symlink(&directory, &directory_link).unwrap();
+
+        let mut compressor = FileCompressor::new();
+        for manual in [false, true] {
+            for root in [&symlink_root, &directory_link, &hardlink_root] {
+                let reporter = RootErrorProgress::default();
+                compressor.recursive_decompress(iter::once(root.as_path()), manual, &reporter, true);
+                let errors = reporter.errors.lock().unwrap();
+                assert_eq!(errors.len(), 1, "missing error for {}", root.display());
+                assert_eq!(&errors[0].0, root);
+                assert!(
+                    errors[0].1.contains("refusing to restore"),
+                    "wrong error for {}: {}",
+                    root.display(),
+                    errors[0].1
+                );
+            }
+        }
+        assert_eq!(fs::read(&original).unwrap(), b"unchanged generated test data");
+        assert!(symlink_root.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(directory_link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&hardlink_root).unwrap(), fs::read(&original).unwrap());
+    }
+
     #[derive(Debug)]
     struct EntryInfo {
         path: PathBuf,
