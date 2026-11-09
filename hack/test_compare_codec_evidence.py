@@ -79,6 +79,8 @@ class CodecCompareTests(unittest.TestCase):
             self.assertEqual(result["decode_separation"], "overlap")
             self.assertEqual(result["raven_savings_vs_mesh_pct"], "50.00")
         self.assertIn("not 95% confidence", compare.markdown(rows))
+        self.assertIn("does not independently attest", compare.markdown(rows))
+        self.assertIn("manifest/summary/raw-estimates", compare.markdown(rows))
 
     def test_cli_writes_complete_artifact(self):
         cmd = [sys.executable, str(SCRIPT), str(self.input), "smoke", str(self.output)]
