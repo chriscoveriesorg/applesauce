@@ -316,6 +316,67 @@ class ConfidenceTests(unittest.TestCase):
             )
         self.assertFalse(new_output.exists())
 
+    def test_concurrent_output_parent_replacement_cannot_redirect_publication(self):
+        manifest, rows = self.complete_smoke()
+        physical = self.root / "evidence"
+        physical.mkdir()
+        output = physical / "confidence.csv"
+        output.write_text("stale evidence", encoding="utf-8")
+        moved = self.root / "evidence-moved"
+        protected = self.criterion / "confidence.csv"
+        protected.write_text("protected Criterion input", encoding="utf-8")
+
+        validate = confidence.validate_source
+
+        def replace_parent(*args):
+            # Replace the caller-visible destination *after* the writer has
+            # opened its anchored directory and removed the stale artifact.
+            physical.rename(moved)
+            physical.symlink_to(self.criterion, target_is_directory=True)
+            return validate(*args)
+
+        with patch.object(confidence, "validate_source", side_effect=replace_parent):
+            count = confidence.write_confidence(
+                self.summary, self.criterion, output, manifest, "smoke"
+            )
+
+        self.assertEqual(count, len(rows))
+        self.assertEqual(
+            protected.read_text(encoding="utf-8"), "protected Criterion input"
+        )
+        with (moved / "confidence.csv").open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(len(list(csv.DictReader(stream))), len(rows))
+        self.assertEqual(list(moved.glob(".confidence.csv.*.tmp")), [])
+
+    def test_output_parent_swap_before_open_fails_without_touching_source(self):
+        manifest, _ = self.complete_smoke()
+        physical = self.root / "evidence"
+        physical.mkdir()
+        output = physical / "confidence.csv"
+        moved = self.root / "evidence-moved"
+        protected = self.criterion / "confidence.csv"
+        protected.write_text("protected", encoding="utf-8")
+
+        original_open = os.open
+        swapped = False
+
+        def swap_before_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if not swapped and Path(path) == physical:
+                swapped = True
+                physical.rename(moved)
+                physical.symlink_to(self.criterion, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        with patch.object(confidence.os, "open", side_effect=swap_before_open):
+            with self.assertRaises(OSError):
+                confidence.write_confidence(
+                    self.summary, self.criterion, output, manifest, "smoke"
+                )
+        self.assertTrue(swapped)
+        self.assertEqual(protected.read_text(encoding="utf-8"), "protected")
+        self.assertFalse((moved / "confidence.csv").exists())
+
     def test_estimates_refuse_fifo_symlink_and_oversized_files(self):
         path = self.estimate_path("encode")
         path.write_bytes(b"x" * (confidence.MAX_ESTIMATE_BYTES + 1))
