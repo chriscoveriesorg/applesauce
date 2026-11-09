@@ -163,11 +163,7 @@ fn same_archive_source_snapshot(before: &fs::Metadata, now: &fs::Metadata) -> bo
         && before.ctime_nsec() == now.ctime_nsec()
 }
 
-fn ensure_open_path_identity(
-    path: &Path,
-    opened: &File,
-    before: &fs::Metadata,
-) -> io::Result<()> {
+fn ensure_open_path_identity(path: &Path, opened: &File, before: &fs::Metadata) -> io::Result<()> {
     // Nonblocking opens prevent a substituted FIFO from stalling publication.
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Err(io::Error::new(
@@ -685,7 +681,8 @@ mod tests {
         // previously passed the two-live-metadata publication check.
         std::thread::sleep(Duration::from_millis(20));
         fs::write(&path, b"BBBB").unwrap();
-        File::open(&path).unwrap()
+        File::open(&path)
+            .unwrap()
             .set_modified(before.modified().unwrap())
             .unwrap();
         let changed = held.metadata().unwrap();
@@ -694,13 +691,13 @@ mod tests {
         assert_eq!(before.len(), changed.len());
         assert_eq!(before.modified().unwrap(), changed.modified().unwrap());
         assert!(
-            before.ctime() != changed.ctime()
-                || before.ctime_nsec() != changed.ctime_nsec(),
+            before.ctime() != changed.ctime() || before.ctime_nsec() != changed.ctime_nsec(),
             "test filesystem failed to record changed inode ctime"
         );
         assert_eq!(
             ensure_open_path_identity(&path, &held, &before)
-                .unwrap_err().kind(),
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::InvalidData
         );
         assert_eq!(fs::read(&path).unwrap(), b"BBBB");
@@ -711,7 +708,8 @@ mod tests {
         assert_ne!(baseline.nlink(), held.metadata().unwrap().nlink());
         assert_eq!(
             ensure_open_path_identity(&path, &held, &baseline)
-                .unwrap_err().kind(),
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::InvalidData
         );
     }
