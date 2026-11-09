@@ -317,7 +317,7 @@ class ConfidenceTests(unittest.TestCase):
         self.assertFalse(new_output.exists())
 
     def test_concurrent_output_parent_replacement_cannot_redirect_publication(self):
-        manifest, _ = self.complete_smoke()
+        manifest, rows = self.complete_smoke()
         physical = self.root / "evidence"
         physical.mkdir()
         output = physical / "confidence.csv"
