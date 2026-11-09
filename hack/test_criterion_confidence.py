@@ -180,6 +180,22 @@ class ConfidenceTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.output.exists())
 
+    def test_oversized_summary_csv_field_fails_closed_without_traceback(self):
+        manifest, _ = self.complete_smoke()
+        # Python's csv reader raises csv.Error for fields above its limit.
+        # A failed run must not leave a previous confidence artifact.
+        self.summary.write_text("x" * (csv.field_size_limit() + 1), encoding="utf-8")
+        self.output.write_text("stale evidence", encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(MODULE), str(manifest), str(self.summary),
+             str(self.criterion), str(self.output), "smoke"],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("invalid or incomplete Criterion confidence evidence:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(self.output.exists())
+
     def test_estimates_require_utf8_and_unambiguous_json_keys(self):
         path = self.estimate_path("encode")
         original = path.read_text(encoding="utf-8")
