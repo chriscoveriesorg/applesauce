@@ -10,6 +10,8 @@ on:
       - 'hack/test_compare_codec_evidence.py'
       - 'hack/rank-codec-evidence.py'
       - 'hack/test_rank_codec_evidence.py'
+      - 'hack/safe_benchmark_output.py'
+      - 'hack/test_safe_benchmark_output.py'
       - 'hack/summarize-benchmarks.py'
       - 'hack/validate-benchmark-matrix.py'
       - 'hack/test_criterion_confidence.py'
@@ -29,6 +31,8 @@ on:
       - 'hack/test_compare_codec_evidence.py'
       - 'hack/rank-codec-evidence.py'
       - 'hack/test_rank_codec_evidence.py'
+      - 'hack/safe_benchmark_output.py'
+      - 'hack/test_safe_benchmark_output.py'
       - 'hack/summarize-benchmarks.py'
       - 'hack/validate-benchmark-matrix.py'
       - 'hack/test_criterion_confidence.py'
@@ -54,6 +58,10 @@ jobs:
         run: |
           python3 -m py_compile hack/criterion-confidence.py hack/test_criterion_confidence.py
           python3 -m unittest discover -s hack -p 'test_criterion_confidence.py' -v
+      - name: Verify derived benchmark publication safety
+        run: |
+          python3 -m py_compile hack/safe_benchmark_output.py hack/test_safe_benchmark_output.py
+          python3 -m unittest discover -s hack -p 'test_safe_benchmark_output.py' -v
       - name: Verify matched Raven/Mesh evidence
         run: |
           python3 -m py_compile hack/compare-codec-evidence.py hack/test_compare_codec_evidence.py
