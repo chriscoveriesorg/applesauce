@@ -132,6 +132,22 @@ class CodecCompareTests(unittest.TestCase):
         with self.output.open(newline="", encoding="utf-8") as stream:
             self.assertEqual(len(list(csv.DictReader(stream))), 4)
 
+    def test_output_hardlink_to_unrelated_file_does_not_modify_target(self):
+        # Publishing through an existing hardlink must not overwrite the
+        # other name's inode or change its exact bytes.
+        target = self.root / "unrelated-hardlink.txt"
+        original = b"independent evidence must remain unchanged\n"
+        target.write_bytes(original)
+        os.link(target, self.output)
+        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
+                   str(self.output)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertNotEqual(os.stat(target).st_ino, os.stat(self.output).st_ino)
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(len(list(csv.DictReader(stream))), 4)
+
     def test_failed_rerun_does_not_retain_stale_comparison(self):
         self.output.write_text("stale prior-run evidence", encoding="utf-8")
         self.save(self.rows[:-1])
