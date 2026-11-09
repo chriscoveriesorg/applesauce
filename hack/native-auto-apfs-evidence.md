@@ -41,7 +41,14 @@ the outcome. Auto may make an inferior choice for heterogeneous data.
 
 The `hack/native-auto-evidence.py` parser now requires every expected
 fixture, codec and repeat, matching logical lengths and per-codec allocation,
-positive durations and successful compressed outcomes. It emits a concise
-measured summary as a workflow artifact. Its negative tests reject incomplete
-and contradictory benchmark evidence. Acceptance still requires independent
-review before merging [PR #114](https://github.com/chriscoveriesorg/applesauce/pull/114).
+positive durations and successful compressed outcomes. It now **fails
+acceptance when auto allocates more bytes than the best fixed codec** on any
+generated fixture, even if every trial returns successfully. This is an
+allocation-only acceptance gate for the bounded fixture corpus, not a claim
+that auto will win for arbitrary files. Deliberate regression fixtures
+exercise the gate. The benchmark workflow now reruns after changes to any
+Rust crate or workspace dependency on the feature branch, so a later codec
+pipeline change cannot bypass measurement by avoiding `reader.rs`.
+It emits a concise measured summary as a workflow artifact.
+Acceptance still requires independent review before merging
+[PR #114](https://github.com/chriscoveriesorg/applesauce/pull/114).
