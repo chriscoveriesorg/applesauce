@@ -223,14 +223,14 @@ impl Handler {
             orig_file.rewind()?;
             new_file.rewind()?;
 
-            source_sha256 = Some(
-                ensure_identical_files_with_sha256(orig_file, new_file).map_err(|e| {
+            let verified_hash = ensure_identical_files_with_sha256(orig_file, new_file)
+                .map_err(|e| {
                     io::Error::other(format!(
                         "verification failed: {e}, {} unchanged",
                         item.context.path.display()
                     ))
-                })?,
-            );
+                })?;
+            source_sha256 = Some(verified_hash);
         }
 
         // A failed timestamp reset must leave the original uncompressed file
@@ -257,19 +257,18 @@ impl Handler {
             // decmpfs read path. The original uncompressed descriptor remains
             // open so pread probes do not depend on the compressed decoder.
             // A failure is reported, but cannot safely undo an atomic rename.
-            verify_published_kernel_reads(
+            if let Err(error) = verify_published_kernel_reads(
                 item.file.as_ref(),
                 &published,
                 &item.context.path,
                 uncompressed_file_size,
                 expected_sha256,
-            )
-            .map_err(|error| {
-                io::Error::other(format!(
+            ) {
+                return Err(io::Error::other(format!(
                     "post-publication kernel readback failed: {error}; compressed file remains at {}",
                     item.context.path.display()
-                ))
-            })?;
+                )));
+            }
             let hex = expected_sha256
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
