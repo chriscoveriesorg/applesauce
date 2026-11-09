@@ -236,6 +236,12 @@ def write_confidence(summary_csv: Path, criterion: Path, output: Path,
     for source in (summary_csv, manifest):
         if output.exists() and os.path.samefile(output, source):
             raise ValueError("confidence output aliases source benchmark evidence")
+    # Reject a symlinked immediate output directory: otherwise a redirected
+    # parent can silently publish evidence outside the intended location.
+    # The caller must also ensure ancestor directories are not concurrently
+    # replaced; pathname checks alone cannot prevent that race.
+    if output.parent.is_symlink():
+        raise ValueError("confidence output directory must not be a symlink")
     output.unlink(missing_ok=True)
     validate_source(summary_csv, manifest, suite)
     rows = confidence_rows(summary_csv, criterion)
