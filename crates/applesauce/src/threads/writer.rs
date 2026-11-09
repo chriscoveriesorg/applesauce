@@ -48,7 +48,11 @@ fn record_write_result(progress: &dyn crate::progress::Task, path: &Path, result
 // payloads so a clearly impossible restore fails while the source is intact.
 // This is an advisory snapshot: other writers can consume space afterwards,
 // and write_all/sync_all must still propagate ENOSPC.
-fn require_restore_capacity(logical_size: u64, blocks_available: u64, block_size: u64) -> io::Result<()> {
+fn require_restore_capacity(
+    logical_size: u64,
+    blocks_available: u64,
+    block_size: u64,
+) -> io::Result<()> {
     let bytes_available = u128::from(blocks_available) * u128::from(block_size);
     if u128::from(logical_size) > bytes_available {
         return Err(io::Error::new(
@@ -70,11 +74,7 @@ fn preflight_restore_capacity(stage: &File, logical_size: u64) -> io::Result<()>
     }
     // SAFETY: fstatfs succeeded and initialized the entire result structure.
     let stat = unsafe { stat.assume_init() };
-    require_restore_capacity(
-        logical_size,
-        stat.f_bavail as u64,
-        stat.f_bsize as u64,
-    )
+    require_restore_capacity(logical_size, stat.f_bavail, u64::from(stat.f_bsize))
 }
 
 pub(super) type Sender = crossbeam_channel::Sender<WorkItem>;
@@ -468,7 +468,7 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
 mod tests {
     use super::{
         ensure_identical_files, ensure_source_path_matches_open_file, record_write_result,
-        BelowMinimumRatio, require_restore_capacity,
+        require_restore_capacity, BelowMinimumRatio,
     };
     use crate::progress::Task;
     use std::fs::{self, File};
