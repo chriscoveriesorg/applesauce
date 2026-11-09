@@ -268,6 +268,21 @@ class ConfidenceTests(unittest.TestCase):
         self.assertEqual(manifest.read_bytes(), original)
         self.assertTrue(symlink.is_symlink())
 
+    def test_rejects_symlinked_output_parent_before_stale_cleanup(self):
+        manifest, _ = self.complete_smoke()
+        actual_directory = self.root / "output-real"
+        actual_directory.mkdir()
+        alias = self.root / "output-alias"
+        alias.symlink_to(actual_directory, target_is_directory=True)
+        stale = actual_directory / "confidence.csv"
+        stale.write_text("previous evidence", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "directory must not be a symlink"):
+            confidence.write_confidence(
+                self.summary, self.criterion, alias / "confidence.csv",
+                manifest, "smoke",
+            )
+        self.assertEqual(stale.read_text(encoding="utf-8"), "previous evidence")
+
     def test_confidence_output_never_deletes_raw_criterion_measurements(self):
         manifest, _ = self.complete_smoke()
         estimate = self.estimate_path("encode")
