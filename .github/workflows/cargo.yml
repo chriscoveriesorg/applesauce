@@ -2,18 +2,34 @@ on: push
 
 name: Continuous integration
 
-# Each push supersedes the previous unmerged branch head. Cancel its macOS
-# matrix before queuing another three jobs on the constrained xcode-27 pool.
-# Every latest-head run still executes the complete existing test matrix.
+# A new push may supersede only an unmerged feature-branch run. Give every
+# main commit its own group so merges and release qualification are never
+# silently cancelled or displaced by a later push.
 permissions:
   contents: read
 
 concurrency:
-  group: applesauce-cargo-${{ github.ref }}
-  cancel-in-progress: true
+  group: applesauce-cargo-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && startsWith(github.ref, 'refs/heads/') }}
 
 jobs:
+  # Check formatting on a disposable Linux runner before reserving any of
+  # the scarce macOS xcode-27 slots. rustfmt is platform-independent here.
+  preflight:
+    name: Formatting preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+      - name: Install Rust formatting
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Test formatting
+        run: cargo fmt --all -- --check
+
   ci:
+    needs: preflight
     # Use the same provisioned macOS runner that executes the native codec probe.
     # The macos-latest matrix has been cancelled before runner assignment.
     runs-on: xcode-27
@@ -31,12 +47,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
-
-      # Reject rustfmt-only mistakes before compiling and running four sets
-      # of native codec tests on every stable/beta/nightly matrix member.
-      - name: Test formatting
-        run: cargo fmt --all -- --check
+          components: clippy
 
       - name: Caching
         uses: Swatinem/rust-cache@v2
