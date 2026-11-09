@@ -507,6 +507,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn explicit_special_file_roots_refuse_restoration_without_opening_them() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("never-open-this-fifo");
+        let socket = dir.path().join("never-open-this-socket");
+        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: this is an isolated temporary directory and the C string is NUL-terminated.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        let _socket_listener = UnixListener::bind(&socket).unwrap();
+
+        let mut compressor = FileCompressor::new();
+        for manual in [false, true] {
+            for root in [&fifo, &socket] {
+                let reporter = RootErrorProgress::default();
+                compressor.recursive_decompress(iter::once(root.as_path()), manual, &reporter, true);
+                let errors = reporter.errors.lock().unwrap();
+                assert_eq!(errors.len(), 1, "missing error for {}", root.display());
+                assert_eq!(&errors[0].0, root);
+                assert!(errors[0].1.contains("non-regular input root"), "{:?}", errors[0]);
+            }
+        }
+        assert!(fifo.symlink_metadata().unwrap().file_type().is_fifo());
+        assert!(socket.exists());
+    }
+
+    #[test]
+    fn compressed_hardlinks_nested_under_a_directory_cause_restore_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("selected-directory");
+        fs::create_dir(&root).unwrap();
+        let primary = root.join("compressed.txt");
+        let alias = root.join("hardlink.txt");
+        let source = vec![b'Z'; 256 * 1024];
+        fs::write(&primary, &source).unwrap();
+
+        let mut compressor = FileCompressor::new();
+        compressor.recursive_compress(
+            iter::once(primary.as_path()),
+            Kind::default(),
+            1.0,
+            2,
+            &NoProgress,
+            true,
+        );
+        assert!(info::get(&primary).unwrap().is_compressed);
+        fs::hard_link(&primary, &alias).unwrap();
+
+        for manual in [false, true] {
+            let reporter = RootErrorProgress::default();
+            compressor.recursive_decompress(iter::once(root.as_path()), manual, &reporter, true);
+            let errors = reporter.errors.lock().unwrap();
+            assert_eq!(errors.len(), 2, "hardlinks were silently skipped: {errors:?}");
+            for path in [&primary, &alias] {
+                assert!(
+                    errors.iter().any(|(found, message)| found == path
+                        && message.contains("hard-linked compressed file")),
+                    "missing refusal for {}: {errors:?}",
+                    path.display()
+                );
+                assert_eq!(fs::read(path).unwrap(), source);
+                assert!(info::get(path).unwrap().is_compressed);
+            }
+        }
+    }
+
+    #[test]
+    fn uncompressed_nested_hardlinks_remain_safe_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("uncompressed");
+        let alias = dir.path().join("uncompressed-link");
+        fs::write(&primary, b"unchanged uncompressed hard-linked bytes").unwrap();
+        fs::hard_link(&primary, &alias).unwrap();
+
+        let mut compressor = FileCompressor::new();
+        let reporter = RootErrorProgress::default();
+        compressor.recursive_decompress(iter::once(dir.path()), true, &reporter, true);
+        assert!(reporter.errors.lock().unwrap().is_empty());
+        assert_eq!(fs::read(&primary).unwrap(), fs::read(&alias).unwrap());
+    }
+
     #[derive(Debug)]
     struct EntryInfo {
         path: PathBuf,
