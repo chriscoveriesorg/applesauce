@@ -558,10 +558,8 @@ fn verify_random_offset_windows(
     if window_len != 0 {
         let maximum_offset = expected_size - window_len as u64;
         let mut offsets = vec![0, maximum_offset / 2, maximum_offset];
-        for chunk in expected_sha256.chunks_exact(8) {
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(chunk);
-            offsets.push(u64::from_le_bytes(bytes) % (maximum_offset + 1));
+        for chunk in expected_sha256.as_chunks::<8>().0 {
+            offsets.push(u64::from_le_bytes(*chunk) % (maximum_offset + 1));
         }
         offsets.sort_unstable();
         offsets.dedup();
@@ -569,7 +567,7 @@ fn verify_random_offset_windows(
         let mut observed = vec![0u8; window_len];
         for offset in offsets {
             read_exact_at(source, &mut expected, offset)?;
-            read_exact_at(&reopened, &mut observed, offset)?;
+            read_exact_at(reopened, &mut observed, offset)?;
             if expected != observed {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
