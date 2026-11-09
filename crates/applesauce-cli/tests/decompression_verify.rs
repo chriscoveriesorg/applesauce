@@ -2,6 +2,7 @@
 //! No user paths or experimental native codecs are involved.
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
@@ -153,4 +154,34 @@ fn unsafe_manual_recovery_warns_even_without_tracing_enabled() {
     );
     assert_eq!(fs::read(&file).unwrap(), source);
     assert!(!applesauce::info::get(&file).unwrap().is_compressed);
+}
+
+#[test]
+fn explicit_link_restore_roots_exit_nonzero_and_preserve_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("data.txt");
+    let symlink_root = dir.path().join("linked.txt");
+    let hardlink_root = dir.path().join("hardlinked.txt");
+    let source = b"generated restore refusal fixture";
+    fs::write(&original, source).unwrap();
+    symlink(&original, &symlink_root).unwrap();
+    fs::hard_link(&original, &hardlink_root).unwrap();
+
+    for path in [&symlink_root, &hardlink_root] {
+        let output = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+            .arg("decompress")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "accepted unsafe restoration root {}",
+            path.display()
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("refusing to restore"), "{stderr}");
+        assert_eq!(fs::read(&original).unwrap(), source);
+    }
+    assert!(symlink_root.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(fs::read(&hardlink_root).unwrap(), source);
 }
