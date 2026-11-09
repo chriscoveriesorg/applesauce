@@ -525,11 +525,20 @@ mod tests {
         for manual in [false, true] {
             for root in [&fifo, &socket] {
                 let reporter = RootErrorProgress::default();
-                compressor.recursive_decompress(iter::once(root.as_path()), manual, &reporter, true);
+                compressor.recursive_decompress(
+                    iter::once(root.as_path()),
+                    manual,
+                    &reporter,
+                    true,
+                );
                 let errors = reporter.errors.lock().unwrap();
                 assert_eq!(errors.len(), 1, "missing error for {}", root.display());
                 assert_eq!(&errors[0].0, root);
-                assert!(errors[0].1.contains("non-regular input root"), "{:?}", errors[0]);
+                assert!(
+                    errors[0].1.contains("non-regular input root"),
+                    "{:?}",
+                    errors[0]
+                );
             }
         }
         assert!(fifo.symlink_metadata().unwrap().file_type().is_fifo());
@@ -562,7 +571,11 @@ mod tests {
             let reporter = RootErrorProgress::default();
             compressor.recursive_decompress(iter::once(root.as_path()), manual, &reporter, true);
             let errors = reporter.errors.lock().unwrap();
-            assert_eq!(errors.len(), 2, "hardlinks were silently skipped: {errors:?}");
+            assert_eq!(
+                errors.len(),
+                2,
+                "hardlinks were silently skipped: {errors:?}"
+            );
             for path in [&primary, &alias] {
                 assert!(
                     errors.iter().any(|(found, message)| found == path
