@@ -337,6 +337,7 @@ mod tests {
             io::ErrorKind::Other
         );
     }
+
     #[test]
     fn source_preflight_rejects_regular_path_swaps_and_symlinks() {
         let dir = tempfile::tempdir().unwrap();
@@ -378,5 +379,4 @@ mod tests {
         assert!(open_scanned_regular_file(&path, &scanned).is_err());
         assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
     }
-
 }
