@@ -299,6 +299,19 @@ def audit(directory):
     if release.get("tagName") != TAG or release.get("isDraft") is not False:
         raise AuditError("expected published, non-draft release with exact tag")
 
+    # Attestation identifies the build source, but a release tag can be
+    # moved after publication. Verify the live Git ref independently before
+    # certifying any downloaded archive. The authorized tag helper creates a
+    # lightweight tag; an annotated or nested tag needs separate inspection
+    # and must not silently pass this direct-commit contract.
+    tag_ref = json.loads(gh("api", f"repos/{REPO}/git/ref/tags/{TAG}"))
+    target = tag_ref.get("object")
+    if (tag_ref.get("ref") != "refs/tags/" + TAG
+            or not isinstance(target, dict)
+            or target.get("type") != "commit"
+            or target.get("sha") != QUALIFIED_SHA):
+        raise AuditError("release tag does not point directly to qualified source commit")
+
     archives = find_archives(directory)
     evidence = {}
     for arch, asset in archives.items():
