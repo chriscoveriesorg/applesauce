@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 #[test]
 fn default_and_manual_decompression_verify_generated_native_files() {
@@ -14,6 +15,16 @@ fn default_and_manual_decompression_verify_generated_native_files() {
     for (index, manual) in [false, true].into_iter().enumerate() {
         let file = dir.path().join(format!("restoration-{index}.txt"));
         fs::write(&file, &fixture).unwrap();
+        // Use an old exact-second timestamp so a successful restore cannot
+        // accidentally pass by retaining the freshly created staging time.
+        let reference_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_690_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(reference_time)
+            .unwrap();
+        let original_modified = fs::metadata(&file).unwrap().modified().unwrap();
 
         let compressed = Command::new(env!("CARGO_BIN_EXE_applesauce"))
             .args(["compress", "--verify", "-c", "zlib"])
@@ -26,6 +37,11 @@ fn default_and_manual_decompression_verify_generated_native_files() {
             String::from_utf8_lossy(&compressed.stderr)
         );
         assert!(applesauce::info::get(&file).unwrap().is_compressed);
+        assert_eq!(
+            fs::metadata(&file).unwrap().modified().unwrap(),
+            original_modified,
+            "compression changed the fixture modification time"
+        );
 
         // The unsafe switch requires --manual and cannot change a file just
         // because the operator supplied it accidentally.
@@ -50,6 +66,11 @@ fn default_and_manual_decompression_verify_generated_native_files() {
         );
         assert_eq!(fs::read(&file).unwrap(), fixture);
         assert!(!applesauce::info::get(&file).unwrap().is_compressed);
+        assert_eq!(
+            fs::metadata(&file).unwrap().modified().unwrap(),
+            original_modified,
+            "verified restoration did not preserve the original timestamp"
+        );
     }
 }
 
