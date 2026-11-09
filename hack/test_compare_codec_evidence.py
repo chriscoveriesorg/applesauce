@@ -165,6 +165,19 @@ class CodecCompareTests(unittest.TestCase):
         with self.output.open(newline="", encoding="utf-8") as stream:
             self.assertEqual(len(list(csv.DictReader(stream))), 4)
 
+    def test_invalid_utf8_confidence_fails_closed_without_traceback(self):
+        # Evidence can be a bounded regular file but still contain invalid
+        # UTF-8; it must not produce a traceback or retain stale output.
+        self.input.write_bytes(b"\\xff\\xfe\\x80")
+        self.output.write_text("stale evidence", encoding="utf-8")
+        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
+                   str(self.output)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("incomplete Raven/Mesh comparison:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(self.output.exists())
+
     def test_oversized_csv_field_fails_closed_without_traceback(self):
         # A malformed CSV field beyond the parser limit must produce the
         # normal failure contract rather than an uncaught csv.Error.
