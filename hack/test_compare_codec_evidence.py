@@ -191,6 +191,18 @@ class CodecCompareTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "golden"):
             compare.compare(self.input, "smoke")
 
+    def test_invalid_baseline_payload_ratio_rejects_complete_matrix(self):
+        # Baseline codec rows are part of the required golden matrix even
+        # though only Raven/Mesh ratios appear in the comparison output.
+        for invalid in ("0", "-1", "NaN", "inf", "not-a-number"):
+            with self.subTest(invalid=invalid):
+                rows = [dict(row) for row in self.rows]
+                baseline = next(row for row in rows if row["codec"] == "zlib")
+                baseline["encoded_over_input_ratio"] = invalid
+                self.save(rows)
+                with self.assertRaisesRegex(ValueError, "benchmark payload ratio"):
+                    compare.compare(self.input, "smoke")
+
     def test_time_or_throughput_tamper_fails(self):
         for field, bad in (
             ("encode_ci95_lower_ns", "1000000000"),
