@@ -203,6 +203,23 @@ class CodecCompareTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "benchmark payload ratio"):
                     compare.compare(self.input, "smoke")
 
+    def test_invalid_baseline_timing_or_throughput_rejects_matrix(self):
+        # A complete evidence matrix must reject corrupted baseline timings,
+        # not just corrupted Raven/Mesh timing fields.
+        for field, bad in (
+            ("encode_median_ns", "NaN"),
+            ("decode_ci95_lower_ns", "-1"),
+            ("encode_ci95_upper_ns", "0"),
+            ("decode_median_mib_per_s", "12345"),
+        ):
+            with self.subTest(field=field):
+                rows = [dict(row) for row in self.rows]
+                baseline = next(row for row in rows if row["codec"] == "zlib")
+                baseline[field] = bad
+                self.save(rows)
+                with self.assertRaisesRegex(ValueError, "invalid|disagrees|reversed"):
+                    compare.compare(self.input, "smoke")
+
     def test_time_or_throughput_tamper_fails(self):
         for field, bad in (
             ("encode_ci95_lower_ns", "1000000000"),
