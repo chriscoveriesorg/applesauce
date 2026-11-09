@@ -184,7 +184,9 @@ class ConfidenceTests(unittest.TestCase):
         manifest, _ = self.complete_smoke()
         # Python's csv reader raises csv.Error for fields above its limit.
         # A failed run must not leave a previous confidence artifact.
-        self.summary.write_text("x" * (csv.field_size_limit() + 1), encoding="utf-8")
+        with self.summary.open("w", newline="", encoding="utf-8") as stream:
+            stream.write(",".join(confidence.SUMMARY_COLUMNS) + "\n")
+            stream.write("x" * (csv.field_size_limit() + 1) + "\n")
         self.output.write_text("stale evidence", encoding="utf-8")
         result = subprocess.run(
             [sys.executable, str(MODULE), str(manifest), str(self.summary),
