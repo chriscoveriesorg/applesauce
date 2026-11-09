@@ -520,17 +520,7 @@ fn verify_published_kernel_reads(
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     let committed = published.metadata()?;
-    let observed = reopened.metadata()?;
-    if !observed.is_file()
-        || observed.dev() != committed.dev()
-        || observed.ino() != committed.ino()
-        || observed.len() != expected_size
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "published pathname no longer identifies the expected file",
-        ));
-    }
+    ensure_published_snapshot(&reopened, path, &committed, expected_size)?;
 
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
@@ -551,15 +541,30 @@ fn verify_published_kernel_reads(
 
     verify_random_offset_windows(source, &reopened, expected_size, expected_sha256)?;
 
-    let final_metadata = path.symlink_metadata()?;
-    if !final_metadata.is_file()
-        || final_metadata.dev() != committed.dev()
-        || final_metadata.ino() != committed.ino()
-        || final_metadata.len() != expected_size
+    // Recheck both the descriptor and pathname after every read. Inode and
+    // length alone miss same-size rewrites or new hard links during readback.
+    // ctime catches a rewrite even when an actor restores the original mtime.
+    ensure_published_snapshot(&reopened, path, &committed, expected_size)
+}
+
+// Require the logical file, its reopened descriptor and its pathname to keep
+// the same metadata snapshot throughout verification. atime is deliberately
+// excluded because readback itself may update it.
+fn ensure_published_snapshot(
+    reopened: &File,
+    path: &Path,
+    committed: &Metadata,
+    expected_size: u64,
+) -> io::Result<()> {
+    let opened_metadata = reopened.metadata()?;
+    let path_metadata = path.symlink_metadata()?;
+    if committed.len() != expected_size
+        || !same_source_snapshot(committed, &opened_metadata)
+        || !same_source_snapshot(committed, &path_metadata)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "published file changed during kernel readback",
+            "published file or pathname changed during kernel readback",
         ));
     }
     Ok(())
@@ -656,8 +661,8 @@ fn ensure_identical_files_with_sha256<R1: BufRead, R2: BufRead>(
 mod tests {
     use super::{
         ensure_identical_files, ensure_source_path_matches_open_file, record_write_result,
-        require_restore_capacity, verify_published_kernel_reads, verify_random_offset_windows,
-        BelowMinimumRatio,
+        ensure_published_snapshot, require_restore_capacity, verify_published_kernel_reads,
+        verify_random_offset_windows, BelowMinimumRatio,
     };
     use crate::progress::Task;
     use std::fs::{self, File};
@@ -828,6 +833,44 @@ mod tests {
             digest,
         )
         .is_err());
+    }
+
+    #[test]
+    fn published_snapshot_rejects_same_length_rewrite_and_new_hard_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("published");
+        let hard_link = dir.path().join("alias");
+        let original = b"generated stable publication";
+        fs::write(&path, original).unwrap();
+        let opened = File::open(&path).unwrap();
+        let committed = opened.metadata().unwrap();
+        ensure_published_snapshot(&opened, &path, &committed, original.len() as u64).unwrap();
+
+        // A second name can appear after the first snapshot even though the
+        // bytes, device, inode and logical length remain unchanged.
+        fs::hard_link(&path, &hard_link).unwrap();
+        assert_eq!(
+            ensure_published_snapshot(&opened, &path, &committed, original.len() as u64)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        fs::remove_file(&hard_link).unwrap();
+
+        // Same-length writes can also leave an identical inode and length.
+        // Force the mtime apart to make this test independent of timestamp
+        // granularity and exercise the post-read metadata check.
+        fs::write(&path, original).unwrap();
+        opened
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(12_345))
+            .unwrap();
+        assert_eq!(opened.metadata().unwrap().len(), committed.len());
+        assert_eq!(
+            ensure_published_snapshot(&opened, &path, &committed, original.len() as u64)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
     }
 
     #[test]
