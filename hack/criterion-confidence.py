@@ -13,7 +13,7 @@ import os
 import stat
 from pathlib import Path
 import sys
-import tempfile
+import secrets
 
 _SUMMARY_PATH = Path(__file__).with_name("summarize-benchmarks.py")
 _SPEC = importlib.util.spec_from_file_location("applesauce_summary", _SUMMARY_PATH)
@@ -217,14 +217,10 @@ def validate_source(summary_csv: Path, manifest_csv: Path, suite: str):
 
 def write_confidence(summary_csv: Path, criterion: Path, output: Path,
                      manifest: Path, suite: str):
-    # This workflow uploads its evidence directory even after a failed run.
-    # A reused runner can retain a prior confidence.csv; remove it before
-    # validation so an incomplete current run cannot publish stale evidence.
-    # Refuse placing confidence.csv inside raw Criterion evidence, including
-    # paths reached through a symlinked parent. In particular, an accidental
-    # estimates.json output argument must not delete a measured input before
-    # the reader can validate it. Also reject same-path/hardlink aliases to
-    # manifest and summary below.
+    # Only a freshly validated output can be published. CI clears this
+    # dedicated evidence directory at the start of each benchmark invocation.
+    # On a failed rerun, unlink only the stale entry inside the directory we
+    # opened, never through a pathname that could later resolve elsewhere.
     root = criterion.resolve(strict=True)
     destination = output.resolve(strict=False)
     lexical_root = criterion.absolute()
@@ -233,37 +229,57 @@ def write_confidence(summary_csv: Path, criterion: Path, output: Path,
             or lexical_destination == lexical_root
             or lexical_root in lexical_destination.parents):
         raise ValueError("confidence output must not overwrite raw Criterion evidence")
+    if output.parent.is_symlink():
+        raise ValueError("confidence output directory must not be a symlink")
+    parent_path = output.parent.resolve(strict=True)
+    if parent_path == root or root in parent_path.parents:
+        raise ValueError("confidence output must not overwrite raw Criterion evidence")
     for source in (summary_csv, manifest):
         if output.exists() and os.path.samefile(output, source):
             raise ValueError("confidence output aliases source benchmark evidence")
-    # Reject a symlinked immediate output directory: otherwise a redirected
-    # parent can silently publish evidence outside the intended location.
-    # The caller must also ensure ancestor directories are not concurrently
-    # replaced; pathname checks alone cannot prevent that race.
-    if output.parent.is_symlink():
-        raise ValueError("confidence output directory must not be a symlink")
-    output.unlink(missing_ok=True)
-    validate_source(summary_csv, manifest, suite)
-    rows = confidence_rows(summary_csv, criterion)
+    if not all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+        raise OSError("safe confidence output requires O_DIRECTORY and O_NOFOLLOW")
 
-    # Write a sibling temporary file and publish only after all CSV rows are
-    # emitted. Disk-full/serialization failures must not leave a partial
-    # confidence.csv in the always-uploaded evidence directory.
-    temporary = None
+    directory = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary_name = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", newline="", encoding="utf-8", dir=output.parent,
-            prefix=f".{output.name}.", suffix=".tmp", delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
+        # A swapped directory between resolve() and open() must fail closed.
+        opened = os.fstat(directory)
+        expected = os.stat(parent_path)
+        if ((opened.st_dev, opened.st_ino) !=
+                (expected.st_dev, expected.st_ino)):
+            raise ValueError("confidence output directory changed during open")
+        try:
+            os.unlink(output.name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        validate_source(summary_csv, manifest, suite)
+        rows = confidence_rows(summary_csv, criterion)
+
+        # Stage and publish relative to the *same* open directory descriptor.
+        # A concurrent symlink replacement of the output parent cannot redirect
+        # either cleanup or final publication into the raw Criterion tree.
+        temporary_name = f".{output.name}.{secrets.token_hex(16)}.tmp"
+        descriptor = os.open(
+            temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600, dir_fd=directory,
+        )
+        with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=COLUMNS)
             writer.writeheader()
             writer.writerows(rows)
-        os.replace(temporary, output)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(
+            temporary_name, output.name,
+            src_dir_fd=directory, dst_dir_fd=directory,
+        )
+        temporary_name = None
+        return len(rows)
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return len(rows)
+        if temporary_name is not None:
+            os.unlink(temporary_name, dir_fd=directory)
+        os.close(directory)
 
 
 def main():
