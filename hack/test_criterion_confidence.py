@@ -3,6 +3,7 @@ import csv
 import importlib.util
 import json
 import os
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -351,6 +352,29 @@ class ConfidenceTests(unittest.TestCase):
         with (moved / "confidence.csv").open(newline="", encoding="utf-8") as stream:
             self.assertEqual(len(list(csv.DictReader(stream))), len(rows))
         self.assertEqual(list(moved.glob(".confidence.csv.*.tmp")), [])
+
+    def test_directory_fsync_failure_is_reported_after_publication(self):
+        manifest, _ = self.complete_smoke()
+        original_fsync = os.fsync
+        directory_sync_attempted = False
+
+        def reject_directory_sync(fd):
+            nonlocal directory_sync_attempted
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                directory_sync_attempted = True
+                raise OSError("injected directory sync failure")
+            return original_fsync(fd)
+
+        # File sync and rename do not establish durable directory publication.
+        # Do not report success if synchronizing the directory entry fails.
+        with patch.object(confidence.os, "fsync", side_effect=reject_directory_sync):
+            with self.assertRaisesRegex(OSError, "injected directory sync failure"):
+                confidence.write_confidence(
+                    self.summary, self.criterion, self.output, manifest, "smoke"
+                )
+        self.assertTrue(directory_sync_attempted)
+        self.assertTrue(self.output.exists())
+        self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
 
     def test_real_output_directory_swap_during_open_refuses_foreign_cleanup(self):
         manifest, _ = self.complete_smoke()
