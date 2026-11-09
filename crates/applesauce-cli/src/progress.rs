@@ -223,6 +223,15 @@ impl Task for ProgressWithTotal {
             self.total.println(message);
         }
     }
+
+    fn kernel_verified(&self, sha256: &str) {
+        if self.verbosity >= Verbosity::Verbose {
+            self.total.println(format!(
+                "{}: verified: kernel-read sha256={sha256}",
+                self.path.display()
+            ));
+        }
+    }
 }
 
 pub struct ProgressBarWriter<W> {
