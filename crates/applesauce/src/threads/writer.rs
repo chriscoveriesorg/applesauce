@@ -3,10 +3,12 @@ use crate::{compressed_payload_is_allowed, seq_queue, set_flags, times, xattr};
 use applesauce_core::compressor::Kind;
 use applesauce_core::decmpfs;
 use resource_fork::ResourceFork;
-use std::fs::{File, Metadata};
-use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
+use sha2::{Digest, Sha256};
+use std::fs::{File, Metadata, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::os::macos::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::os::unix::fs::MetadataExt as UnixMetadataExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -209,6 +211,7 @@ impl Handler {
             item.context.orig_metadata.st_flags() | libc::UF_COMPRESSED,
         )?;
 
+        let mut source_sha256 = None;
         if item.context.operation.verify {
             let _entered = tracing::info_span!("verify").entered();
 
@@ -220,12 +223,12 @@ impl Handler {
             orig_file.rewind()?;
             new_file.rewind()?;
 
-            ensure_identical_files(orig_file, new_file).map_err(|e| {
+            source_sha256 = Some(ensure_identical_files_with_sha256(orig_file, new_file).map_err(|e| {
                 io::Error::other(format!(
                     "verification failed: {e}, {} unchanged",
                     item.context.path.display()
                 ))
-            })?;
+            })?);
         }
 
         // A failed timestamp reset must leave the original uncompressed file
@@ -235,17 +238,40 @@ impl Handler {
         times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
         tmp_file.as_file().sync_all()?;
 
-        {
+        let published = {
             let _entered = tracing::debug_span!("rename tmp file").entered();
             ensure_source_path_matches_open_file(
                 &item.file,
                 &item.context.path,
                 &item.context.orig_metadata,
             )?;
-            tmp_file.persist(&item.context.path)?;
-        }
+            tmp_file.persist(&item.context.path)?
+        };
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
+        }
+        if let Some(expected_sha256) = source_sha256 {
+            // Verification through the published pathname exercises the kernel's
+            // decmpfs read path. The original uncompressed descriptor remains
+            // open so pread probes do not depend on the compressed decoder.
+            // A failure is reported, but cannot safely undo an atomic rename.
+            verify_published_kernel_reads(
+                item.file.as_ref(),
+                &published,
+                &item.context.path,
+                uncompressed_file_size,
+                expected_sha256,
+            ).map_err(|error| {
+                io::Error::other(format!(
+                    "post-publication kernel readback failed: {error}; compressed file remains at {}",
+                    item.context.path.display()
+                ))
+            })?;
+            let hex = expected_sha256
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            tracing::info!("verified: kernel-read sha256={hex}");
         }
         Ok(())
     }
@@ -455,13 +481,117 @@ pub(super) fn ensure_source_path_matches_open_file(
     Ok(())
 }
 
-fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) -> io::Result<()> {
+// Verify that the freshly reopened published inode yields the same logical
+// bytes as the old uncompressed source. Hash the complete transparent read,
+// then exercise independent random-offset pread windows. This is a warm-cache
+// verification and makes no claim of flushing macOS's file cache.
+fn verify_published_kernel_reads(
+    source: &File,
+    published: &File,
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: [u8; 32],
+) -> io::Result<()> {
+    let mut reopened = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let committed = published.metadata()?;
+    let observed = reopened.metadata()?;
+    if !observed.is_file()
+        || observed.dev() != committed.dev()
+        || observed.ino() != committed.ino()
+        || observed.len() != expected_size
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "published pathname no longer identifies the expected file",
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = reopened.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let actual_sha256: [u8; 32] = hasher.finalize().into();
+    if actual_sha256 != expected_sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel-visible whole-file SHA-256 differs from the source",
+        ));
+    }
+
+    let window_len = expected_size.min(4096) as usize;
+    if window_len != 0 {
+        let maximum_offset = expected_size - window_len as u64;
+        let mut offsets = vec![0, maximum_offset / 2, maximum_offset];
+        for chunk in expected_sha256.chunks_exact(8) {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(chunk);
+            offsets.push(u64::from_le_bytes(bytes) % (maximum_offset + 1));
+        }
+        offsets.sort_unstable();
+        offsets.dedup();
+        let mut expected = vec![0u8; window_len];
+        let mut observed = vec![0u8; window_len];
+        for offset in offsets {
+            read_exact_at(source, &mut expected, offset)?;
+            read_exact_at(&reopened, &mut observed, offset)?;
+            if expected != observed {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("kernel-visible random-offset read differs at {offset}"),
+                ));
+            }
+        }
+    }
+
+    let final_metadata = path.symlink_metadata()?;
+    if !final_metadata.is_file()
+        || final_metadata.dev() != committed.dev()
+        || final_metadata.ino() != committed.ino()
+        || final_metadata.len() != expected_size
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "published file changed during kernel readback",
+        ));
+    }
+    Ok(())
+}
+
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> io::Result<()> {
+    while !buffer.is_empty() {
+        let count = file.read_at(buffer, offset)?;
+        if count == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        offset += count as u64;
+        buffer = &mut buffer[count..];
+    }
+    Ok(())
+}
+
+fn ensure_identical_files<R1: BufRead, R2: BufRead>(lhs: R1, rhs: R2) -> io::Result<()> {
+    ensure_identical_files_with_sha256(lhs, rhs).map(|_| ())
+}
+
+fn ensure_identical_files_with_sha256<R1: BufRead, R2: BufRead>(
+    mut lhs: R1,
+    mut rhs: R2,
+) -> io::Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
     loop {
         let l = lhs.fill_buf()?;
         let r = rhs.fill_buf()?;
 
         if l.is_empty() && r.is_empty() {
-            return Ok(());
+            return Ok(hasher.finalize().into());
         }
         if l.is_empty() || r.is_empty() {
             return Err(io::Error::new(
@@ -480,6 +610,7 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
                 "Files are not identical",
             ));
         }
+        hasher.update(l);
 
         lhs.consume(min_len);
         rhs.consume(min_len)
@@ -490,7 +621,7 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
 mod tests {
     use super::{
         ensure_identical_files, ensure_source_path_matches_open_file, record_write_result,
-        require_restore_capacity, BelowMinimumRatio,
+        require_restore_capacity, verify_published_kernel_reads, BelowMinimumRatio,
     };
     use crate::progress::Task;
     use std::fs::{self, File};
@@ -528,6 +659,46 @@ mod tests {
             );
             assert!(!crate::xattr::is_present(file, decmpfs::XATTR_NAME).unwrap());
         }
+    }
+
+    #[test]
+    fn published_kernel_readback_detects_middle_chunk_corruption() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let published_path = dir.path().join("published");
+        let source_bytes: Vec<u8> = (0..(3 * 65_536 + 19))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        fs::write(&original, &source_bytes).unwrap();
+        fs::write(&published_path, &source_bytes).unwrap();
+        let source = File::open(&original).unwrap();
+        let published = File::open(&published_path).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&source_bytes).into();
+        verify_published_kernel_reads(
+            &source,
+            &published,
+            &published_path,
+            source_bytes.len() as u64,
+            digest,
+        )
+        .unwrap();
+
+        let mut corrupted = source_bytes;
+        corrupted[65_536 + 17] ^= 0xff;
+        fs::write(&published_path, &corrupted).unwrap();
+        assert_eq!(
+            verify_published_kernel_reads(
+                &source,
+                &published,
+                &published_path,
+                corrupted.len() as u64,
+                digest,
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidData
+        );
     }
 
     #[test]
