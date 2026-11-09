@@ -2,6 +2,16 @@ on: push
 
 name: Continuous integration
 
+# Each push supersedes the previous unmerged branch head. Cancel its macOS
+# matrix before queuing another three jobs on the constrained xcode-27 pool.
+# Every latest-head run still executes the complete existing test matrix.
+permissions:
+  contents: read
+
+concurrency:
+  group: applesauce-cargo-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     # Use the same provisioned macOS runner that executes the native codec probe.
@@ -23,6 +33,11 @@ jobs:
           toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
 
+      # Reject rustfmt-only mistakes before compiling and running four sets
+      # of native codec tests on every stable/beta/nightly matrix member.
+      - name: Test formatting
+        run: cargo fmt --all -- --check
+
       - name: Caching
         uses: Swatinem/rust-cache@v2
 
@@ -40,9 +55,6 @@ jobs:
         run: cargo test --workspace --features lzbitmap --all-targets
       - name: Run tests with only zlib
         run: cargo test --workspace --no-default-features --features zlib --all-targets
-
-      - name: Test formatting
-        run: cargo fmt --all -- --check
 
       - name: Check for clippy warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
