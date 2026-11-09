@@ -135,6 +135,49 @@ fn ascii_suffix(name: &OsStr, suffix: &[u8]) -> bool {
         .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
+/// Prune only a subtree that cannot contain any eligible profile file.
+/// Parents of Library/Caches and .app/Contents/Resources must remain open
+/// so a broad audit root can discover eligible descendants. Excluded code
+/// containers are recorded without opening or enumerating their children.
+fn profile_directory_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
+    let parts: Vec<&OsStr> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    match profile {
+        Profile::Caches => parts
+            .iter()
+            .any(|part| code_container(part))
+            .then_some("cache_contains_code_bundle"),
+        Profile::Bundles => {
+            let app_index = parts.iter().position(|part| ascii_suffix(part, b".app"))?;
+            let within_app = &parts[app_index + 1..];
+            if within_app.is_empty() {
+                return None;
+            }
+            if within_app[0] != OsStr::new("Contents") {
+                return Some("bundle_non_resource");
+            }
+            if within_app.len() == 1 {
+                return None;
+            }
+            if within_app[1] != OsStr::new("Resources") {
+                return Some("bundle_non_resource");
+            }
+            (within_app.len() > 2
+                && within_app[2..].iter().any(|part| {
+                    code_container(part)
+                        || part.as_bytes().eq_ignore_ascii_case(b"_CodeSignature")
+                        || part.as_bytes().eq_ignore_ascii_case(b"_MASReceipt")
+                }))
+            .then_some("bundle_nested_code_or_signature")
+        }
+    }
+}
+
 /// Detect executable payloads which lack a recognisable filename extension or
 /// executable permission bits. Read just four bytes from the already-opened
 /// descriptor without changing its cursor; no decoder or writer is invoked.
@@ -440,6 +483,22 @@ impl Analyzer {
     }
 
     fn visit_directory(&mut self, path: &Path, metadata: &Metadata) -> Accumulator {
+        if let Some(reason) = self
+            .profile
+            .and_then(|profile| profile_directory_exclusion(profile, path))
+        {
+            // Record the excluded subtree at its root. Traversing it can
+            // expose signed code, hang on large plugins, or fail on a private
+            // signature directory unrelated to eligible resources.
+            self.paths
+                .push(skipped(path, "directory", self.kind, reason, Some(metadata)));
+            self.directories.push(DirectoryReport {
+                path: EncodedPath::new(path),
+                totals: Accumulator::empty().totals(),
+                error: None,
+            });
+            return Accumulator::empty();
+        }
         let directory = match open_directory(path, metadata) {
             Ok(directory) => directory,
             Err(error) => {
@@ -1277,6 +1336,8 @@ mod tests {
         let extensionless_executable = app.join("Contents/Resources/run-helper");
         let hidden_macho = app.join("Contents/Resources/library-data");
         let hidden_script = app.join("Contents/Resources/embedded-config");
+        let nested_signature = app.join("Contents/Resources/Assets/_CodeSignature");
+        let nested_signature_file = nested_signature.join("CodeResources");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         fs::create_dir_all(signature.parent().unwrap()).unwrap();
         fs::create_dir_all(resource.parent().unwrap()).unwrap();
@@ -1286,25 +1347,48 @@ mod tests {
         fs::write(&extensionless_executable, b"test executable with no suffix").unwrap();
         fs::write(&hidden_macho, [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]).unwrap();
         fs::write(&hidden_script, b"#!/bin/sh\necho example").unwrap();
+        fs::create_dir_all(&nested_signature).unwrap();
+        fs::write(&nested_signature_file, b"nested signature").unwrap();
         // Excluded sealed code may not be readable by the current user.
         // The audit must skip it by pathname policy without ever opening it.
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o000)).unwrap();
         fs::set_permissions(&signature, fs::Permissions::from_mode(0o000)).unwrap();
         fs::set_permissions(&extensionless_executable, fs::Permissions::from_mode(0o111)).unwrap();
+        let protected_directories = [
+            executable.parent().unwrap().to_owned(),
+            signature.parent().unwrap().to_owned(),
+            nested_signature.clone(),
+        ];
+        // Under the old walk, these inaccessible directories made a safe
+        // audit incomplete even though every descendant was excluded.
+        for directory in &protected_directories {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o000)).unwrap();
+        }
 
         let audit = analyze_with_profile(&[app], Kind::Zlib, 0.95, 5, Some(Profile::Bundles));
         assert_eq!(audit.profile, Some("bundles"));
         assert!(audit.complete);
-        for protected in [executable, signature] {
+        for (directory, reason) in [
+            (&protected_directories[0], "bundle_non_resource"),
+            (&protected_directories[1], "bundle_non_resource"),
+            (&protected_directories[2], "bundle_nested_code_or_signature"),
+        ] {
             let entry = audit
                 .paths
                 .iter()
-                .find(|entry| entry.path.display == protected.to_string_lossy())
+                .find(|entry| entry.path.display == directory.to_string_lossy())
                 .unwrap();
-            assert_eq!(entry.reason, "bundle_non_resource");
+            assert_eq!(entry.entry_type, "directory");
+            assert_eq!(entry.reason, reason);
             assert!(!entry.would_compress);
             assert_eq!(entry.raw_compressed_bytes, None);
+        }
+        for protected in [&executable, &signature, &nested_signature_file] {
+            assert!(
+                !audit.paths.iter().any(|entry| entry.path.display == protected.to_string_lossy()),
+                "excluded directory was traversed: {protected:?}"
+            );
         }
         let executable_entry = audit
             .paths
@@ -1323,7 +1407,35 @@ mod tests {
             assert_eq!(entry.reason, "bundle_executable_resource");
             assert_eq!(entry.raw_compressed_bytes, None);
         }
-        assert_eq!(audit.paths.len(), 6);
+        assert_eq!(audit.paths.len(), 7);
+        // Restore directory search permissions for tempfile cleanup.
+        for directory in &protected_directories {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    #[test]
+    fn cache_audit_prunes_unreadable_nested_code_containers() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let caches = temp.path().join("Library/Caches");
+        let code = caches.join("Plugin.FRAMEWORK");
+        let hidden = code.join("Contents/Resources/unreadable");
+        let ordinary = caches.join("data.txt");
+        fs::create_dir_all(hidden.parent().unwrap()).unwrap();
+        fs::write(&hidden, b"excluded signed content").unwrap();
+        fs::write(&ordinary, b"regular cache data").unwrap();
+        fs::set_permissions(&code, fs::Permissions::from_mode(0o000)).unwrap();
+        let audit = analyze_with_profile(
+            &[caches], Kind::Zlib, 0.95, 5, Some(Profile::Caches),
+        );
+        assert!(audit.complete);
+        let excluded = audit.paths.iter().find(|entry| entry.path.display == code.to_string_lossy()).unwrap();
+        assert_eq!(excluded.entry_type, "directory");
+        assert_eq!(excluded.reason, "cache_contains_code_bundle");
+        assert!(!audit.paths.iter().any(|entry| entry.path.display == hidden.to_string_lossy()));
+        assert!(audit.paths.iter().any(|entry| entry.path.display == ordinary.to_string_lossy()));
+        fs::set_permissions(&code, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]
