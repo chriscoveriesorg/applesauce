@@ -275,6 +275,13 @@ def write_confidence(summary_csv: Path, criterion: Path, output: Path,
             src_dir_fd=directory, dst_dir_fd=directory,
         )
         temporary_name = None
+        # Descriptor-relative publication cannot be redirected, but a renamed
+        # parent can make the caller-visible output path point elsewhere.
+        # Never report successful evidence publication in that situation.
+        published_parent = os.stat(output.parent, follow_symlinks=False)
+        if ((published_parent.st_dev, published_parent.st_ino) !=
+                (opened.st_dev, opened.st_ino)):
+            raise ValueError("confidence output directory changed during publication")
         return len(rows)
     finally:
         if temporary_name is not None:
