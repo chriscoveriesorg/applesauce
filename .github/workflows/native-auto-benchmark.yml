@@ -9,6 +9,8 @@ on:
     paths:
       - crates/applesauce/src/threads/reader.rs
       - crates/applesauce-cli/tests/native_auto.rs
+      - hack/native-auto-evidence.py
+      - hack/test_native_auto_evidence.py
       - .github/workflows/native-auto-benchmark.yml
   workflow_dispatch:
 
@@ -22,16 +24,25 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
+      - name: Validate benchmark evidence parser
+        run: python3 -m unittest -v hack/test_native_auto_evidence.py
       - name: Measure actual APFS allocation and wall time on disposable files
         shell: bash
         run: |
           set -o pipefail
           cargo test -p applesauce-cli --release --test native_auto native_auto_real_allocation_benchmark -- --ignored --nocapture 2>&1 | tee native-auto-benchmark.log
+      - name: Validate and summarize measured APFS evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 hack/native-auto-evidence.py native-auto-benchmark.log | tee native-auto-summary.md >> "$GITHUB_STEP_SUMMARY"
       - name: Archive measured evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-auto-benchmark
-          path: native-auto-benchmark.log
+          path: |
+            native-auto-benchmark.log
+            native-auto-summary.md
           retention-days: 7
           if-no-files-found: error
