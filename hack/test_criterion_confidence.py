@@ -159,7 +159,14 @@ class ConfidenceTests(unittest.TestCase):
 
     def test_invalid_utf8_estimates_fail_closed_without_traceback(self):
         manifest, _ = self.complete_smoke()
-        self.estimate_path("encode").write_bytes(b"\xff\xfe\x80")
+        # The smoke suite includes chat-jsonl and entropy. The single-row
+        # mixed-jsonl fixture from setUp is not among the exported cases.
+        estimate = (
+            self.criterion / "apple-buffer_smoke_65536_chat-jsonl_whole"
+            / "lzraven-reused-scratch" / "encode" / "new" / "estimates.json"
+        )
+        self.assertTrue(estimate.is_file())
+        estimate.write_bytes(b"\xff\xfe\x80")
         self.output.write_text("stale evidence", encoding="utf-8")
         command = [
             sys.executable, str(MODULE), str(manifest), str(self.summary),
