@@ -228,20 +228,24 @@ impl Handler {
             })?;
         }
 
-        let new_file = {
+        // A failed timestamp reset must leave the original uncompressed file
+        // intact, just like a failed content verification. Flush the fully
+        // prepared compressed staging inode before the atomic replacement.
+        // Restoration follows the same publication order below.
+        times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
+        tmp_file.as_file().sync_all()?;
+
+        {
             let _entered = tracing::debug_span!("rename tmp file").entered();
             ensure_source_path_matches_open_file(
                 &item.file,
                 &item.context.path,
                 &item.context.orig_metadata,
             )?;
-            tmp_file.persist(&item.context.path)?
-        };
+            tmp_file.persist(&item.context.path)?;
+        }
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
-        }
-        if let Err(e) = times::reset_times(&new_file, &item.context.orig_times) {
-            tracing::error!("Unable to reset times: {e}");
         }
         Ok(())
     }
