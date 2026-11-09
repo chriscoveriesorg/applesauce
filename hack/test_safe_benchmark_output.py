@@ -79,6 +79,32 @@ class SafeOutputTests(unittest.TestCase):
             self.assertEqual(list(csv.DictReader(stream)), self.rows)
         self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
 
+    def test_real_directory_swap_during_open_is_rejected(self):
+        moved = self.root / "evidence-moved"
+        incoming = self.root / "replacement-directory"
+        incoming.mkdir()
+        preserved = incoming / self.output.name
+        preserved.write_text("do not remove", encoding="utf-8")
+        self.output.write_text("old derived evidence", encoding="utf-8")
+        original_open = os.open
+        swapped = False
+
+        def switch(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if not swapped and Path(path) == self.evidence:
+                swapped = True
+                self.evidence.rename(moved)
+                incoming.rename(self.evidence)
+            return original_open(path, flags, *args, **kwargs)
+
+        with patch("safe_benchmark_output.os.open", side_effect=switch):
+            with self.assertRaisesRegex(ValueError, "changed during open"):
+                with SafeCsvOutput(self.output, (self.input,)):
+                    pass
+        self.assertTrue(swapped)
+        self.assertEqual((self.evidence / self.output.name).read_text(), "do not remove")
+        self.assertEqual((moved / self.output.name).read_text(), "old derived evidence")
+
     def test_directory_swap_before_open_cannot_redirect_cleanup(self):
         moved = self.root / "evidence-moved"
         protected = self.root / "protected"
