@@ -35,10 +35,12 @@ class SafeCsvOutput:
         required = ("O_DIRECTORY", "O_NOFOLLOW")
         if not all(hasattr(os, flag) for flag in required):
             raise OSError("safe benchmark output needs O_DIRECTORY and O_NOFOLLOW")
+        # Capture the expected inode *before* open, including races where
+        # an attacker swaps a real directory for another real directory.
+        known = os.stat(parent)
         fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             opened = os.fstat(fd)
-            known = os.stat(parent)
             if (opened.st_dev, opened.st_ino) != (known.st_dev, known.st_ino):
                 raise ValueError("benchmark output directory changed during open")
             # The output may be a hardlink. Verify the actual directory entry
