@@ -372,7 +372,7 @@ fn same_source_snapshot(expected: &Metadata, actual: &Metadata) -> bool {
         && UnixMetadataExt::ctime_nsec(expected) == UnixMetadataExt::ctime_nsec(actual)
 }
 
-fn ensure_source_path_matches_open_file(
+pub(super) fn ensure_source_path_matches_open_file(
     source: &File,
     path: &Path,
     scanned: &Metadata,
