@@ -260,9 +260,15 @@ impl Handler {
             item.context.orig_metadata.st_flags() & !libc::UF_COMPRESSED,
         )?;
 
-        // Commit only a fully written, verified and durable staging file.
-        // A successful rename of unwritten page-cache data is insufficient
-        // protection against loss during a filesystem or power failure.
+        // Restore the scanned timestamps on staging, before touching the
+        // original pathname. A denied metadata update must fail the restore
+        // while the original compressed inode is still intact. Resetting
+        // timestamps after persist could instead report success with a
+        // partially restored metadata state.
+        times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
+
+        // Commit only a fully written, verified and durable staging file,
+        // including its restored timestamps.
         tmp_file.as_file().sync_all()?;
 
         ensure_source_path_matches_open_file(
@@ -270,12 +276,9 @@ impl Handler {
             &item.context.path,
             &item.context.orig_metadata,
         )?;
-        let new_file = tmp_file.persist(&item.context.path)?;
+        tmp_file.persist(&item.context.path)?;
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
-        }
-        if let Err(e) = times::reset_times(&new_file, &item.context.orig_times) {
-            tracing::error!("Unable to reset times: {e}");
         }
         Ok(())
     }
