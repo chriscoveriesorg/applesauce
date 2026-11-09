@@ -104,6 +104,18 @@ class CodecCompareTests(unittest.TestCase):
         self.assertEqual(self.input.read_bytes(), original)
         self.assertEqual(self.output.read_bytes(), original)
 
+    def test_output_symlink_to_confidence_is_refused(self):
+        # A symlink output must not replace or remove the input evidence.
+        original = self.input.read_bytes()
+        self.output.symlink_to(self.input)
+        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
+                   str(self.output)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("must differ", result.stderr)
+        self.assertEqual(self.input.read_bytes(), original)
+        self.assertTrue(self.output.is_symlink())
+
     def test_failed_rerun_does_not_retain_stale_comparison(self):
         self.output.write_text("stale prior-run evidence", encoding="utf-8")
         self.save(self.rows[:-1])
