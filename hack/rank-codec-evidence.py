@@ -133,20 +133,9 @@ def markdown(rows):
 
 
 def write_csv(rows, destination: Path):
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", newline="", encoding="utf-8", dir=destination.parent,
-            prefix=f".{destination.name}.", suffix=".tmp", delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            writer = csv.DictWriter(stream, fieldnames=FIELDS)
-            writer.writeheader()
-            writer.writerows(rows)
-        os.replace(temporary, destination)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    """Publish already validated ranking rows through a pinned directory."""
+    with compare.safe_output.SafeCsvOutput(destination) as publisher:
+        publisher.write_rows(rows, FIELDS)
 
 
 def main():
@@ -155,13 +144,9 @@ def main():
         return 2
     try:
         source, suite, dest = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-        if dest.resolve() == source.resolve() or (
-            dest.exists() and os.path.samefile(dest, source)
-        ):
-            raise ValueError("ranking output must differ from source evidence")
-        dest.unlink(missing_ok=True)
-        rows = rank_cases(source, suite)
-        write_csv(rows, dest)
+        with compare.safe_output.SafeCsvOutput(dest, (source,)) as publisher:
+            rows = rank_cases(source, suite)
+            publisher.write_rows(rows, FIELDS)
     except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
         print(f"invalid five-codec ranking evidence: {exc}", file=sys.stderr)
         return 1
