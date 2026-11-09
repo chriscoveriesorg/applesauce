@@ -259,7 +259,7 @@ def main():
             Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]),
             Path(sys.argv[1]), sys.argv[5],
         )
-    except (OSError, ValueError, KeyError, TypeError, OverflowError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, UnicodeError, json.JSONDecodeError) as exc:
         print(f"invalid or incomplete Criterion confidence evidence: {exc}", file=sys.stderr)
         return 1
     print(f"Validated Criterion 95% median intervals for {count} codec cases")
