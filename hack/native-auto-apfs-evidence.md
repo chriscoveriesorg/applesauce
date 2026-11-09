@@ -1,6 +1,6 @@
 # Native per-file auto codec: disposable APFS measurements
 
-Measured on 9 November 2026 UTC (8 November in the GitHub run) using the
+Measured on 9 November 2026 Sydney time (8 November UTC in the GitHub run) using the
 [`xcode-27` macOS runner](https://github.com/chriscoveriesorg/applesauce/actions/runs/42536645581)
 at source commit [`23f20c2`](https://github.com/chriscoveriesorg/applesauce/commit/23f20c2cb28b19d1c359fe24616918e16716f9f5).
 The follow-up commit `9ce192b` only updated the README. The measurement
