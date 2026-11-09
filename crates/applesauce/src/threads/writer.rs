@@ -510,7 +510,9 @@ mod tests {
         for storage in [Storage::ResourceFork, Storage::Xattr] {
             let staged = tempfile::NamedTempFile::new().unwrap();
             let file = staged.as_file();
-            ResourceFork::new(file).write_all(b"generated fork bytes").unwrap();
+            ResourceFork::new(file)
+                .write_all(b"generated fork bytes")
+                .unwrap();
             assert!(crate::xattr::is_present(file, XATTR_NAME).unwrap());
 
             super::remove_consumed_compression_metadata(

@@ -470,7 +470,12 @@ mod tests {
         for manual in [false, true] {
             for root in [&symlink_root, &directory_link, &hardlink_root] {
                 let reporter = RootErrorProgress::default();
-                compressor.recursive_decompress(iter::once(root.as_path()), manual, &reporter, true);
+                compressor.recursive_decompress(
+                    iter::once(root.as_path()),
+                    manual,
+                    &reporter,
+                    true,
+                );
                 let errors = reporter.errors.lock().unwrap();
                 assert_eq!(errors.len(), 1, "missing error for {}", root.display());
                 assert_eq!(&errors[0].0, root);
@@ -482,10 +487,24 @@ mod tests {
                 );
             }
         }
-        assert_eq!(fs::read(&original).unwrap(), b"unchanged generated test data");
-        assert!(symlink_root.symlink_metadata().unwrap().file_type().is_symlink());
-        assert!(directory_link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(fs::read(&hardlink_root).unwrap(), fs::read(&original).unwrap());
+        assert_eq!(
+            fs::read(&original).unwrap(),
+            b"unchanged generated test data"
+        );
+        assert!(symlink_root
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(directory_link
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read(&hardlink_root).unwrap(),
+            fs::read(&original).unwrap()
+        );
     }
 
     #[derive(Debug)]
