@@ -437,6 +437,18 @@ fn main() {
             // each failing file's temporary output was discarded.
             let errors = progress_bars.errors();
             if !errors.is_empty() {
+                // indicatif may hide progress messages when stderr is piped.
+                // Preserve actionable diagnostics for scripts and automation,
+                // while bounding output on large recursive restore failures.
+                for (path, message) in errors.iter().take(20) {
+                    eprintln!("applesauce: {}: {message}", path.display());
+                }
+                if errors.len() > 20 {
+                    eprintln!(
+                        "applesauce: {} additional decompression error(s)",
+                        errors.len() - 20
+                    );
+                }
                 eprintln!("applesauce: {} decompression error(s)", errors.len());
                 std::process::exit(1);
             }
