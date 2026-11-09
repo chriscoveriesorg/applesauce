@@ -153,7 +153,7 @@ The options are as follows:
 - `compress`: Compresses the specified file/directory using one of three compression algorithms (LZFSE, LZVN, or ZLIB).
 - `decompress`: Restores files through a temporary file and verifies every restored byte against the kernel-visible compressed source before replacing it. The original file is preserved if content verification, timestamp restoration or staging-file sync fails. Restored timestamps are set on the temporary file before atomic publication. Verification is enabled by default, including with `--manual`.
 
-For recovery on a macOS release whose kernel cannot decode the source, `decompress --manual --no-verify PATH` explicitly disables the independent kernel comparison. This is an unsafe recovery option; inspect and back up the source before using it. The decoder's block-length and format checks still apply. `--verify` remains accepted as an explicit affirmation of the default and conflicts with `--no-verify`.
+For recovery on a macOS release whose kernel cannot decode the source, `decompress --manual --no-verify PATH` explicitly disables the independent kernel comparison. This is an unsafe recovery option and always prints a warning on standard error; inspect and back up the source before using it. The decoder's block-length and format checks still apply. `--verify` remains accepted as an explicit affirmation of the default and conflicts with `--no-verify`.
 
 - `info`: Prints information about the specified compressed file/directory, including the compression ratio and
   compression algorithm used.
