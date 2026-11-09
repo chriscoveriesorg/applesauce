@@ -69,6 +69,16 @@ def parse_log(content: str) -> dict[tuple[str, str, int], tuple[int, int, int]]:
             allocated = {rows[fixture, codec, n][1] for n in REPEATS}
             if len(allocated) != 1:
                 raise ValueError(f"unstable allocation within {fixture}/{codec}")
+        # The acceptance criterion is based on *actual APFS allocation*, not
+        # compressed sample sizes. A valid matrix that loses to every fixed
+        # codec must fail CI rather than produce a misleading green artifact.
+        best_fixed = min(rows[fixture, codec, 0][1] for codec in CODECS if codec != "auto")
+        auto_allocated = rows[fixture, "auto", 0][1]
+        if auto_allocated > best_fixed:
+            raise ValueError(
+                f"auto allocation regression for {fixture}: "
+                f"{auto_allocated} > best fixed {best_fixed}"
+            )
     return rows
 
 
@@ -101,9 +111,10 @@ def report(rows: dict[tuple[str, str, int], tuple[int, int, int]]) -> str:
         "",
         "Allocation is the actual on-disk allocation reported by the macOS host. "
         "Times include CLI startup, sample selection, compression, mandatory "
-        "verification and process overhead. Four samples cannot establish "
-        "statistical significance. The auto heuristic may perform differently "
-        "on other file contents and machines.",
+        "verification and process overhead. Auto allocation met or beat "
+        "the smallest fixed-codec allocation on every reported fixture. "
+        "Four samples cannot establish statistical significance. The auto "
+        "heuristic may perform differently on other contents and machines.",
     ])
     return "\n".join(lines) + "\n"
 
