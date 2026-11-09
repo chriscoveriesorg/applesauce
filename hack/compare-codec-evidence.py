@@ -265,7 +265,7 @@ def main():
         output.unlink(missing_ok=True)
         result = compare(source, suite)
         emit(result, output)
-    except (OSError, ValueError, KeyError, OverflowError, csv.Error) as exc:
+    except (OSError, ValueError, KeyError, OverflowError, UnicodeError, csv.Error) as exc:
         print(f"incomplete Raven/Mesh comparison: {exc}", file=sys.stderr)
         return 1
     print(markdown(result))
