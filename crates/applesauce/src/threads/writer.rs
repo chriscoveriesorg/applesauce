@@ -527,6 +527,31 @@ fn verify_published_kernel_reads(
         ));
     }
 
+    verify_random_offset_windows(source, &reopened, expected_size, expected_sha256)?;
+
+    let final_metadata = path.symlink_metadata()?;
+    if !final_metadata.is_file()
+        || final_metadata.dev() != committed.dev()
+        || final_metadata.ino() != committed.ino()
+        || final_metadata.len() != expected_size
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "published file changed during kernel readback",
+        ));
+    }
+    Ok(())
+}
+
+// Probe boundaries, midpoint and four reproducible content-derived offsets.
+// Kept separate from the full hash so corruption tests can prove that the
+// pread path itself detects an altered middle window.
+fn verify_random_offset_windows(
+    source: &File,
+    reopened: &File,
+    expected_size: u64,
+    expected_sha256: [u8; 32],
+) -> io::Result<()> {
     let window_len = expected_size.min(4096) as usize;
     if window_len != 0 {
         let maximum_offset = expected_size - window_len as u64;
@@ -552,17 +577,6 @@ fn verify_published_kernel_reads(
         }
     }
 
-    let final_metadata = path.symlink_metadata()?;
-    if !final_metadata.is_file()
-        || final_metadata.dev() != committed.dev()
-        || final_metadata.ino() != committed.ino()
-        || final_metadata.len() != expected_size
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "published file changed during kernel readback",
-        ));
-    }
     Ok(())
 }
 
@@ -622,7 +636,8 @@ fn ensure_identical_files_with_sha256<R1: BufRead, R2: BufRead>(
 mod tests {
     use super::{
         ensure_identical_files, ensure_source_path_matches_open_file, record_write_result,
-        require_restore_capacity, verify_published_kernel_reads, BelowMinimumRatio,
+        require_restore_capacity, verify_published_kernel_reads, verify_random_offset_windows,
+        BelowMinimumRatio,
     };
     use crate::progress::Task;
     use std::fs::{self, File};
@@ -698,6 +713,29 @@ mod tests {
             )
             .unwrap_err()
             .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn random_offset_probes_reject_corruption_near_middle() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let corrupted = dir.path().join("corrupted");
+        let source_bytes = vec![0x5a; 3 * 65_536 + 19];
+        let digest: [u8; 32] = Sha256::digest(&source_bytes).into();
+        let mut changed = source_bytes.clone();
+        let maximum_offset = (source_bytes.len() - 4096) as u64;
+        changed[(maximum_offset / 2 + 17) as usize] ^= 0xff;
+        fs::write(&original, &source_bytes).unwrap();
+        fs::write(&corrupted, &changed).unwrap();
+        let original = File::open(&original).unwrap();
+        let corrupted = File::open(&corrupted).unwrap();
+        assert_eq!(
+            verify_random_offset_windows(&original, &corrupted, changed.len() as u64, digest)
+                .unwrap_err()
+                .kind(),
             ErrorKind::InvalidData
         );
     }
