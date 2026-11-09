@@ -208,7 +208,7 @@ impl BackgroundThreads {
             let metadata = match path.symlink_metadata() {
                 Ok(metadata) => metadata,
                 Err(e) => {
-                    progress.file_skipped(&path, SkipReason::ReadError(e));
+                    report_scan_read_error(progress, mode, &path, e);
                     return;
                 }
             };
@@ -256,7 +256,7 @@ impl BackgroundThreads {
             let saved_times = match times::save_times(path.as_path()) {
                 Ok(saved_times) => saved_times,
                 Err(e) => {
-                    progress.file_skipped(&path, SkipReason::ReadError(e));
+                    report_scan_read_error(progress, mode, &path, e);
                     stats.add_end_file(&metadata, &file_info);
                     return;
                 }
@@ -282,6 +282,22 @@ impl BackgroundThreads {
         finished_stats_rx
             .recv()
             .expect("OperationContext will send stats on drop of all arcs")
+    }
+}
+
+// A failed metadata or timestamp read while scanning an input for restoration
+// must propagate to the caller. Reporting it only as a skip would allow
+// decompress to exit successfully even though a requested file was untouched.
+fn report_scan_read_error<P: Progress>(
+    progress: &P,
+    mode: Mode,
+    path: &Path,
+    error: std::io::Error,
+) {
+    if mode.is_compressing() {
+        progress.file_skipped(path, SkipReason::ReadError(error));
+    } else {
+        progress.error(path, &format!("decompression scan failed: {error}"));
     }
 }
 
@@ -356,5 +372,78 @@ impl fmt::Debug for Context {
             .field("orig_size", &self.orig_metadata.len())
             .field("operation", &self.operation)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod scan_failure_tests {
+    use super::{report_scan_read_error, Mode};
+    use crate::progress::{Progress, SkipReason, Task};
+    use std::io;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingProgress {
+        errors: Mutex<Vec<String>>,
+        skips: Mutex<Vec<String>>,
+    }
+
+    struct NoTask;
+
+    impl Task for NoTask {
+        fn increment(&self, _amount: u64) {}
+        fn error(&self, _message: &str) {}
+    }
+
+    impl Progress for RecordingProgress {
+        type Task = NoTask;
+
+        fn error(&self, _path: &Path, message: &str) {
+            self.errors.lock().unwrap().push(message.to_owned());
+        }
+
+        fn file_skipped(&self, _path: &Path, reason: SkipReason) {
+            self.skips.lock().unwrap().push(reason.to_string());
+        }
+
+        fn file_task(&self, _path: &Path, _size: u64) -> Self::Task {
+            NoTask
+        }
+    }
+
+    #[test]
+    fn decompression_scan_read_errors_fail_instead_of_succeeding_as_skips() {
+        let path = Path::new("disappeared-during-scan");
+        let recorder = RecordingProgress::default();
+        for mode in [Mode::DecompressManually, Mode::DecompressByReading] {
+            report_scan_read_error(
+                &recorder,
+                mode,
+                path,
+                io::Error::new(io::ErrorKind::NotFound, "file vanished"),
+            );
+        }
+        assert_eq!(recorder.errors.lock().unwrap().len(), 2);
+        assert!(recorder
+            .errors
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|message| message.contains("file vanished")));
+        assert!(recorder.skips.lock().unwrap().is_empty());
+
+        report_scan_read_error(
+            &recorder,
+            Mode::Compress {
+                kind: applesauce_core::compressor::Kind::default(),
+                minimum_compression_ratio: 0.95,
+                level: 5,
+            },
+            path,
+            io::Error::new(io::ErrorKind::NotFound, "file vanished"),
+        );
+        assert_eq!(recorder.errors.lock().unwrap().len(), 2);
+        assert_eq!(recorder.skips.lock().unwrap().len(), 1);
     }
 }
