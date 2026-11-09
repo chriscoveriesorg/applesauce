@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn restore_metadata_cleanup_drops_only_consumed_resource_forks() {
         use applesauce_core::compressor::Kind;
-        use applesauce_core::decmpfs::{CompressionType, Storage};
+        use applesauce_core::decmpfs::{self, CompressionType, Storage};
         use resource_fork::{ResourceFork, XATTR_NAME};
         use std::io::Write;
 
