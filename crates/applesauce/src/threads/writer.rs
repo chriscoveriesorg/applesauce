@@ -720,6 +720,59 @@ mod tests {
     }
 
     #[test]
+    fn published_kernel_readback_rejects_swapped_path_even_when_bytes_match() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("source");
+        let published_path = dir.path().join("published");
+        let moved_path = dir.path().join("original-published-inode");
+        let bytes = vec![0x5a; 3 * 4096 + 17];
+        fs::write(&original_path, &bytes).unwrap();
+        fs::write(&published_path, &bytes).unwrap();
+        let source = File::open(&original_path).unwrap();
+        let published = File::open(&published_path).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+
+        verify_published_kernel_reads(
+            &source,
+            &published,
+            &published_path,
+            bytes.len() as u64,
+            digest,
+        )
+        .unwrap();
+
+        // The substituted file has identical content and logical length, so
+        // the opened descriptor's inode identity must reject it independently
+        // of byte hashing.
+        fs::rename(&published_path, &moved_path).unwrap();
+        fs::write(&published_path, &bytes).unwrap();
+        let error = verify_published_kernel_reads(
+            &source,
+            &published,
+            &published_path,
+            bytes.len() as u64,
+            digest,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+
+        // A symlink to the original compressed inode must also fail rather
+        // than following a pathname substituted after publication.
+        fs::remove_file(&published_path).unwrap();
+        symlink(&moved_path, &published_path).unwrap();
+        assert!(verify_published_kernel_reads(
+            &source,
+            &published,
+            &published_path,
+            bytes.len() as u64,
+            digest,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn random_offset_probes_reject_corruption_near_middle() {
         use sha2::{Digest, Sha256};
         let dir = tempfile::tempdir().unwrap();
