@@ -121,6 +121,10 @@ def compare(confidence_csv: Path, suite: str):
         # A complete matrix must not silently accept invalid payload evidence
         # for baseline codecs merely because only Raven/Mesh are compared.
         positive_number(row["encoded_over_input_ratio"], "benchmark payload ratio")
+        # Baselines are required evidence too: reject corrupted timing and
+        # throughput fields even when they are not used for pairwise speedups.
+        for operation in ("encode", "decode"):
+            timings(row, operation)
         if row["codec"] not in ("lzraven", "lzmesh"):
             continue
         group = tuple(row[field] for field in GROUP)
