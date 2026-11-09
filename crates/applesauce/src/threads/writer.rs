@@ -271,6 +271,7 @@ impl Handler {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
+            item.context.progress.kernel_verified(&hex);
             tracing::info!("verified: kernel-read sha256={hex}");
         }
         Ok(())
