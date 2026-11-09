@@ -87,6 +87,9 @@ class SafeCsvOutput:
                 src_dir_fd=self.directory, dst_dir_fd=self.directory,
             )
             temporary = None
+            # Persist the directory-entry replacement as well as the CSV bytes.
+            # A file fsync alone does not guarantee the rename survives a crash.
+            os.fsync(self.directory)
             # A renamed destination is still safe, but must not be certified
             # as published at the path the caller supplied.
             visible = os.stat(self.destination.parent, follow_symlinks=False)
