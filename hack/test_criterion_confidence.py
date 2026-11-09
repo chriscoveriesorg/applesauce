@@ -195,6 +195,7 @@ class ConfidenceTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("invalid or incomplete Criterion confidence evidence:", result.stderr)
+        self.assertIn("field larger than field limit", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.output.exists())
 
