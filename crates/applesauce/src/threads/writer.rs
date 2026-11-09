@@ -43,6 +43,40 @@ fn record_write_result(progress: &dyn crate::progress::Task, path: &Path, result
     }
 }
 
+// Restoring an APFS-compressed source expands its logical bytes into a
+// temporary file on the same volume. Check available blocks before copying
+// payloads so a clearly impossible restore fails while the source is intact.
+// This is an advisory snapshot: other writers can consume space afterwards,
+// and write_all/sync_all must still propagate ENOSPC.
+fn require_restore_capacity(logical_size: u64, blocks_available: u64, block_size: u64) -> io::Result<()> {
+    let bytes_available = u128::from(blocks_available) * u128::from(block_size);
+    if u128::from(logical_size) > bytes_available {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            format!(
+                "insufficient free space for restoration: need {logical_size} bytes, have {bytes_available} bytes"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_restore_capacity(stage: &File, logical_size: u64) -> io::Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: stage is an open descriptor and stat points to writable storage
+    // for the complete statfs structure. Its contents are read only on success.
+    if unsafe { libc::fstatfs(stage.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstatfs succeeded and initialized the entire result structure.
+    let stat = unsafe { stat.assume_init() };
+    require_restore_capacity(
+        logical_size,
+        stat.f_bavail as u64,
+        stat.f_bsize as u64,
+    )
+}
+
 pub(super) type Sender = crossbeam_channel::Sender<WorkItem>;
 
 pub(super) struct Chunk {
@@ -212,6 +246,9 @@ impl Handler {
         )?
         .ok_or_else(|| io::Error::other("file is not compressed"))?;
         let expected_size = decmpfs::Value::from_data(&decmpfs_data)?.uncompressed_size;
+        // Refuse a clearly over-capacity restore before writing staged bytes.
+        // The staged destination is on the same volume as the source.
+        preflight_restore_capacity(tmp_file.as_file(), expected_size)?;
         let mut written_size = 0u64;
 
         item.blocks.try_for_each(|chunk| {
@@ -431,7 +468,7 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
 mod tests {
     use super::{
         ensure_identical_files, ensure_source_path_matches_open_file, record_write_result,
-        BelowMinimumRatio,
+        BelowMinimumRatio, require_restore_capacity,
     };
     use crate::progress::Task;
     use std::fs::{self, File};
@@ -585,6 +622,22 @@ mod tests {
                 error_kind
             );
         }
+    }
+
+    #[test]
+    fn restoration_space_preflight_rejects_overcommit_without_overflow() {
+        // Exact fit succeeds, but even a one-byte deficit must refuse.
+        assert!(require_restore_capacity(8192, 2, 4096).is_ok());
+        let err = require_restore_capacity(8193, 2, 4096).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::StorageFull);
+        assert!(err.to_string().contains("need 8193 bytes"));
+        assert!(require_restore_capacity(1, 0, 4096).is_err());
+        assert!(require_restore_capacity(0, 0, 4096).is_ok());
+
+        // Multiply in u128, allowing realistic large logical files and free
+        // block counts without an overflowing u64 intermediate.
+        assert!(require_restore_capacity(u64::MAX, u64::MAX, 4096).is_ok());
+        assert!(require_restore_capacity(u64::MAX, 1, 4096).is_err());
     }
 
     #[derive(Default)]
