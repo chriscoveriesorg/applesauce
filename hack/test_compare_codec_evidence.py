@@ -168,7 +168,7 @@ class CodecCompareTests(unittest.TestCase):
     def test_invalid_utf8_confidence_fails_closed_without_traceback(self):
         # Evidence can be a bounded regular file but still contain invalid
         # UTF-8; it must not produce a traceback or retain stale output.
-        self.input.write_bytes(b"\\xff\\xfe\\x80")
+        self.input.write_bytes(b"\xff\xfe\x80")
         self.output.write_text("stale evidence", encoding="utf-8")
         command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
                    str(self.output)]
