@@ -118,6 +118,9 @@ def compare(confidence_csv: Path, suite: str):
         actual.add(key)
         if row["input_sha256"] != matrix.GOLDEN_SHA256[size][row["workload"]]:
             raise ValueError(f"wrong golden fixture digest in row {number}")
+        # A complete matrix must not silently accept invalid payload evidence
+        # for baseline codecs merely because only Raven/Mesh are compared.
+        positive_number(row["encoded_over_input_ratio"], "benchmark payload ratio")
         if row["codec"] not in ("lzraven", "lzmesh"):
             continue
         group = tuple(row[field] for field in GROUP)
