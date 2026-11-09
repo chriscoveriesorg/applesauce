@@ -29,6 +29,7 @@ def load_module(filename, name):
 
 
 confidence = load_module("criterion-confidence.py", "applesauce_confidence")
+safe_output = load_module("safe_benchmark_output.py", "applesauce_safe_benchmark_output")
 matrix = confidence._matrix
 
 GROUP = ("suite", "workload", "input_bytes", "input_sha256", "layout", "scratch_mode")
@@ -234,20 +235,9 @@ def markdown(rows):
 
 
 def emit(rows, destination: Path):
-    temp = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", newline="", encoding="utf-8", dir=destination.parent,
-            prefix=f".{destination.name}.", suffix=".tmp", delete=False,
-        ) as handle:
-            temp = Path(handle.name)
-            writer = csv.DictWriter(handle, fieldnames=OUT_FIELDS)
-            writer.writeheader()
-            writer.writerows(rows)
-        os.replace(temp, destination)
-    finally:
-        if temp is not None:
-            temp.unlink(missing_ok=True)
+    """Publish an already validated comparison through a pinned directory."""
+    with safe_output.SafeCsvOutput(destination) as publisher:
+        publisher.write_rows(rows, OUT_FIELDS)
 
 
 def main():
@@ -256,15 +246,11 @@ def main():
         return 2
     try:
         source, suite, output = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-        if output.resolve() == source.resolve() or (
-            output.exists() and os.path.samefile(output, source)
-        ):
-            raise ValueError("comparison output must differ from confidence evidence")
-        # The workflow retains artifacts even after a failed job. Avoid
-        # presenting a previous run's paired comparison as current evidence.
-        output.unlink(missing_ok=True)
-        result = compare(source, suite)
-        emit(result, output)
+        # Stale evidence is removed before validation, using one pinned
+        # directory for cleanup and atomic publication.
+        with safe_output.SafeCsvOutput(output, (source,)) as publisher:
+            result = compare(source, suite)
+            publisher.write_rows(result, OUT_FIELDS)
     except (OSError, ValueError, KeyError, OverflowError, UnicodeError, csv.Error) as exc:
         print(f"incomplete Raven/Mesh comparison: {exc}", file=sys.stderr)
         return 1
