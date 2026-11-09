@@ -43,6 +43,23 @@ fn record_write_result(progress: &dyn crate::progress::Task, path: &Path, result
     }
 }
 
+// A decmpfs resource-fork payload is compressed storage, not a user-visible
+// resource fork to copy to the restored file. Inline compression may coexist
+// with a legitimate resource fork, which must survive the restoration.
+fn remove_consumed_compression_metadata(
+    staged: &File,
+    compression_type: decmpfs::CompressionType,
+) -> io::Result<()> {
+    xattr::remove_if_present(staged, decmpfs::XATTR_NAME)?;
+    if matches!(
+        compression_type.compression_storage(),
+        Some((_, decmpfs::Storage::ResourceFork))
+    ) {
+        xattr::remove_if_present(staged, resource_fork::XATTR_NAME)?;
+    }
+    Ok(())
+}
+
 // Restoring an APFS-compressed source expands its logical bytes into a
 // temporary file on the same volume. Check available blocks before copying
 // payloads so a clearly impossible restore fails while the source is intact.
@@ -232,20 +249,21 @@ impl Handler {
     fn write_uncompressed_file(&mut self, item: WorkItem) -> io::Result<()> {
         let mut tmp_file = tmp_file_for(&item)?;
         copy_xattrs(&item.file, tmp_file.as_file())?;
-        // COPYFILE_XATTR may preserve com.apple.decmpfs from the compressed
-        // source. A restored plain file must not publish stale compression
-        // metadata, even when the compressed flag is subsequently cleared.
-        // Operate only on the temporary destination; fail closed if removal
-        // is denied, and tolerate filesystems that did not copy the attribute.
-        xattr::remove_if_present(tmp_file.as_file(), decmpfs::XATTR_NAME)?;
-
         let decmpfs_data = xattr::read(
             item.file.as_ref(),
             decmpfs::XATTR_NAME,
             decmpfs::MAX_XATTR_SIZE,
         )?
         .ok_or_else(|| io::Error::other("file is not compressed"))?;
-        let expected_size = decmpfs::Value::from_data(&decmpfs_data)?.uncompressed_size;
+        let header = decmpfs::Value::from_data(&decmpfs_data)?;
+
+        // COPYFILE_XATTR can copy both the decmpfs descriptor and the
+        // compressed payload's resource fork. Neither belongs in a restored
+        // plain file. Preserve an unrelated resource fork for inline-xattr
+        // compression: only resource-fork-backed types consume that fork.
+        // Fail before publication when clearing either attribute is denied.
+        remove_consumed_compression_metadata(tmp_file.as_file(), header.compression_type)?;
+        let expected_size = header.uncompressed_size;
         // Refuse a clearly over-capacity restore before writing staged bytes.
         // The staged destination is on the same volume as the source.
         preflight_restore_capacity(tmp_file.as_file(), expected_size)?;
@@ -477,6 +495,34 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn restore_metadata_cleanup_drops_only_consumed_resource_forks() {
+        use applesauce_core::compressor::Kind;
+        use applesauce_core::decmpfs::{CompressionType, Storage};
+        use resource_fork::{ResourceFork, XATTR_NAME};
+        use std::io::Write;
+
+        for storage in [Storage::ResourceFork, Storage::Xattr] {
+            let staged = tempfile::NamedTempFile::new().unwrap();
+            let file = staged.as_file();
+            ResourceFork::new(file).write_all(b"generated fork bytes").unwrap();
+            assert!(crate::xattr::is_present(file, XATTR_NAME).unwrap());
+
+            super::remove_consumed_compression_metadata(
+                file,
+                CompressionType::new(Kind::Zlib, storage),
+            )
+            .unwrap();
+
+            assert_eq!(
+                crate::xattr::is_present(file, XATTR_NAME).unwrap(),
+                storage == Storage::Xattr,
+                "inline compression must preserve an unrelated resource fork"
+            );
+            assert!(!crate::xattr::is_present(file, decmpfs::XATTR_NAME).unwrap());
+        }
+    }
 
     #[test]
     fn publication_guard_rejects_replaced_path_and_symlink() {
