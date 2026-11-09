@@ -91,8 +91,12 @@ gh release download applesauce-cli/v0.5.31 \
 python3 hack/audit-cli-release.py /tmp/applesauce-v0.5.31-assets
 \`\`\`
 
-The auditor is deliberately pinned to v0.5.31 and its qualified SHA. Failure
-to verify either architecture or either remote assertion fails the audit.
+The auditor is deliberately pinned to v0.5.31 and its qualified SHA. It also
+queries the live GitHub tag ref and requires a **lightweight tag pointing
+directly to the exact qualified commit**. A retargeted, annotated, or missing
+tag fails before any downloaded binary is certified. This detects tag drift
+that an earlier build attestation alone cannot detect. Failure to verify
+either architecture or either remote assertion fails the audit.
 Synthetic tests are available via
 \`python3 -m unittest discover -s hack -p test_audit_cli_release.py -v\`
 and run in fork-release-safety CI. Those synthetic tests mock \`gh\`; only the
