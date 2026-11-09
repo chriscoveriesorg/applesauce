@@ -660,8 +660,8 @@ fn ensure_identical_files_with_sha256<R1: BufRead, R2: BufRead>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_identical_files, ensure_source_path_matches_open_file, record_write_result,
-        ensure_published_snapshot, require_restore_capacity, verify_published_kernel_reads,
+        ensure_identical_files, ensure_published_snapshot, ensure_source_path_matches_open_file,
+        record_write_result, require_restore_capacity, verify_published_kernel_reads,
         verify_random_offset_windows, BelowMinimumRatio,
     };
     use crate::progress::Task;
@@ -1016,6 +1016,29 @@ mod tests {
         let original = BufReader::with_capacity(7, Cursor::new(expected.as_slice()));
         let restored = BufReader::with_capacity(4096, Cursor::new(expected.as_slice()));
         ensure_identical_files(original, restored).unwrap();
+    }
+
+    #[test]
+    fn verified_sha256_covers_each_byte_once_with_asymmetric_read_buffers() {
+        use sha2::{Digest, Sha256};
+
+        // Read buffers with incompatible capacities exercise partial consume
+        // boundaries. A byte-for-byte comparison alone cannot prove the
+        // digest used for staged and post-publication readback is accurate.
+        let bytes = generated_bytes();
+        let expected: [u8; 32] = Sha256::digest(&bytes).into();
+        for (source_capacity, compressed_capacity) in
+            [(1, 4096), (7, 65_536), (8192, 3), (1024, 1024)]
+        {
+            let source = BufReader::with_capacity(source_capacity, Cursor::new(bytes.as_slice()));
+            let staged =
+                BufReader::with_capacity(compressed_capacity, Cursor::new(bytes.as_slice()));
+            assert_eq!(
+                super::ensure_identical_files_with_sha256(source, staged).unwrap(),
+                expected,
+                "digest differed at buffer capacities {source_capacity}/{compressed_capacity}"
+            );
+        }
     }
 
     #[test]
