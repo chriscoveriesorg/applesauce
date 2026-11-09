@@ -698,6 +698,48 @@ mod tests {
     }
 
     #[test]
+    fn staged_second_open_gate_rejects_corruption_without_touching_original() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("source");
+        let clear: Vec<u8> = (0..(3 * 65_536 + 19))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        fs::write(&original_path, &clear).unwrap();
+
+        // A NamedTempFile has a separate pathname and descriptor, as used
+        // by the writer before its persist call.
+        let staged = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        fs::write(staged.path(), &clear).unwrap();
+        let source = File::open(&original_path).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&clear).into();
+
+        verify_published_kernel_reads(
+            &source,
+            staged.as_file(),
+            staged.path(),
+            clear.len() as u64,
+            digest,
+        )
+        .unwrap();
+
+        let mut corrupted = clear.clone();
+        corrupted[65_536 + 17] ^= 0xff;
+        fs::write(staged.path(), corrupted).unwrap();
+        let error = verify_published_kernel_reads(
+            &source,
+            staged.as_file(),
+            staged.path(),
+            clear.len() as u64,
+            digest,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(fs::read(&original_path).unwrap(), clear);
+    }
+
+    #[test]
     fn published_kernel_readback_detects_middle_chunk_corruption() {
         use sha2::{Digest, Sha256};
         let dir = tempfile::tempdir().unwrap();
