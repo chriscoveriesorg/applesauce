@@ -415,8 +415,10 @@ fn main() {
             let verify = decompress.verification_enabled();
             let Decompress { paths, manual, .. } = decompress;
             if !verify {
-                tracing::warn!(
-                    "Decompression verification disabled: restored bytes cannot be independently compared to kernel-visible source bytes"
+                // Default tracing filters may suppress warnings. Unsafe manual
+                // recovery must always warn visibly before touching any path.
+                eprintln!(
+                    "applesauce: WARNING: --manual --no-verify disables independent byte verification; back up the compressed source before proceeding"
                 );
             }
             let mut compressor = applesauce::FileCompressor::new();
