@@ -410,7 +410,9 @@ class ConfidenceTests(unittest.TestCase):
                     self.summary, self.criterion, self.output, manifest, "smoke"
                 )
         self.assertTrue(directory_sync_attempted)
-        self.assertTrue(self.output.exists())
+        # The workflow uploads artifacts on failure; a failed durability
+        # barrier must not leave a seemingly valid confidence.csv behind.
+        self.assertFalse(self.output.exists())
         self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
 
     def test_real_output_directory_swap_during_open_refuses_foreign_cleanup(self):
