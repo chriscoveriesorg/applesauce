@@ -75,8 +75,9 @@ class SafeOutputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "changed during publication"):
                 publisher.write_rows(self.rows, ("codec", "value"))
         self.assertEqual(protected_output.read_text(), "never overwrite")
-        with (moved / self.output.name).open(newline="", encoding="utf-8") as stream:
-            self.assertEqual(list(csv.DictReader(stream)), self.rows)
+        # A failed publication must not leave a plausible CSV in the
+        # displaced directory, even though the protected path is untouched.
+        self.assertFalse((moved / self.output.name).exists())
         self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
 
     def test_real_directory_swap_during_open_is_rejected(self):
