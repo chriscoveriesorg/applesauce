@@ -253,9 +253,9 @@ impl Resetter {
         })
     }
 
-    /// Capture directory times from the same descriptor we later restore.
-    /// Capturing by pathname and reopening separately permits a swapped
-    /// directory to receive another directory's saved timestamps.
+    /// Capture timestamps and inode identity from one descriptor. Restore
+    /// opens the path again with O_NOFOLLOW and checks the same inode before
+    /// applying the saved times, without retaining thousands of open handles.
     pub(crate) fn capture_with_failure_log(
         path: &Path,
         failures: ResetFailureLog,
@@ -334,6 +334,17 @@ mod resetter_tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, dir.path());
         assert!(recorded[0].1.contains("synthetic timestamp refusal"));
+    }
+
+    #[test]
+    fn directory_reset_succeeds_on_unchanged_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
+        let resetter = Resetter::capture_with_failure_log(dir.path(), Arc::clone(&failures))
+            .unwrap();
+        resetter.activate();
+        drop(resetter);
+        assert!(failures.lock().unwrap().is_empty());
     }
 
     #[test]
