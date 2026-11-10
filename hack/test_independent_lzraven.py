@@ -7,9 +7,10 @@ import hashlib
 from pathlib import Path
 import struct
 import tempfile
+import time
 import unittest
 
-from verify_independent_lzmesh import InvalidArchive, verify
+from verify_independent_lzmesh import InvalidArchive, decode_bounded, verify
 
 
 class IndependentRavenProofTests(unittest.TestCase):
@@ -84,6 +85,32 @@ class IndependentRavenProofTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(InvalidArchive, "independent decoder failed"):
             self.proof()
+
+    def test_timeout_reaps_raven_decoder_descendants(self):
+        # The direct decoder may hang after starting a separate helper.
+        # Both must be reaped instead of surviving the proof timeout.
+        started = self.root / "raven-helper-started"
+        leaked = self.root / "orphaned-raven-helper"
+        child = (
+            "import pathlib,time; time.sleep(1.3); "
+            f"pathlib.Path({str(leaked)!r}).write_text('leaked')"
+        )
+        self.set_decoder(
+            "import pathlib,subprocess,sys,time\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL)\n"
+            f"pathlib.Path({str(started)!r}).write_text('started')\n"
+            "time.sleep(10)\n"
+        )
+        with self.assertRaisesRegex(InvalidArchive, "timed out"):
+            decode_bounded(
+                self.decoder, self.clear, len(self.clear), 0, "lzraven",
+                timeout_seconds=0.8,
+            )
+        self.assertTrue(started.exists(), "the descendant must be started")
+        time.sleep(1.6)
+        self.assertFalse(leaked.exists(), "timed-out decoder helper escaped cleanup")
 
     def test_rejects_missing_output_file(self):
         self.set_decoder("import sys\nsys.exit(0)\n")
