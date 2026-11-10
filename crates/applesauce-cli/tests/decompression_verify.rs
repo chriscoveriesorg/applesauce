@@ -343,9 +343,7 @@ fn mixed_directory_restore_skips_uncompressed_ineligible_files() {
         .open(&fork_path)
         .unwrap();
     let fork_bytes = b"uncompressed resource fork fixture";
-    ResourceFork::new(&fork_file)
-        .write_all(fork_bytes)
-        .unwrap();
+    ResourceFork::new(&fork_file).write_all(fork_bytes).unwrap();
     drop(fork_file);
 
     let compressed = Command::new(env!("CARGO_BIN_EXE_applesauce"))
@@ -358,7 +356,11 @@ fn mixed_directory_restore_skips_uncompressed_ineligible_files() {
         "fixture compression failed: {}",
         String::from_utf8_lossy(&compressed.stderr)
     );
-    assert!(applesauce::info::get(&compressed_path).unwrap().is_compressed);
+    assert!(
+        applesauce::info::get(&compressed_path)
+            .unwrap()
+            .is_compressed
+    );
 
     let restored = Command::new(env!("CARGO_BIN_EXE_applesauce"))
         .arg("decompress")
@@ -372,7 +374,11 @@ fn mixed_directory_restore_skips_uncompressed_ineligible_files() {
     );
 
     assert_eq!(fs::read(&compressed_path).unwrap(), original);
-    assert!(!applesauce::info::get(&compressed_path).unwrap().is_compressed);
+    assert!(
+        !applesauce::info::get(&compressed_path)
+            .unwrap()
+            .is_compressed
+    );
     assert_eq!(fs::metadata(&empty_path).unwrap().len(), 0);
     assert_eq!(fs::metadata(&huge_path).unwrap().len(), huge_size);
     assert_eq!(
