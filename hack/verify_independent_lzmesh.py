@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import signal
 import stat
 import struct
 import subprocess
@@ -70,7 +71,7 @@ def limit_decoder_output(clear_len):
     resource.setrlimit(resource.RLIMIT_FSIZE, (clear_len, clear_len))
 
 
-def decode_bounded(decoder, payload, clear_len, index, codec):
+def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds=30):
     # A pipe captured by subprocess.run can grow without bound if a decoder
     # malfunctions. A regular temporary file with RLIMIT_FSIZE bounds output.
     # Mesh's independent CLI accepts stdin/stdout. Raven's independent C11
@@ -99,23 +100,38 @@ def decode_bounded(decoder, payload, clear_len, index, codec):
             decoder_env["DECODE_SIZE"] = str(clear_len)
 
         with tempfile.TemporaryFile() as output:
+            # Run each external decoder in its own process group. subprocess.run()
+            # kills only the direct child on timeout, leaving any forked helpers
+            # behind on CI. A session boundary lets us reap the whole group.
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE if stdin_payload is not None else subprocess.DEVNULL,
+                stdout=output if codec == "lzmesh" else subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=decoder_env,
+                preexec_fn=lambda: limit_decoder_output(clear_len),
+                start_new_session=True,
+            )
             try:
-                process = subprocess.run(
-                    command,
-                    input=stdin_payload,
-                    stdout=output if codec == "lzmesh" else subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=30,
-                    check=False,
-                    env=decoder_env,
-                    preexec_fn=lambda: limit_decoder_output(clear_len),
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise InvalidArchive(f"independent decoder timed out on chunk {index}") from exc
-            if process.returncode != 0:
-                raise InvalidArchive(
-                    f"independent decoder failed on chunk {index} (exit {process.returncode})"
-                )
+                try:
+                    process.communicate(input=stdin_payload, timeout=timeout_seconds)
+                except subprocess.TimeoutExpired as exc:
+                    raise InvalidArchive(
+                        f"independent decoder timed out on chunk {index}"
+                    ) from exc
+                if process.returncode != 0:
+                    raise InvalidArchive(
+                        f"independent decoder failed on chunk {index} (exit {process.returncode})"
+                    )
+            finally:
+                # Also clean up descendants when their parent exits successfully
+                # or fails. This is best-effort process-group cleanup, not an
+                # isolation boundary against a malicious self-daemonizing tool.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
             if codec == "lzraven":
                 try:
                     with open_regular(output_path) as result:
