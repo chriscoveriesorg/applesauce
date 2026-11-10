@@ -34,6 +34,20 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def open_regular(path):
+    # O_NONBLOCK prevents an input FIFO with no writer from hanging on open.
+    # The descriptor type check also closes the pathname-swap window.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise InvalidArchive(f"proof input must be a regular file: {path.name}")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def identity(info):
     """Detect inode/path substitution, including same-size rewrites with restored mtime."""
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
@@ -96,13 +110,9 @@ def verify(archive, original, decoder, *, max_logical_bytes=MAX_LOGICAL):
     if max_logical_bytes <= 0:
         raise InvalidArchive("maximum logical fixture size must be positive")
 
-    with archive.open("rb") as reader, original.open("rb") as source:
+    with open_regular(archive) as reader, open_regular(original) as source:
         archive_snapshot = identity(os.fstat(reader.fileno()))
         original_snapshot = identity(os.fstat(source.fileno()))
-        if not stat.S_ISREG(os.fstat(reader.fileno()).st_mode) or not stat.S_ISREG(
-            os.fstat(source.fileno()).st_mode
-        ):
-            raise InvalidArchive("archive and original must be regular files")
         require_unchanged(archive, archive_snapshot, reader)
         require_unchanged(original, original_snapshot, source)
         file_size = os.fstat(reader.fileno()).st_size
