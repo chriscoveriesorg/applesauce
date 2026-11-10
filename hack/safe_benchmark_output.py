@@ -30,7 +30,13 @@ class SafeCsvOutput:
         for source in self.sources:
             if output.resolve(strict=False) == source.resolve(strict=False):
                 raise ValueError("benchmark output must differ from source evidence")
-            if output.exists() and os.path.samefile(output, source):
+            # A missing source must not prevent stale derived-evidence cleanup.
+            # The subsequent manifest/summary validation will still fail.
+            try:
+                aliased = output.exists() and os.path.samefile(output, source)
+            except FileNotFoundError:
+                aliased = False
+            if aliased:
                 raise ValueError("benchmark output must differ from source evidence")
         required = ("O_DIRECTORY", "O_NOFOLLOW")
         if not all(hasattr(os, flag) for flag in required):
