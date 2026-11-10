@@ -6,7 +6,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/independent-lzraven-proof.yml'
-      - 'hack/verify_independent_lzmesh.py'\n      - 'hack/test_independent_lzraven.py'
+      - 'hack/verify_independent_lzmesh.py'
       - 'hack/test_independent_lzraven.py'
       - 'crates/applesauce-core/src/cold_archive.rs'
       - 'crates/applesauce-cli/src/archive.rs'
@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked -p applesauce-cli
-          mkdir -p "$RUNNER_TEMP/mesh-proof"
+          mkdir -p "$RUNNER_TEMP/raven-proof"
           {
             sw_vers
             uname -srm
@@ -56,8 +56,8 @@ jobs:
             rustc --version
             git rev-parse HEAD
             git -C "$RUNNER_TEMP/lzraven" rev-parse HEAD
-          } > "$RUNNER_TEMP/mesh-proof/environment.txt"
-          python3 - "$RUNNER_TEMP/mesh-proof" <<'PY'
+          } > "$RUNNER_TEMP/raven-proof/environment.txt"
+          python3 - "$RUNNER_TEMP/raven-proof" <<'PY'
           from pathlib import Path
           import hashlib
           import sys
@@ -76,7 +76,7 @@ jobs:
                       )[:length]
                   (root / f"{family}-{length}.bin").write_bytes(data)
           PY
-          for input in "$RUNNER_TEMP"/mesh-proof/*.bin; do
+          for input in "$RUNNER_TEMP"/raven-proof/*.bin; do
             archive="${input%.bin}.ascf"
             report="${input%.bin}.json"
             target/debug/applesauce archive create "$input" "$archive" \
@@ -91,12 +91,12 @@ jobs:
           with open(sys.argv[1], encoding="utf-8") as stream:
               report = json.load(stream)
           assert report["status"] == "independent_lzraven_buffer_decode_verified"
-          assert report["codec_id"] == "0xE05"
+          assert report["codec_id"] == "0xD05"
           assert report["chunk_count"] >= 1
           print(report["logical_size_bytes"], report["chunk_count"], report["archive_sha256"])
           PY
           done
-          python3 - "$RUNNER_TEMP/mesh-proof" <<'PY'
+          python3 - "$RUNNER_TEMP/raven-proof" <<'PY'
           import json
           from pathlib import Path
           import sys
@@ -117,7 +117,7 @@ jobs:
         with:
           name: independent-lzraven-buffer-proof
           path: |
-            ${{ runner.temp }}/mesh-proof/*.json
-            ${{ runner.temp }}/mesh-proof/environment.txt
+            ${{ runner.temp }}/raven-proof/*.json
+            ${{ runner.temp }}/raven-proof/environment.txt
           if-no-files-found: warn
           retention-days: 14
