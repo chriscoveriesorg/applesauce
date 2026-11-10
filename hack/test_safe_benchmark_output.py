@@ -21,6 +21,24 @@ class SafeOutputTests(unittest.TestCase):
         self.output = self.evidence / "comparison.csv"
         self.rows = [{"codec": "lzraven", "value": "123"}]
 
+    def test_shared_writable_directory_refuses_stale_cleanup(self):
+        # Other users could substitute an entry between inode check/unlink.
+        # Refuse publication rather than delete evidence in shared storage.
+        self.output.write_text("old derived evidence", encoding="utf-8")
+        original_mode = self.evidence.stat().st_mode & 0o777
+        try:
+            for unsafe_mode in (0o770, 0o777):
+                self.evidence.chmod(unsafe_mode)
+                with self.assertRaisesRegex(ValueError, "group/world writable"):
+                    with SafeCsvOutput(self.output, (self.input,)):
+                        pass
+                self.assertEqual(
+                    self.output.read_text(encoding="utf-8"), "old derived evidence"
+                )
+        finally:
+            self.evidence.chmod(original_mode)
+        self.assertEqual(self.input.read_text(), "source evidence")
+
     def test_atomic_csv_replaces_stale_evidence(self):
         self.output.write_text("OLD", encoding="utf-8")
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
