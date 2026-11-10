@@ -5,10 +5,12 @@ Real acceptance requires an independently compiled decoder on macOS 27+.
 """
 
 import hashlib
+import os
 from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 from verify_independent_lzmesh import InvalidArchive, verify
 
@@ -93,6 +95,42 @@ class IndependentMeshProofTests(unittest.TestCase):
             verify(self.archive, self.original, self.decoder, max_logical_bytes=10)
 
 
+
+    def test_mesh_decoder_allocation_uses_validated_clear_length(self):
+        # port_cli's default output allocation follows the compressed framing.
+        # A validated ASCF chunk length must override hostile inherited caps.
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\n"
+            "import os,sys\\n"
+            "payload = sys.stdin.buffer.read()\\n"
+            "if os.environ.get('DECODE_SIZE') != str(len(payload)):\\n"
+            "    sys.exit(42)\\n"
+            "sys.stdout.buffer.write(payload)\\n",
+            encoding="utf-8",
+        )
+        for inherited in ("0", "1", "999999999999999"):
+            with self.subTest(inherited=inherited):
+                with mock.patch.dict(os.environ, {"DECODE_SIZE": inherited}):
+                    report = verify(self.archive, self.original, self.decoder)
+                self.assertEqual(report["status"], "independent_lzmesh_buffer_decode_verified")
+
+    def test_mesh_decoder_receives_clear_len_not_stored_len(self):
+        # Compressed bytes need not have the same length as the plaintext.
+        data = bytearray(self.archive.read_bytes())
+        data.extend(b"PAD")
+        struct.pack_into("<I", data, 72, len(self.plaintext) + 3)
+        self.archive.write_bytes(data)
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\n"
+            "import os,sys\\n"
+            "payload = sys.stdin.buffer.read()\\n"
+            "if os.environ.get('DECODE_SIZE') != str(len(payload) - 3):\\n"
+            "    sys.exit(43)\\n"
+            "sys.stdout.buffer.write(payload[:-3])\\n",
+            encoding="utf-8",
+        )
+        report = verify(self.archive, self.original, self.decoder)
+        self.assertEqual(report["chunk_count"], 1)
 
     def test_decoder_output_is_bounded_before_comparison(self):
         self.decoder.write_text(
