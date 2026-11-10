@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -220,12 +220,13 @@ pub fn reset_times<F: GetSet + fmt::Debug + ?Sized>(f: &F, saved: &Saved) -> io:
 pub(crate) type ResetFailureLog = Arc<Mutex<Vec<(PathBuf, String)>>>;
 
 /// Restore the original directory timestamps when the last writer finishes.
-/// Keep an open, no-follow directory descriptor so a rename or symlink swap
-/// cannot redirect the metadata update to a different directory.
+/// Open a no-follow directory descriptor for both capture and restoration.
+/// Bound open descriptors by closing each immediately after its operation.
 #[derive(Debug)]
 pub struct Resetter {
     dir_path: PathBuf,
-    dir_file: File,
+    dir_dev: u64,
+    dir_ino: u64,
     saved_times: Saved,
     activated: AtomicBool,
     failures: Option<ResetFailureLog>,
@@ -241,9 +242,11 @@ impl Resetter {
 
     pub fn new(path: &Path, saved_times: Saved) -> io::Result<Self> {
         let dir_file = Self::open_directory(path)?;
+        let metadata = dir_file.metadata()?;
         Ok(Self {
             dir_path: path.to_path_buf(),
-            dir_file,
+            dir_dev: metadata.dev(),
+            dir_ino: metadata.ino(),
             saved_times,
             activated: AtomicBool::new(false),
             failures: None,
@@ -259,9 +262,11 @@ impl Resetter {
     ) -> io::Result<Self> {
         let dir_file = Self::open_directory(path)?;
         let saved_times = save_times(&dir_file)?;
+        let metadata = dir_file.metadata()?;
         Ok(Self {
             dir_path: path.to_path_buf(),
-            dir_file,
+            dir_dev: metadata.dev(),
+            dir_ino: metadata.ino(),
             saved_times,
             activated: AtomicBool::new(false),
             failures: Some(failures),
@@ -271,6 +276,18 @@ impl Resetter {
     pub fn activate(&self) {
         self.activated
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn reset_if_same_directory(&self) -> io::Result<()> {
+        let dir_file = Self::open_directory(&self.dir_path)?;
+        let metadata = dir_file.metadata()?;
+        if metadata.dev() != self.dir_dev || metadata.ino() != self.dir_ino {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "parent directory changed before timestamp restoration",
+            ));
+        }
+        reset_times(&dir_file, &self.saved_times)
     }
 
     fn record_reset_result(&self, result: io::Result<()>) {
@@ -290,7 +307,7 @@ impl Resetter {
 impl Drop for Resetter {
     fn drop(&mut self) {
         if self.activated.load(std::sync::atomic::Ordering::Relaxed) {
-            self.record_reset_result(reset_times(&self.dir_file, &self.saved_times));
+            self.record_reset_result(self.reset_if_same_directory());
         }
     }
 }
@@ -332,17 +349,22 @@ mod resetter_tests {
     }
 
     #[test]
-    fn directory_capture_retains_original_inode_after_path_replacement() {
+    fn directory_reset_refuses_replaced_parent_path() {
         let dir = tempfile::tempdir().unwrap();
         let selected = dir.path().join("selected");
         let moved = dir.path().join("moved");
         fs::create_dir(&selected).unwrap();
         let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
-        let resetter = Resetter::capture_with_failure_log(&selected, failures).unwrap();
+        let resetter = Resetter::capture_with_failure_log(&selected, Arc::clone(&failures))
+            .unwrap();
         let selected_ino = fs::metadata(&selected).unwrap().ino();
         fs::rename(&selected, &moved).unwrap();
         fs::create_dir(&selected).unwrap();
-        assert_eq!(resetter.dir_file.metadata().unwrap().ino(), selected_ino);
         assert_ne!(fs::metadata(&selected).unwrap().ino(), selected_ino);
+        resetter.activate();
+        drop(resetter);
+        let errors = failures.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].1.contains("parent directory changed"));
     }
 }
