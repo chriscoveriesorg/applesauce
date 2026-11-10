@@ -62,3 +62,28 @@ a destination with insufficient capacity may silently truncate; this proof
 requires byte-for-byte equality and exact output length before accepting any
 decode. A successful Apple-buffer-to-C decoder comparison does not show that
 macOS registers an LZMESH `decmpfs` handler or that FSKit is mountable.
+
+## Corruption rejection and evidence preservation
+
+For an independently decoded Apple-generated fixture, also run the negative
+qualification suite from the repository root:
+
+```sh
+python3 hack/prove_independent_corruptions.py \
+  --archive generated.ascf --original generated.bin \
+  --decoder /path/to/lzmesh/port_cli --codec lzmesh \
+  > independent-lzmesh-negative.json
+```
+
+The suite first requires the untouched archive to decode successfully. It then
+changes compressed payload bytes at two positions, flips the first chunk
+digest, truncates the last byte and appends a byte. All five changes must be
+rejected. Payload-only changes must reach the independent decoder, preventing
+a parser-only failure from being mistaken for codec conformance testing.
+
+The macOS proof workflow runs those five cases on both generated content
+families at the 131,103-byte multi-chunk boundary (10 negative cases per codec).
+It attaches the generated `.ascf` archives, original `.bin` files, positive
+JSON reports, negative JSON reports and environment provenance for 30 days.
+These artifacts allow reviewers to replay and hash exact Apple payloads;
+independent source review and durable committed vectors remain separate gates.
