@@ -114,6 +114,38 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_cleanup_unlink_failure_preserves_original_sync_error(self):
+        # Cleanup is best-effort: a second filesystem failure must not hide
+        # the publication durability error or affect original evidence.
+        real_fsync = os.fsync
+        real_unlink = os.unlink
+        triggered = False
+        cleanup_attempted = False
+
+        def fail_publication_sync(fd):
+            nonlocal triggered
+            if not triggered and self.output.exists():
+                triggered = True
+                raise OSError("injected publication sync failure")
+            return real_fsync(fd)
+
+        def fail_cleanup_unlink(path, *args, **kwargs):
+            nonlocal cleanup_attempted
+            if path == self.output.name and kwargs.get("dir_fd") is not None:
+                cleanup_attempted = True
+                raise PermissionError("injected cleanup refusal")
+            return real_unlink(path, *args, **kwargs)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fsync", side_effect=fail_publication_sync):
+                with patch("safe_benchmark_output.os.unlink", side_effect=fail_cleanup_unlink):
+                    with self.assertRaisesRegex(OSError, "injected publication sync failure"):
+                        publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(triggered)
+        self.assertTrue(cleanup_attempted)
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+
     def test_real_directory_swap_during_open_is_rejected(self):
         moved = self.root / "evidence-moved"
         incoming = self.root / "replacement-directory"
