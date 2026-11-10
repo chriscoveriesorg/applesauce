@@ -46,7 +46,11 @@ Raven/Mesh write gate (#88) and FSKit physical acceptance (#86) remain closed.
    identities are checked after decoding; the executable SHA-256 is checked
    before and after execution. Final-component symlinks are rejected for
    archive, original and decoder, including substitutions to a symlink that
-   targets the same inode already open for reading. The tool bounds logical fixture size to 64 MiB
+   targets the same inode already open for reading. Each decoder executes in
+   a new POSIX session: the proof tool terminates its process group on
+   success, failure and timeout, including ordinary forked helpers. A process
+   that deliberately creates a separate session can escape this cleanup;
+   audit decoder sources and run them on disposable hosts. The tool bounds logical fixture size to 64 MiB
    by default; larger tests require an explicit override.
 
 4. Have an independent reviewer inspect the pinned decoder, commands, evidence,
