@@ -60,6 +60,10 @@ class SafeCsvOutput:
                 os.unlink(output.name, dir_fd=fd)
             except FileNotFoundError:
                 pass
+            else:
+                # The workflow uploads artifacts even when validation fails.
+                # Persist stale-entry removal before reading fresh evidence.
+                os.fsync(fd)
             self.directory = fd
             self.opened_identity = (opened.st_dev, opened.st_ino)
             return self
