@@ -80,6 +80,16 @@ class SafeOutputTests(unittest.TestCase):
         self.assertFalse((moved / self.output.name).exists())
         self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
 
+    def test_missing_directory_after_publication_cleans_anchored_csv(self):
+        moved = self.root / "evidence-moved"
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            self.evidence.rename(moved)
+            with self.assertRaises(FileNotFoundError):
+                publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertFalse((moved / self.output.name).exists())
+        self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_real_directory_swap_during_open_is_rejected(self):
         moved = self.root / "evidence-moved"
         incoming = self.root / "replacement-directory"
