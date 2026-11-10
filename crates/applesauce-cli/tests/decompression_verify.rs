@@ -3,7 +3,7 @@
 
 use resource_fork::ResourceFork;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::symlink;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -312,4 +312,76 @@ fn overlapping_restore_roots_publish_one_verified_restoration() {
     );
     assert_eq!(fs::read(&source).unwrap(), original);
     assert!(!applesauce::info::get(&source).unwrap().is_compressed);
+}
+
+#[test]
+fn mixed_directory_restore_skips_uncompressed_ineligible_files() {
+    // All three sibling files are ordinary, uncompressed inputs. Their
+    // Incompressible classifications only prohibit *compression* and must
+    // never dispatch a decompression writer or fail the directory restore.
+    let dir = tempfile::tempdir().unwrap();
+    let compressed_path = dir.path().join("compressed.txt");
+    let empty_path = dir.path().join("empty.txt");
+    let huge_path = dir.path().join("large-sparse.txt");
+    let fork_path = dir.path().join("has-resource-fork.txt");
+    let original = vec![b'C'; 3 * 65_536 + 41];
+    fs::write(&compressed_path, &original).unwrap();
+    fs::write(&empty_path, []).unwrap();
+
+    // A sparse file exercises the native decmpfs 4 GiB eligibility limit
+    // without allocating or reading a multi-gigabyte fixture.
+    let huge_size = u64::from(u32::MAX) + 1;
+    fs::File::create(&huge_path)
+        .unwrap()
+        .set_len(huge_size)
+        .unwrap();
+
+    fs::write(&fork_path, b"keep the ordinary file and its fork").unwrap();
+    let fork_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fork_path)
+        .unwrap();
+    let fork_bytes = b"uncompressed resource fork fixture";
+    ResourceFork::new(&fork_file)
+        .write_all(fork_bytes)
+        .unwrap();
+    drop(fork_file);
+
+    let compressed = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .args(["compress", "-c", "zlib", "--verify"])
+        .arg(&compressed_path)
+        .output()
+        .unwrap();
+    assert!(
+        compressed.status.success(),
+        "fixture compression failed: {}",
+        String::from_utf8_lossy(&compressed.stderr)
+    );
+    assert!(applesauce::info::get(&compressed_path).unwrap().is_compressed);
+
+    let restored = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .arg("decompress")
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "mixed restore should skip ineligible uncompressed files: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+
+    assert_eq!(fs::read(&compressed_path).unwrap(), original);
+    assert!(!applesauce::info::get(&compressed_path).unwrap().is_compressed);
+    assert_eq!(fs::metadata(&empty_path).unwrap().len(), 0);
+    assert_eq!(fs::metadata(&huge_path).unwrap().len(), huge_size);
+    assert_eq!(
+        fs::read(&fork_path).unwrap(),
+        b"keep the ordinary file and its fork"
+    );
+    let mut preserved_fork = Vec::new();
+    ResourceFork::new(&fs::File::open(&fork_path).unwrap())
+        .read_to_end(&mut preserved_fork)
+        .unwrap();
+    assert_eq!(preserved_fork, fork_bytes);
 }
