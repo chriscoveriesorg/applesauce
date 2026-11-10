@@ -140,18 +140,54 @@ fn open_checked_regular(path: &Path, before: &fs::Metadata) -> io::Result<File> 
     if !opened.is_file() {
         return Err(invalid("archive input must be a regular file"));
     }
-    // Refuse a different regular file substituted between preflight and open.
-    // Compare the opened descriptor's identity rather than re-statting a path.
+    // In-place edits are also substitutions, even if device and inode match.
+    if !same_regular_snapshot(before, &opened) {
+        return Err(invalid("archive input changed between preflight and open"));
+    }
+    Ok(file)
+}
+
+// Compare identity and change times in addition to size. In particular,
+// matching device/inode alone does not catch a writer modifying the same file.
+// A same-size rewrite with a restored mtime still advances ctime on Unix.
+fn same_regular_snapshot(before: &fs::Metadata, after: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if before.dev() != opened.dev() || before.ino() != opened.ino() {
-            return Err(invalid("archive input changed between preflight and open"));
-        }
+        before.dev() == after.dev()
+            && before.ino() == after.ino()
+            && before.len() == after.len()
+            && before.mtime() == after.mtime()
+            && before.mtime_nsec() == after.mtime_nsec()
+            && before.ctime() == after.ctime()
+            && before.ctime_nsec() == after.ctime_nsec()
     }
     #[cfg(not(unix))]
-    let _ = before;
-    Ok(file)
+    {
+        before.len() == after.len() && before.modified().ok() == after.modified().ok()
+    }
+}
+
+// Recheck both the pinned descriptor and the selected path before publishing
+// output. A rename can replace the pathname while the original descriptor
+// continues yielding valid bytes. Neither case may publish under that identity.
+fn ensure_unchanged_regular_input(
+    path: &Path,
+    file: &File,
+    expected: &fs::Metadata,
+) -> io::Result<()> {
+    let opened = file.metadata()?;
+    let selected = fs::symlink_metadata(path)?;
+    if !selected.file_type().is_file()
+        || !same_regular_snapshot(expected, &opened)
+        || !same_regular_snapshot(expected, &selected)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive source changed during operation",
+        ));
+    }
+    Ok(())
 }
 
 fn unused_output(output: &Path) -> io::Result<()> {
@@ -227,13 +263,7 @@ fn create(
             "source changed while building the archive",
         ));
     }
-    let after = source.metadata()?;
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "source metadata changed while building the archive",
-        ));
-    }
+    ensure_unchanged_regular_input(source_path, &source, &before)?;
 
     temporary.as_file_mut().flush()?;
     temporary.as_file().sync_all()?;
@@ -327,13 +357,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
         ));
     }
     drop(reader);
-    let after = source.metadata()?;
-    if after.len() != before.len() || after.modified().ok() != before.modified().ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "archive source changed during extraction",
-        ));
-    }
+    ensure_unchanged_regular_input(archive_path, &source, &before)?;
     temporary.as_file_mut().flush()?;
     temporary.as_file().sync_all()?;
     temporary.as_file_mut().rewind()?;
@@ -377,13 +401,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
         offset += bytes.len() as u64;
     }
     drop(reader);
-    let after = source.metadata()?;
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "archive source changed during range extraction",
-        ));
-    }
+    ensure_unchanged_regular_input(archive_path, &source, &before)?;
     temporary.as_file_mut().flush()?;
     temporary.as_file().sync_all()?;
     temporary.as_file_mut().rewind()?;
@@ -646,6 +664,62 @@ mod tests {
         let error = open_checked_regular(&source, &before).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
         assert_eq!(fs::read(&target).unwrap(), b"other bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_place_growth_is_rejected_after_regular_file_preflight() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected-input");
+        fs::write(&source, b"original").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        let opened = open_regular(&source).unwrap();
+        ensure_unchanged_regular_input(&source, &opened, &before).unwrap();
+
+        // Preserve the inode while mutating the file between metadata checks.
+        OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap()
+            .write_all(b" changed")
+            .unwrap();
+        let after = fs::symlink_metadata(&source).unwrap();
+        assert_eq!(before.dev(), after.dev());
+        assert_eq!(before.ino(), after.ino());
+
+        let error = open_checked_regular(&source, &before).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            ensure_unchanged_regular_input(&source, &opened, &before)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_archive_path_replacement_is_rejected_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("selected.ascf");
+        let replacement = dir.path().join("replacement.ascf");
+        fs::write(&selected, b"original archived bytes").unwrap();
+        fs::write(&replacement, b"other archived bytes").unwrap();
+        let opened = open_regular(&selected).unwrap();
+        let before = opened.metadata().unwrap();
+
+        // The pinned descriptor remains readable after its path is replaced.
+        // A successful content check alone must not publish from this input.
+        fs::rename(&replacement, &selected).unwrap();
+        assert_eq!(
+            ensure_unchanged_regular_input(&selected, &opened, &before)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&selected).unwrap(), b"other archived bytes");
     }
 
     #[cfg(unix)]
