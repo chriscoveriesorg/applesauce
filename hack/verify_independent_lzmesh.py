@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Independent LZMESH buffer proof for owner-generated ASCF archives.
+"""Independent Raven/Mesh buffer proof for owner-generated ASCF archives.
 
-Requires an externally audited, separately built LZMESH decoder executable.
+Requires a separately audited and built codec-specific C11 decoder executable.
 No network, source mutations, native decmpfs writes or FSKit operations.
 """
 
@@ -18,7 +18,7 @@ import sys
 import tempfile
 
 MAGIC = b"ASCF0001"
-MESH_CODEC = 0xE05
+CODECS = {"lzmesh": 0xE05, "lzraven": 0xD05}
 MAX_LOGICAL = 64 * 1024 * 1024
 
 
@@ -66,28 +66,50 @@ def limit_decoder_output(clear_len):
     resource.setrlimit(resource.RLIMIT_FSIZE, (clear_len, clear_len))
 
 
-def decode_bounded(decoder, payload, clear_len, index):
+def decode_bounded(decoder, payload, clear_len, index, codec):
     # A pipe captured by subprocess.run can grow without bound if a decoder
     # malfunctions. A regular temporary file with RLIMIT_FSIZE bounds output.
-    with tempfile.TemporaryFile() as output:
-        try:
-            process = subprocess.run(
-                [str(decoder), "dec", "e05"],
-                input=payload,
-                stdout=output,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-                check=False,
-                preexec_fn=lambda: limit_decoder_output(clear_len),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise InvalidArchive(f"independent decoder timed out on chunk {index}") from exc
-        if process.returncode != 0:
-            raise InvalidArchive(
-                f"independent decoder failed on chunk {index} (exit {process.returncode})"
-            )
-        output.seek(0)
-        return output.read(clear_len + 1)
+    # Mesh's independent CLI accepts stdin/stdout. Raven's independent C11
+    # test tool accepts filenames and a strict --cap argument. Keep both
+    # decoders isolated from the real source file and bound their outputs.
+    with tempfile.TemporaryDirectory(prefix="ascf-independent-") as directory:
+        if codec == "lzraven":
+            input_path = Path(directory) / "payload.rav"
+            output_path = Path(directory) / "decoded.bin"
+            input_path.write_bytes(payload)
+            command = [
+                str(decoder), "--cap", str(clear_len), str(input_path), str(output_path)
+            ]
+            stdin_payload = None
+        else:
+            command = [str(decoder), "dec", "e05"]
+            stdin_payload = payload
+
+        with tempfile.TemporaryFile() as output:
+            try:
+                process = subprocess.run(
+                    command,
+                    input=stdin_payload,
+                    stdout=output if codec == "lzmesh" else subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                    check=False,
+                    preexec_fn=lambda: limit_decoder_output(clear_len),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise InvalidArchive(f"independent decoder timed out on chunk {index}") from exc
+            if process.returncode != 0:
+                raise InvalidArchive(
+                    f"independent decoder failed on chunk {index} (exit {process.returncode})"
+                )
+            if codec == "lzraven":
+                try:
+                    with open_regular(output_path) as result:
+                        return result.read(clear_len + 1)
+                except FileNotFoundError as exc:
+                    raise InvalidArchive(f"independent decoder omitted chunk {index}") from exc
+            output.seek(0)
+            return output.read(clear_len + 1)
 
 
 def read_exact(stream, size):
@@ -97,8 +119,11 @@ def read_exact(stream, size):
     return data
 
 
-def verify(archive, original, decoder, *, max_logical_bytes=MAX_LOGICAL):
+def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_LOGICAL):
     """Verify strict ASCF geometry, independent decode and original-byte hashes."""
+    if codec not in CODECS:
+        raise InvalidArchive(f"unsupported independent codec: {codec}")
+    requested_codec = codec
     archive = Path(archive).resolve(strict=True)
     original = Path(original).resolve(strict=True)
     decoder = Path(decoder).resolve(strict=True)
@@ -123,8 +148,11 @@ def verify(archive, original, decoder, *, max_logical_bytes=MAX_LOGICAL):
         logical_size = struct.unpack_from("<Q", header, 16)[0]
         count = struct.unpack_from("<I", header, 24)[0]
         logical_digest = header[32:64]
-        if codec != MESH_CODEC:
-            raise InvalidArchive("independent proof only accepts LZMESH codec 0xE05")
+        if codec != CODECS[requested_codec]:
+            raise InvalidArchive(
+                f"independent proof only accepts {requested_codec.upper()} codec "
+                f"0x{CODECS[requested_codec]:03X}"
+            )
         if not (65536 <= chunk_size <= 8388608 and chunk_size & (chunk_size - 1) == 0):
             raise InvalidArchive("invalid ASCF chunk size")
         if not 0 < logical_size <= max_logical_bytes:
@@ -169,7 +197,7 @@ def verify(archive, original, decoder, *, max_logical_bytes=MAX_LOGICAL):
             original_hash.update(clear)
             if hashlib.sha256(clear).digest() != digest:
                 raise InvalidArchive(f"original chunk {index} differs from ASCF chunk digest")
-            decoded = decode_bounded(decoder, payload, clear_len, index)
+            decoded = decode_bounded(decoder, payload, clear_len, index, requested_codec)
             if len(decoded) != clear_len or decoded != clear:
                 raise InvalidArchive(f"independent decoder returned incorrect bytes/length at chunk {index}")
             if hashlib.sha256(decoded).digest() != digest:
@@ -193,13 +221,13 @@ def verify(archive, original, decoder, *, max_logical_bytes=MAX_LOGICAL):
 
     return {
         "schema_version": 1,
-        "status": "independent_lzmesh_buffer_decode_verified",
+        "status": f"independent_{requested_codec}_buffer_decode_verified",
         "scope": "ASCF Apple buffer payload; not native APFS decmpfs",
         "archive_sha256": archive_hash.hexdigest(),
         "original_sha256": original_hash.hexdigest(),
         "decoder_sha256": decoder_hash,
-        "codec": "lzmesh",
-        "codec_id": "0xE05",
+        "codec": requested_codec,
+        "codec_id": f"0x{CODECS[requested_codec]:03X}",
         "logical_size_bytes": logical_size,
         "chunk_count": count,
     }
@@ -210,15 +238,17 @@ def main(argv=None):
     parser.add_argument("--archive", required=True, type=Path)
     parser.add_argument("--original", required=True, type=Path)
     parser.add_argument("--decoder", required=True, type=Path)
+    parser.add_argument("--codec", choices=sorted(CODECS), default="lzmesh")
     parser.add_argument("--max-logical-bytes", type=int, default=MAX_LOGICAL)
     args = parser.parse_args(argv)
     try:
         report = verify(
             args.archive, args.original, args.decoder,
+            codec=args.codec,
             max_logical_bytes=args.max_logical_bytes,
         )
     except (OSError, InvalidArchive) as exc:
-        print(f"independent LZMESH proof failed: {exc}", file=sys.stderr)
+        print(f"independent ASCF proof failed: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(report, sort_keys=True, indent=2))
     return 0
