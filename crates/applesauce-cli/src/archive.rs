@@ -190,6 +190,29 @@ fn ensure_unchanged_regular_input(
     Ok(())
 }
 
+// A verified staging descriptor is not enough for safe publication: the
+// temporary pathname can be renamed or replaced while decoding and hashing
+// run. Revalidate its identity and change timestamps immediately before the
+// NamedTempFile publication call. Like the source guard, this is a best-effort
+// check; it cannot make pathname validation and rename a single operation.
+fn ensure_unchanged_staging_output(
+    temporary: &NamedTempFile,
+    verified: &fs::Metadata,
+) -> io::Result<()> {
+    let opened = temporary.as_file().metadata()?;
+    let selected = fs::symlink_metadata(temporary.path())?;
+    if !selected.file_type().is_file()
+        || !same_regular_snapshot(verified, &opened)
+        || !same_regular_snapshot(verified, &selected)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "verified archive staging file changed before publication",
+        ));
+    }
+    Ok(())
+}
+
 // Read-only operations must validate the same opened inode and selected path
 // after parsing or decoding. Report success only after that final validation.
 fn read_unchanged_regular<T>(
@@ -290,7 +313,8 @@ fn create(
             ));
         }
     }
-    if temporary.as_file().metadata()?.len() != stats.archive_bytes {
+    let verified_staging = temporary.as_file().metadata()?;
+    if verified_staging.len() != stats.archive_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "staged archive size changed after verification",
@@ -300,6 +324,7 @@ fn create(
     // Recheck immediately before publishing in case the source changed after
     // the earlier source hash check.
     ensure_unchanged_regular_input(source_path, &source, &before)?;
+    ensure_unchanged_staging_output(&temporary, &verified_staging)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -381,6 +406,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
     temporary.as_file_mut().flush()?;
     temporary.as_file().sync_all()?;
+    let verified_staging = temporary.as_file().metadata()?;
     temporary.as_file_mut().rewind()?;
     if hash_reader(temporary.as_file_mut())? != digest {
         return Err(io::Error::new(
@@ -389,6 +415,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
         ));
     }
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
+    ensure_unchanged_staging_output(&temporary, &verified_staging)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -426,6 +453,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
     temporary.as_file_mut().flush()?;
     temporary.as_file().sync_all()?;
+    let verified_staging = temporary.as_file().metadata()?;
     temporary.as_file_mut().rewind()?;
     let output_digest = hash_reader(temporary.as_file_mut())?;
     let range_digest: [u8; 32] = digest.finalize().into();
@@ -436,6 +464,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
         ));
     }
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
+    ensure_unchanged_staging_output(&temporary, &verified_staging)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -829,6 +858,66 @@ mod tests {
         })
         .unwrap();
         assert_eq!(observed, b"stable input");
+    }
+
+    #[test]
+    fn verified_staging_rejects_replaced_regular_file_and_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut temporary = NamedTempFile::new_in(dir.path()).unwrap();
+        temporary.write_all(b"generated verified staging bytes").unwrap();
+        temporary.flush().unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+        ensure_unchanged_staging_output(&temporary, &verified).unwrap();
+
+        let selected = temporary.path().to_owned();
+        let moved = dir.path().join("original-staged-inode");
+        fs::rename(&selected, &moved).unwrap();
+        fs::write(&selected, b"generated verified staging bytes").unwrap();
+        // Matching bytes and length must not allow a substituted inode.
+        assert_eq!(
+            ensure_unchanged_staging_output(&temporary, &verified)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        fs::remove_file(&selected).unwrap();
+        std::os::unix::fs::symlink(&moved, &selected).unwrap();
+        assert_eq!(
+            ensure_unchanged_staging_output(&temporary, &verified)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn verified_staging_rejects_in_place_same_length_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut temporary = NamedTempFile::new_in(dir.path()).unwrap();
+        temporary.write_all(b"generated verified bytes").unwrap();
+        temporary.flush().unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+        ensure_unchanged_staging_output(&temporary, &verified).unwrap();
+
+        // Retain the inode and length, then force a different timestamp so
+        // the test is deterministic even on coarse timestamp filesystems.
+        fs::write(temporary.path(), b"generated changed! bytes").unwrap();
+        temporary
+            .as_file()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(12_345))
+            .unwrap();
+        assert_eq!(
+            temporary.as_file().metadata().unwrap().len(),
+            verified.len()
+        );
+        assert_eq!(
+            ensure_unchanged_staging_output(&temporary, &verified)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
