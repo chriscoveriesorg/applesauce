@@ -1409,7 +1409,13 @@ mod tests {
                 );
             }
         }
-        for executable in ["helper.SCPT", "config.APPLESCRIPT", "module.WASM", "tool.PY", "helper.JAR"] {
+        for executable in [
+            "helper.SCPT",
+            "config.APPLESCRIPT",
+            "module.WASM",
+            "tool.PY",
+            "helper.JAR",
+        ] {
             let path = resources.join(executable);
             assert_eq!(
                 profile_exclusion(Profile::Bundles, &path),
