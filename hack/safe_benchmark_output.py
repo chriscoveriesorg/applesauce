@@ -104,7 +104,17 @@ class SafeCsvOutput:
             temporary = None
             # Persist the directory-entry replacement as well as the CSV bytes.
             # A file fsync alone does not guarantee the rename survives a crash.
-            os.fsync(self.directory)
+            try:
+                os.fsync(self.directory)
+            except OSError:
+                # Do not upload an apparently valid artifact after a failed
+                # durability barrier. Cleanup is best-effort; preserve error.
+                try:
+                    os.unlink(self.destination.name, dir_fd=self.directory)
+                    os.fsync(self.directory)
+                except OSError:
+                    pass
+                raise
             # A renamed destination is still safe, but must not be certified
             # as published at the path the caller supplied.
             visible = os.stat(self.destination.parent, follow_symlinks=False)
