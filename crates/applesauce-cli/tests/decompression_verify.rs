@@ -213,6 +213,42 @@ fn explicit_link_restore_roots_exit_nonzero_and_preserve_data() {
 }
 
 #[test]
+fn explicit_symlink_compression_roots_exit_nonzero_and_preserve_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let directory = dir.path().join("outside-selected-root");
+    let regular = directory.join("original.txt");
+    let file_link = dir.path().join("selected-file.txt");
+    let directory_link = dir.path().join("selected-directory");
+    let original = vec![b'B'; 3 * 65_536 + 29];
+
+    fs::create_dir(&directory).unwrap();
+    fs::write(&regular, &original).unwrap();
+    symlink(&regular, &file_link).unwrap();
+    symlink(&directory, &directory_link).unwrap();
+
+    for root in [&file_link, &directory_link] {
+        let output = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+            .args(["compress", "-c", "zlib", "--verify"])
+            .arg(root)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "compressed through explicitly selected symlink {}",
+            root.display()
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("refusing to compress a symlink input root"),
+            "{stderr}"
+        );
+        assert!(root.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&regular).unwrap(), original);
+        assert!(!applesauce::info::get(&regular).unwrap().is_compressed);
+    }
+}
+
+#[test]
 fn restore_failures_produce_bounded_actionable_stderr() {
     let dir = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_applesauce"));
