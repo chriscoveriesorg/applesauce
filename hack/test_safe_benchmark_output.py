@@ -146,6 +146,36 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
 
+    def test_temporary_unlink_failure_preserves_original_write_error(self):
+        # A failed write must remain the reported failure even if cleanup of
+        # the partially written disposable temporary CSV is also refused.
+        real_unlink = os.unlink
+        cleanup_attempted = False
+
+        def refuse_temp_cleanup(path, *args, **kwargs):
+            nonlocal cleanup_attempted
+            if (
+                isinstance(path, str)
+                and path.startswith(".comparison.csv.")
+                and path.endswith(".tmp")
+                and kwargs.get("dir_fd") is not None
+            ):
+                cleanup_attempted = True
+                raise PermissionError("injected temporary cleanup refusal")
+            return real_unlink(path, *args, **kwargs)
+
+        def invalid_rows():
+            raise ValueError("injected invalid benchmark row")
+            yield {}  # Keep this a generator for DictWriter.writerows.
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.unlink", side_effect=refuse_temp_cleanup):
+                with self.assertRaisesRegex(ValueError, "injected invalid benchmark row"):
+                    publisher.write_rows(invalid_rows(), ("codec", "value"))
+        self.assertTrue(cleanup_attempted)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_real_directory_swap_during_open_is_rejected(self):
         moved = self.root / "evidence-moved"
         incoming = self.root / "replacement-directory"
