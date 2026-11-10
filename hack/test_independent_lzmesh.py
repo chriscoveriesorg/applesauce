@@ -93,5 +93,62 @@ class IndependentMeshProofTests(unittest.TestCase):
             verify(self.archive, self.original, self.decoder, max_logical_bytes=10)
 
 
+
+    def test_decoder_output_is_bounded_before_comparison(self):
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\nimport sys\\n"
+            "sys.stdout.buffer.write(b'X' * (1024 * 1024))\\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(InvalidArchive, "independent decoder failed"):
+            verify(self.archive, self.original, self.decoder)
+
+    def test_rejects_original_modified_during_decode(self):
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\nimport os, pathlib, sys, time\\n"
+            f"p = pathlib.Path({str(self.original)!r})\\n"
+            "time.sleep(0.02)\\n"
+            "old = p.stat()\\n"
+            "with p.open('r+b') as f: f.write(b'Z')\\n"
+            "os.utime(p, ns=(old.st_atime_ns, old.st_mtime_ns))\\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+            verify(self.archive, self.original, self.decoder)
+
+    def test_rejects_archive_replaced_during_decode(self):
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\nimport pathlib, sys\\n"
+            f"p = pathlib.Path({str(self.archive)!r})\\n"
+            "content = p.read_bytes()\\n"
+            "p.unlink()\\n"
+            "p.write_bytes(content)\\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+            verify(self.archive, self.original, self.decoder)
+
+    def test_rejects_decoder_changed_during_decode(self):
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\nimport sys\\n"
+            "with open(sys.argv[0], 'a') as f: f.write('\\\\n# changed\\\\n')\\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(InvalidArchive, "decoder"):
+            verify(self.archive, self.original, self.decoder)
+
+    @unittest.skipUnless(hasattr(__import__('os'), 'mkfifo'), "requires POSIX FIFOs")
+    def test_rejects_fifo_inputs_without_blocking(self):
+        import os
+        fifo = self.root / "untrusted.fifo"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(InvalidArchive, "regular file"):
+            verify(fifo, self.original, self.decoder)
+        with self.assertRaisesRegex(InvalidArchive, "regular file"):
+            verify(self.archive, fifo, self.decoder)
+
 if __name__ == "__main__":
     unittest.main()
