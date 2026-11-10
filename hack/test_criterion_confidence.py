@@ -158,6 +158,19 @@ class ConfidenceTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
 
+    def test_missing_source_removes_stale_derived_evidence(self):
+        manifest, _ = self.complete_smoke()
+        self.output.write_text("stale confidence evidence", encoding="utf-8")
+        # A missing manifest must not short-circuit the stale-output cleanup.
+        # The artifact upload runs even if the exporter exits with an error.
+        manifest.unlink()
+        with self.assertRaises(FileNotFoundError):
+            confidence.write_confidence(
+                self.summary, self.criterion, self.output, manifest, "smoke"
+            )
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
+
     def test_invalid_utf8_estimates_fail_closed_without_traceback(self):
         manifest, _ = self.complete_smoke()
         # The smoke suite includes chat-jsonl and entropy. The single-row
