@@ -508,6 +508,52 @@ mod tests {
     }
 
     #[test]
+    fn compression_refuses_explicit_symlink_roots_without_changing_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("outside-file.txt");
+        let directory = dir.path().join("outside-directory");
+        let nested_file = directory.join("untouched.txt");
+        let file_link = dir.path().join("selected-file-link.txt");
+        let directory_link = dir.path().join("selected-directory-link");
+        let original = vec![b'Q'; 3 * 65_536 + 19];
+
+        fs::create_dir(&directory).unwrap();
+        fs::write(&file, &original).unwrap();
+        fs::write(&nested_file, &original).unwrap();
+        symlink(&file, &file_link).unwrap();
+        symlink(&directory, &directory_link).unwrap();
+
+        let mut compressor = FileCompressor::new();
+        for root in [&file_link, &directory_link] {
+            let reporter = RootErrorProgress::default();
+            compressor.recursive_compress(
+                iter::once(root.as_path()),
+                Kind::default(),
+                1.0,
+                2,
+                &reporter,
+                true,
+            );
+            let errors = reporter.errors.lock().unwrap();
+            assert_eq!(errors.len(), 1, "missing compression error for {}", root.display());
+            assert_eq!(&errors[0].0, root);
+            assert!(
+                errors[0].1.contains("refusing to compress a symlink input root"),
+                "wrong error for {}: {}",
+                root.display(),
+                errors[0].1
+            );
+        }
+        for path in [&file, &nested_file] {
+            assert_eq!(fs::read(path).unwrap(), original);
+            assert!(!info::get(path).unwrap().is_compressed);
+        }
+        for root in [&file_link, &directory_link] {
+            assert!(root.symlink_metadata().unwrap().file_type().is_symlink());
+        }
+    }
+
+    #[test]
     fn explicit_special_file_roots_refuse_restoration_without_opening_them() {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
