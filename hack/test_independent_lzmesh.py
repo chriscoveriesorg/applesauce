@@ -97,6 +97,29 @@ class IndependentMeshProofTests(unittest.TestCase):
 
 
 
+    def test_external_decoder_cannot_inherit_ci_secrets_or_workspace(self):
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\n"
+            "import os,sys\\n"
+            "payload = sys.stdin.buffer.read()\\n"
+            "if any(k in os.environ for k in "
+            "('GITHUB_TOKEN', 'APPL_PROOF_SECRET', 'LD_PRELOAD')):\\n"
+            "    sys.exit(72)\\n"
+            "if os.environ.get('HOME') != os.getcwd(): sys.exit(73)\\n"
+            "if os.environ.get('DECODE_SIZE') != str(len(payload)): sys.exit(74)\\n"
+            "sys.stdout.buffer.write(payload)\\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {
+            "GITHUB_TOKEN": "sentinel",
+            "APPL_PROOF_SECRET": "sentinel",
+            "LD_PRELOAD": "/sensitive/injection.so",
+            "DECODE_SIZE": "999999999",
+        }):
+            report = verify(self.archive, self.original, self.decoder)
+        self.assertEqual(report["status"], "independent_lzmesh_buffer_decode_verified")
+
+
     def test_mesh_decoder_allocation_uses_validated_clear_length(self):
         # port_cli's default output allocation follows the compressed framing.
         # A validated ASCF chunk length must override hostile inherited caps.
