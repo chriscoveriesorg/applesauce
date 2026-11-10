@@ -5,6 +5,7 @@ use crate::{info, scan, times, Stats};
 use applesauce_core::compressor;
 use std::collections::HashSet;
 use std::fs::Metadata;
+use std::io;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::{fmt, mem};
-use tracing::warn;
 
 pub mod compressing;
 pub mod reader;
@@ -219,11 +219,11 @@ impl BackgroundThreads {
                 );
                 continue;
             }
-            if let Err(e) = volumes.add_root_dir(path, &metadata) {
-                warn!(
-                    "failed to find a temp directory for {}: {e}",
-                    path.display()
-                );
+            // No staging directory means this root cannot be restored safely.
+            // Report the preflight failure through Progress so CLI invocations
+            // exit nonzero even when scanning would otherwise skip every file.
+            if !prepare_root_volume(path, progress, volumes.add_root_dir(path, &metadata)) {
+                continue;
             }
             walker.add_path(path);
         }
@@ -348,6 +348,26 @@ impl BackgroundThreads {
     }
 }
 
+// Fail closed before queueing work if the selected volume cannot provide a
+// staging directory. A warning-only preflight could make a whole restore look
+// successful when compression-state discovery later skips its entries.
+fn prepare_root_volume<P: Progress>(
+    path: &Path,
+    progress: &P,
+    registration: io::Result<()>,
+) -> bool {
+    match registration {
+        Ok(()) => true,
+        Err(error) => {
+            progress.error(
+                path,
+                &format!("unable to prepare staging volume: {error}"),
+            );
+            false
+        }
+    }
+}
+
 // Claim each eligible source inode once across all requested paths, including
 // overlapping directory and explicit-file roots, in either operation mode.
 fn claim_input_inode(seen: &Mutex<HashSet<(u64, u64)>>, metadata: &Metadata) -> bool {
@@ -448,7 +468,7 @@ impl fmt::Debug for Context {
 
 #[cfg(test)]
 mod scan_failure_tests {
-    use super::{claim_input_inode, report_scan_read_error, Mode};
+    use super::{claim_input_inode, prepare_root_volume, report_scan_read_error, Mode};
     use crate::progress::{Progress, SkipReason, Task};
     use std::collections::HashSet;
     use std::fs;
@@ -483,6 +503,30 @@ mod scan_failure_tests {
         fn file_task(&self, _path: &Path, _size: u64) -> Self::Task {
             NoTask
         }
+    }
+
+    #[test]
+    fn staging_volume_preflight_errors_are_reported_and_reject_roots() {
+        let path = Path::new("unavailable-volume");
+        let recorder = RecordingProgress::default();
+        assert!(!prepare_root_volume(
+            path,
+            &recorder,
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "temp directory cannot be created",
+            )),
+        ));
+        let errors = recorder.errors.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("unable to prepare staging volume"));
+        assert!(errors[0].contains("temp directory cannot be created"));
+        drop(errors);
+        assert!(recorder.skips.lock().unwrap().is_empty());
+
+        // Successful volume preparation may proceed to scanning.
+        assert!(prepare_root_volume(path, &recorder, Ok(())));
+        assert_eq!(recorder.errors.lock().unwrap().len(), 1);
     }
 
     #[test]
