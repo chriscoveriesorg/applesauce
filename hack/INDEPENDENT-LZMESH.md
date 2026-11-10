@@ -84,6 +84,9 @@ a parser-only failure from being mistaken for codec conformance testing.
 The macOS proof workflow runs those five cases on both generated content
 families at the 131,103-byte multi-chunk boundary (10 negative cases per codec).
 It attaches the generated `.ascf` archives, original `.bin` files, positive
-JSON reports, negative JSON reports and environment provenance for 30 days.
-These artifacts allow reviewers to replay and hash exact Apple payloads;
-independent source review and durable committed vectors remain separate gates.
+JSON reports, negative JSON reports and environment provenance. The workflow
+requests 30-day artifact retention, but the repository's current effective
+expiry is approximately 24 hours (verified from the run 42757335808
+artifact metadata on 10 November 2026). Reviewers must retrieve the artifacts
+promptly. Independent source review and committed durable vectors remain
+separate acceptance gates.
