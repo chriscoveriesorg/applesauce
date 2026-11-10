@@ -78,16 +78,14 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
                 return Some("bundle_non_resource");
             }
             let resources = &parts[app_index + 3..];
-            if resources.iter().any(|part| {
-                code_container(part)
-                    || part.as_bytes().eq_ignore_ascii_case(b"_CodeSignature")
-                    || part.as_bytes().eq_ignore_ascii_case(b"_MASReceipt")
-            }) {
+            if resources.iter().any(|part| sensitive_bundle_component(part)) {
                 return Some("bundle_nested_code_or_signature");
             }
             // A candidate resource still needs codesign and launch tests
             // on a disposable app before any write is ever authorized.
-            const EXECUTABLE_SUFFIXES: [&[u8]; 8] = [
+            // Compiled AppleScript and bytecode need no Unix executable bit,
+            // Mach-O header or shebang to be executable by a host application.
+            const EXECUTABLE_SUFFIXES: [&[u8]; 16] = [
                 b".dylib",
                 b".so",
                 b".a",
@@ -96,6 +94,14 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
                 b".command",
                 b".metallib",
                 b".exe",
+                b".scpt",
+                b".applescript",
+                b".py",
+                b".rb",
+                b".pl",
+                b".wasm",
+                b".jar",
+                b".class",
             ];
             if resources.last().is_some_and(|file| {
                 EXECUTABLE_SUFFIXES
@@ -110,7 +116,10 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
 }
 
 fn code_container(name: &OsStr) -> bool {
-    const CODE_SUFFIXES: [&[u8]; 9] = [
+    // Code-hosting bundles are not limited to .app/.framework. Spotlight,
+    // screensavers, preference panes, Automator actions and audio plugins all
+    // carry executable content and can be signed, including inside caches.
+    const CODE_SUFFIXES: [&[u8]; 21] = [
         b".app",
         b".framework",
         b".appex",
@@ -120,10 +129,46 @@ fn code_container(name: &OsStr) -> bool {
         b".qlgenerator",
         b".kext",
         b".component",
+        b".mdimporter",
+        b".prefpane",
+        b".saver",
+        b".service",
+        b".workflow",
+        b".action",
+        b".scptd",
+        b".vst",
+        b".vst3",
+        b".aaxplugin",
+        b".audiounit",
+        b".xcframework",
     ];
     CODE_SUFFIXES
         .iter()
         .any(|suffix| ascii_suffix(name, suffix))
+}
+
+/// Inside Contents/Resources, code may live in a conventional container
+/// directory with no bundle suffix. Prune that entire subtree before opening
+/// its descendants. Compare ASCII case-insensitively for case-sensitive APFS.
+fn sensitive_bundle_component(name: &OsStr) -> bool {
+    if code_container(name) {
+        return true;
+    }
+    const RESERVED: [&[u8]; 10] = [
+        b"_CodeSignature",
+        b"_MASReceipt",
+        b"MacOS",
+        b"Frameworks",
+        b"SharedFrameworks",
+        b"PlugIns",
+        b"XPCServices",
+        b"Helpers",
+        b"LoginItems",
+        b"CodeResources",
+    ];
+    RESERVED
+        .iter()
+        .any(|reserved| name.as_bytes().eq_ignore_ascii_case(reserved))
 }
 
 /// A case-insensitive suffix test for ASCII code extensions on macOS volumes.
@@ -168,11 +213,9 @@ fn profile_directory_exclusion(profile: Profile, path: &Path) -> Option<&'static
                 return Some("bundle_non_resource");
             }
             (within_app.len() > 2
-                && within_app[2..].iter().any(|part| {
-                    code_container(part)
-                        || part.as_bytes().eq_ignore_ascii_case(b"_CodeSignature")
-                        || part.as_bytes().eq_ignore_ascii_case(b"_MASReceipt")
-                }))
+                && within_app[2..]
+                    .iter()
+                    .any(|part| sensitive_bundle_component(part)))
             .then_some("bundle_nested_code_or_signature")
         }
     }
@@ -1311,6 +1354,73 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn audit_profiles_prune_additional_signed_bundle_types_and_code_directories() {
+        let cache_root = Path::new("/Users/a/Library/Caches");
+        for suffix in [
+            "Spotlight.MDIMPORTER",
+            "Display.PREFPANE",
+            "Idle.SAVER",
+            "Workflow.WORKFLOW",
+            "Action.ACTION",
+            "Service.SERVICE",
+            "Compiled.SCPTD",
+            "Synth.VST3",
+            "Processor.AAXPLUGIN",
+            "Universal.XCFRAMEWORK",
+        ] {
+            let path = cache_root.join(suffix);
+            assert_eq!(
+                profile_directory_exclusion(Profile::Caches, &path),
+                Some("cache_contains_code_bundle"),
+                "{suffix}"
+            );
+            assert_eq!(
+                profile_exclusion(Profile::Caches, &path.join("Contents/data")),
+                Some("cache_contains_code_bundle"),
+                "{suffix}"
+            );
+        }
+        let resources = Path::new("/Applications/Test.app/Contents/Resources");
+        for child in [
+            "MacOS/tool",
+            "FRAMEWORKS/helper",
+            "SharedFrameworks/helper",
+            "PlugIns/helper",
+            "XPCServices/agent",
+            "Helpers/tool",
+            "LoginItems/agent",
+            "assets/CodeResources",
+        ] {
+            let path = resources.join(child);
+            assert_eq!(
+                profile_exclusion(Profile::Bundles, &path),
+                Some("bundle_nested_code_or_signature"),
+                "{child}"
+            );
+            if !child.starts_with("assets/") {
+                let directory = path.parent().unwrap();
+                assert_eq!(
+                    profile_directory_exclusion(Profile::Bundles, directory),
+                    Some("bundle_nested_code_or_signature"),
+                    "{child}"
+                );
+            }
+        }
+        for executable in ["helper.SCPT", "config.APPLESCRIPT", "module.WASM", "tool.PY", "helper.JAR"] {
+            let path = resources.join(executable);
+            assert_eq!(
+                profile_exclusion(Profile::Bundles, &path),
+                Some("bundle_executable_resource"),
+                "{executable}"
+            );
+        }
+        assert_eq!(
+            profile_exclusion(Profile::Bundles, &resources.join("data/localization.strings")),
+            None
+        );
     }
 
     #[test]
