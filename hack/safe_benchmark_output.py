@@ -9,6 +9,7 @@ import csv
 import os
 from pathlib import Path
 import secrets
+import sys
 
 
 class SafeCsvOutput:
@@ -144,10 +145,16 @@ class SafeCsvOutput:
                 raise ValueError("benchmark output directory changed during publication")
         finally:
             if temporary is not None:
+                # An unlink failure must not replace the original CSV write
+                # failure. If no error was active, surface cleanup failure.
+                failed = sys.exc_info()[0] is not None
                 try:
                     os.unlink(temporary, dir_fd=self.directory)
                 except FileNotFoundError:
                     pass
+                except OSError:
+                    if not failed:
+                        raise
 
     def __exit__(self, *_exc):
         if self.directory is not None:
