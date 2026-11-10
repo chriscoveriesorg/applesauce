@@ -3,12 +3,13 @@ use crate::progress::{self, Progress, SkipReason};
 use crate::volumes::Volumes;
 use crate::{info, scan, times, Stats};
 use applesauce_core::compressor;
+use std::collections::HashSet;
 use std::fs::Metadata;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::{fmt, mem};
 use tracing::warn;
@@ -222,6 +223,9 @@ impl BackgroundThreads {
         let operation = Arc::new(OperationContext::new(mode, finished_stats, volumes, verify));
         let stats = &operation.stats;
         let chan = self.reader.chan();
+        // The same compressed inode can be selected through overlapping roots.
+        // Claim it before queuing any restore work to avoid concurrent replaces.
+        let restore_claims = Mutex::new(HashSet::new());
 
         walker.run(&operation, |file_type, path, dir_reset| {
             // We really only want to deal with files, not symlinks to files, or fifos, etc.
@@ -290,6 +294,18 @@ impl BackgroundThreads {
                 stats.add_end_file(&metadata, &file_info);
                 return;
             }
+            // Restoring a file twice in one invocation is unsafe: competing
+            // writers can each verify a different staged file and race the
+            // atomic rename. One inode must have one restore owner.
+            if !mode.is_compressing()
+                && matches!(&file_info.compression_state, FileCompressionState::Compressed)
+                && !claim_restore_inode(&restore_claims, &metadata)
+            {
+                progress.file_skipped(&path, SkipReason::DuplicateInput);
+                stats.add_end_file(&metadata, &file_info);
+                return;
+            }
+
             let saved_times = match times::save_times(path.as_path()) {
                 Ok(saved_times) => saved_times,
                 Err(e) => {
@@ -320,6 +336,12 @@ impl BackgroundThreads {
             .recv()
             .expect("OperationContext will send stats on drop of all arcs")
     }
+}
+
+// Only one writer may restore a compressed inode in an invocation, even when
+// selected via both a directory root and an explicit file path.
+fn claim_restore_inode(seen: &Mutex<HashSet<(u64, u64)>>, metadata: &Metadata) -> bool {
+    seen.lock().unwrap().insert((metadata.dev(), metadata.ino()))
 }
 
 // A failed metadata or timestamp read while scanning an input for restoration
@@ -414,8 +436,10 @@ impl fmt::Debug for Context {
 
 #[cfg(test)]
 mod scan_failure_tests {
-    use super::{report_scan_read_error, Mode};
+    use super::{claim_restore_inode, report_scan_read_error, Mode};
     use crate::progress::{Progress, SkipReason, Task};
+    use std::collections::HashSet;
+    use std::fs;
     use std::io;
     use std::path::Path;
     use std::sync::Mutex;
@@ -447,6 +471,24 @@ mod scan_failure_tests {
         fn file_task(&self, _path: &Path, _size: u64) -> Self::Task {
             NoTask
         }
+    }
+
+    #[test]
+    fn restore_claims_are_unique_for_paths_with_the_same_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let alias = dir.path().join("hard-link-alias");
+        let separate = dir.path().join("separate");
+        fs::write(&source, b"generated input").unwrap();
+        fs::hard_link(&source, &alias).unwrap();
+        fs::write(&separate, b"generated input").unwrap();
+        let seen = Mutex::new(HashSet::new());
+
+        assert!(claim_restore_inode(&seen, &fs::metadata(&source).unwrap()));
+        assert!(!claim_restore_inode(&seen, &fs::metadata(&source).unwrap()));
+        assert!(!claim_restore_inode(&seen, &fs::metadata(&alias).unwrap()));
+        assert!(claim_restore_inode(&seen, &fs::metadata(&separate).unwrap()));
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
     #[test]

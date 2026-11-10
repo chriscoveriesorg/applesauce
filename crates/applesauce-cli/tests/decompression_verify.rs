@@ -276,3 +276,40 @@ fn compressed_publication_preserves_original_timestamps_with_and_without_verific
         assert_eq!(fs::read(&file).unwrap(), source);
     }
 }
+
+#[test]
+fn overlapping_restore_roots_publish_one_verified_restoration() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("overlap.txt");
+    let original = vec![b'O'; 3 * 65_536 + 47];
+    fs::write(&source, &original).unwrap();
+
+    let compressed = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .args(["compress", "--verify", "-c", "zlib"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        compressed.status.success(),
+        "fixture compression failed: {}",
+        String::from_utf8_lossy(&compressed.stderr)
+    );
+    assert!(applesauce::info::get(&source).unwrap().is_compressed);
+
+    // A directory, its contained file and a repeat of the same pathname
+    // represent the same compressed inode. Only one restore may be queued.
+    let restored = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .arg("decompress")
+        .arg(dir.path())
+        .arg(&source)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "overlapping restoration failed: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert!(!applesauce::info::get(&source).unwrap().is_compressed);
+}
