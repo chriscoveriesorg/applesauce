@@ -9,6 +9,52 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 #[test]
+fn restoring_a_directory_preserves_parent_modification_time() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("generated-directory");
+    fs::create_dir(&root).unwrap();
+    let file = root.join("compressed-content.txt");
+    let original = b"compressible directory timestamp fixture".repeat(8192);
+    fs::write(&file, &original).unwrap();
+
+    let compressed = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .args(["compress", "-c", "zlib", "--verify"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        compressed.status.success(),
+        "setup compression failed: {}",
+        String::from_utf8_lossy(&compressed.stderr)
+    );
+    assert!(applesauce::info::get(&file).unwrap().is_compressed);
+
+    // Set a recognizable old timestamp after preparing the compressed source.
+    // Publishing a restored replacement modifies the directory; the walker
+    // must install and activate its saved parent-directory resetter.
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_690_000_000);
+    fs::File::open(&root).unwrap().set_modified(old).unwrap();
+    let expected = fs::metadata(&root).unwrap().modified().unwrap();
+    let restored = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .arg("decompress")
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "directory restore failed: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(fs::read(&file).unwrap(), original);
+    assert!(!applesauce::info::get(&file).unwrap().is_compressed);
+    assert_eq!(
+        fs::metadata(&root).unwrap().modified().unwrap(),
+        expected,
+        "restoring a file changed its parent directory modification time"
+    );
+}
+
+#[test]
 fn default_and_manual_decompression_verify_generated_native_files() {
     let dir = tempfile::tempdir().unwrap();
     let fixture: Vec<u8> = (0..(3 * 65_536 + 17))
