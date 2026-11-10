@@ -229,7 +229,7 @@ class SafeOutputTests(unittest.TestCase):
                     pass
         self.assertTrue(swapped)
         self.assertEqual((moved / self.output.name).read_text(), "old derived evidence")
-        self.assertEqual(protected.read_text(), "independent evidence")
+        self.assertEqual((self.evidence / self.output.name).read_text(), "independent evidence")
         self.assertEqual(self.input.read_text(), "source evidence")
 
     def test_directory_swap_before_open_cannot_redirect_cleanup(self):
