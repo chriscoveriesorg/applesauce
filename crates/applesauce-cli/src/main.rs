@@ -394,8 +394,10 @@ fn main() {
                 verify,
             );
             progress_bars.finish();
+            let errors = progress_bars.errors();
+            emit_operation_errors(&errors, "compression");
             let mut report = size_report::analyze(&paths);
-            report.operation_errors(progress_bars.errors());
+            report.operation_errors(errors);
             if json || verbosity >= Verbosity::Normal {
                 if let Err(error) = size_report::display(&report, json) {
                     eprintln!("applesauce: unable to write size report: {error}");
@@ -433,28 +435,35 @@ fn main() {
             if verbosity >= Verbosity::Normal {
                 display_stats(&stats, false);
             }
-            // A failed verification must make the command fail, even though
-            // each failing file's temporary output was discarded.
+            // Failed verification or source inspection must remain visible
+            // to scripts even when progress bars are suppressed.
             let errors = progress_bars.errors();
             if !errors.is_empty() {
-                // indicatif may hide progress messages when stderr is piped.
-                // Preserve actionable diagnostics for scripts and automation,
-                // while bounding output on large recursive restore failures.
-                for (path, message) in errors.iter().take(20) {
-                    eprintln!("applesauce: {}: {message}", path.display());
-                }
-                if errors.len() > 20 {
-                    eprintln!(
-                        "applesauce: {} additional decompression error(s)",
-                        errors.len() - 20
-                    );
-                }
-                eprintln!("applesauce: {} decompression error(s)", errors.len());
+                emit_operation_errors(&errors, "decompression");
                 std::process::exit(1);
             }
         }
         Commands::Info(_) => unreachable!("info handled before tracing"),
     }
+}
+
+// Progress-bar messages may disappear when stderr is redirected. Print a
+// bounded list of actionable failures for both mutating operations without
+// polluting machine-readable JSON on stdout.
+fn emit_operation_errors(errors: &[(PathBuf, String)], operation: &str) {
+    if errors.is_empty() {
+        return;
+    }
+    for (path, message) in errors.iter().take(20) {
+        eprintln!("applesauce: {}: {message}", path.display());
+    }
+    if errors.len() > 20 {
+        eprintln!(
+            "applesauce: {} additional {operation} error(s)",
+            errors.len() - 20
+        );
+    }
+    eprintln!("applesauce: {} {operation} error(s)", errors.len());
 }
 
 fn display_dry_run(report: &applesauce::dry_run::Report) {
