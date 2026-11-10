@@ -118,13 +118,12 @@ class IndependentMeshProofTests(unittest.TestCase):
             verify(self.archive, self.original, self.decoder)
 
     def test_rejects_archive_replaced_during_decode(self):
+        replacement = self.root / "replacement.ascf"
+        replacement.write_bytes(self.archive.read_bytes())
         self.decoder.write_text(
-            "#!/usr/bin/env python3\nimport pathlib, sys\n"
-            f"p = pathlib.Path({str(self.archive)!r})\n"
-            "content = p.read_bytes()\n"
-            "p.unlink()\n"
-            "p.write_bytes(content)\n"
-            "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
+            "#!/usr/bin/env python3\\nimport os, sys\\n"
+            f"os.replace({str(replacement)!r}, {str(self.archive)!r})\\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\\n",
             encoding="utf-8",
         )
         with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
