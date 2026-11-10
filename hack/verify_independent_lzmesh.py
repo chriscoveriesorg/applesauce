@@ -94,9 +94,18 @@ def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds
         # advertised by *untrusted compressed framing*. Its DECODE_SIZE
         # override caps that allocation to the trusted ASCF index clear_len.
         # Override any inherited caller value, including an enormous one.
-        decoder_env = None
+        # These C11 decoders are independently supplied executables. Never
+        # forward CI tokens, developer credentials or dynamic-loader overrides
+        # from the proof caller's ambient environment to a decoder process.
+        # Use a temporary working directory for any incidental relative I/O.
+        decoder_env = {
+            "PATH": os.defpath,
+            "LANG": "C",
+            "LC_ALL": "C",
+            "HOME": directory,
+            "TMPDIR": directory,
+        }
         if codec == "lzmesh":
-            decoder_env = os.environ.copy()
             decoder_env["DECODE_SIZE"] = str(clear_len)
 
         with tempfile.TemporaryFile() as output:
@@ -109,6 +118,7 @@ def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds
                 stdout=output if codec == "lzmesh" else subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env=decoder_env,
+                cwd=directory,
                 preexec_fn=lambda: limit_decoder_output(clear_len),
                 start_new_session=True,
             )
