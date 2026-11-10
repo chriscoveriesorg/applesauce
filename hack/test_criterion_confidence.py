@@ -353,6 +353,30 @@ class ConfidenceTests(unittest.TestCase):
             self.assertEqual(len(list(csv.DictReader(stream))), len(rows))
         self.assertEqual(list(moved.glob(".confidence.csv.*.tmp")), [])
 
+    def test_stale_output_removal_requires_directory_sync(self):
+        manifest, _ = self.complete_smoke()
+        self.output.write_text("stale evidence", encoding="utf-8")
+        original_fsync = os.fsync
+        directory_sync_attempted = False
+
+        def reject_directory_sync(fd):
+            nonlocal directory_sync_attempted
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                directory_sync_attempted = True
+                raise OSError("injected stale removal sync failure")
+            return original_fsync(fd)
+
+        # If the stale artifact cannot be durably removed, do not proceed
+        # to validation or publish a fresh CSV with an ambiguous failure.
+        with patch.object(confidence.os, "fsync", side_effect=reject_directory_sync):
+            with self.assertRaisesRegex(OSError, "stale removal sync failure"):
+                confidence.write_confidence(
+                    self.summary, self.criterion, self.output, manifest, "smoke"
+                )
+        self.assertTrue(directory_sync_attempted)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
+
     def test_directory_fsync_failure_is_reported_after_publication(self):
         manifest, _ = self.complete_smoke()
         original_fsync = os.fsync
