@@ -492,10 +492,7 @@ mod scan_failure_tests {
         assert!(claim_input_inode(&seen, &fs::metadata(&source).unwrap()));
         assert!(!claim_input_inode(&seen, &fs::metadata(&source).unwrap()));
         assert!(!claim_input_inode(&seen, &fs::metadata(&alias).unwrap()));
-        assert!(claim_input_inode(
-            &seen,
-            &fs::metadata(&separate).unwrap()
-        ));
+        assert!(claim_input_inode(&seen, &fs::metadata(&separate).unwrap()));
         assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
