@@ -2,7 +2,7 @@
 """Independent LZMESH buffer proof for owner-generated ASCF archives.
 
 Requires an externally audited, separately built LZMESH decoder executable.
-No network, filesystem mutations, native decmpfs writes or FSKit operations.
+No network, source mutations, native decmpfs writes or FSKit operations.
 """
 
 import argparse
