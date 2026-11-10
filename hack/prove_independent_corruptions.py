@@ -10,11 +10,14 @@ No filesystem-native compression or FSKit operations are performed.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import tempfile
 
-from verify_independent_lzmesh import InvalidArchive, verify
+from verify_independent_lzmesh import (
+    InvalidArchive, identity, open_regular, require_unchanged, verify,
+)
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 
@@ -27,12 +30,22 @@ def check_corruptions(archive, original, decoder, *, codec):
     archive = Path(archive)
     original = Path(original)
     decoder = Path(decoder)
-    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
-        raise InvalidArchive("negative-test archive exceeds fixture budget")
+    # Keep the original archive descriptor open across baseline decoding and
+    # mutation construction. A pathname swap to a FIFO, symlink or an equally
+    # sized replacement must not hang read_bytes() or change the proof input.
+    # O_NONBLOCK/O_NOFOLLOW and fstat() in open_regular() reject special files.
+    with open_regular(archive) as source:
+        archive_snapshot = identity(os.fstat(source.fileno()))
+        if archive_snapshot[3] > MAX_ARCHIVE_BYTES:
+            raise InvalidArchive("negative-test archive exceeds fixture budget")
 
-    # A decoder which fails every attempt must never produce a passing report.
-    baseline = verify(archive, original, decoder, codec=codec)
-    data = archive.read_bytes()
+        # A decoder which fails every attempt must never produce a passing
+        # report. The held descriptor pins the bytes used for later mutations.
+        baseline = verify(archive, original, decoder, codec=codec)
+        data = source.read(MAX_ARCHIVE_BYTES + 1)
+        if len(data) > MAX_ARCHIVE_BYTES:
+            raise InvalidArchive("negative-test archive grew beyond fixture budget")
+        require_unchanged(archive, archive_snapshot, source)
     if digest(data) != baseline["archive_sha256"]:
         raise InvalidArchive("negative-test source changed after baseline proof")
 
