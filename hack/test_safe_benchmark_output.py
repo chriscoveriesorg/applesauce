@@ -202,6 +202,36 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual((self.evidence / self.output.name).read_text(), "do not remove")
         self.assertEqual((moved / self.output.name).read_text(), "old derived evidence")
 
+    def test_directory_swap_after_fstat_refuses_stale_cleanup(self):
+        # The opened descriptor is still valid when the pathname is moved.
+        # A second identity check must refuse stale cleanup on that inode.
+        moved = self.root / "evidence-moved"
+        replacement = self.root / "replacement-directory"
+        replacement.mkdir()
+        self.output.write_text("old derived evidence", encoding="utf-8")
+        protected = replacement / self.output.name
+        protected.write_text("independent evidence", encoding="utf-8")
+        original_fstat = os.fstat
+        swapped = False
+
+        def swap_after_fstat(fd):
+            nonlocal swapped
+            result = original_fstat(fd)
+            if not swapped:
+                swapped = True
+                self.evidence.rename(moved)
+                replacement.rename(self.evidence)
+            return result
+
+        with patch("safe_benchmark_output.os.fstat", side_effect=swap_after_fstat):
+            with self.assertRaisesRegex(ValueError, "changed during open"):
+                with SafeCsvOutput(self.output, (self.input,)):
+                    pass
+        self.assertTrue(swapped)
+        self.assertEqual((moved / self.output.name).read_text(), "old derived evidence")
+        self.assertEqual(protected.read_text(), "independent evidence")
+        self.assertEqual(self.input.read_text(), "source evidence")
+
     def test_directory_swap_before_open_cannot_redirect_cleanup(self):
         moved = self.root / "evidence-moved"
         protected = self.root / "protected"
