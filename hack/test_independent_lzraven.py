@@ -4,11 +4,13 @@ Genuine LZRAVEN proof is the independent macOS 27 CI job using liblzraven.
 """
 
 import hashlib
+import os
 from pathlib import Path
 import struct
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from verify_independent_lzmesh import InvalidArchive, decode_bounded, verify
 
@@ -85,6 +87,25 @@ class IndependentRavenProofTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(InvalidArchive, "independent decoder failed"):
             self.proof()
+
+    def test_external_raven_decoder_cannot_inherit_ci_secrets(self):
+        self.set_decoder(
+            "import os,pathlib,sys\n"
+            "if any(k in os.environ for k in "
+            "('GITHUB_TOKEN', 'APPL_PROOF_SECRET', 'LD_PRELOAD')):\n"
+            "    sys.exit(72)\n"
+            "if os.environ.get('HOME') != os.getcwd(): sys.exit(73)\n"
+            "pathlib.Path(sys.argv[4]).write_bytes("
+            "pathlib.Path(sys.argv[3]).read_bytes())\n"
+        )
+        with mock.patch.dict(os.environ, {
+            "GITHUB_TOKEN": "sentinel",
+            "APPL_PROOF_SECRET": "sentinel",
+            "LD_PRELOAD": "/sensitive/injection.so",
+        }):
+            report = self.proof()
+        self.assertEqual(report["status"], "independent_lzraven_buffer_decode_verified")
+
 
     def test_timeout_reaps_raven_decoder_descendants(self):
         # The direct decoder may hang after starting a separate helper.
