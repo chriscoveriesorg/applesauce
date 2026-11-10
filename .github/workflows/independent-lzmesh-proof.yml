@@ -26,7 +26,44 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Check the pinned external decoder against permanent Apple-generated vectors
+  # on inexpensive Linux before allocating a scarce native macOS 27 runner.
+  portable-independent-vectors:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build pinned independent C11 LZMESH and replay committed vectors
+        env:
+          UPSTREAM_COMMIT: 8f9d5fd0ffef555b07eaf076bc610404b742f0a8
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none https://github.com/mrowlinson/lzmesh.git "$RUNNER_TEMP/lzmesh"
+          git -C "$RUNNER_TEMP/lzmesh" checkout --quiet --detach "$UPSTREAM_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/lzmesh" rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+          make -C "$RUNNER_TEMP/lzmesh" -j2 all
+          make -C "$RUNNER_TEMP/lzmesh" unit
+          decoder="$RUNNER_TEMP/lzmesh/port_cli"
+          test -x "$decoder"
+          # The independently compiled decoder must not resolve Apple's codec.
+          if ldd "$decoder" | grep -i 'libcompression'; then
+            echo 'Decoder unexpectedly depends on Apple libcompression' >&2
+            exit 1
+          fi
+          python3 hack/prove_committed_vectors.py --codec lzmesh --decoder "$decoder" > "$RUNNER_TEMP/lzmesh-vectors.json"
+          python3 - "$RUNNER_TEMP/lzmesh-vectors.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              vectors = json.load(stream)["vectors"]
+          assert len(vectors) == 2, f"expected two pinned vectors, got {len(vectors)}"
+          assert {v["chunk_count"] for v in vectors} == {2, 3}
+          assert all(v["status"] == "independent_lzmesh_buffer_decode_verified" for v in vectors)
+          print("PASS: two permanent Apple LZMESH vectors decoded independently on Linux")
+          PY
+
   apple-to-independent:
+    needs: portable-independent-vectors
     runs-on: xcode-27
     timeout-minutes: 35
     steps:
