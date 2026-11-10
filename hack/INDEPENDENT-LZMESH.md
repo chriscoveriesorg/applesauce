@@ -59,8 +59,11 @@ The tool executes an **explicitly supplied** binary. It does not download code
 or promote a decoder to a project dependency. Audit and build that executable
 in an isolated environment. The upstream decoder documentation notes that
 a destination with insufficient capacity may silently truncate; this proof
-requires byte-for-byte equality and exact output length before accepting any
-decode. A successful Apple-buffer-to-C decoder comparison does not show that
+sets `DECODE_SIZE` to the already-validated ASCF chunk clear length, overriding
+the caller environment. This bounds the external Mesh CLI's output allocation,
+which otherwise trusts the compressed frame's claimed decoded size. Exact
+byte-for-byte equality and output length are still required before accepting
+any decode. A successful Apple-buffer-to-C decoder comparison does not show that
 macOS registers an LZMESH `decmpfs` handler or that FSKit is mountable.
 
 ## Corruption rejection and evidence preservation
