@@ -205,11 +205,12 @@ impl BackgroundThreads {
                 progress.error(path, &format!("refusing to {action} a non-regular input root"));
                 continue;
             }
-            if !mode.is_compressing() && metadata.is_file() && metadata.nlink() > 1 {
-                // The recursive scanner already skips hard-linked files. An
-                // explicitly requested hard link must fail visibly instead of
-                // appearing to have been restored.
-                progress.error(path, "refusing to restore a hard-linked input root");
+            if metadata.is_file() && metadata.nlink() > 1 {
+                // Replacing one name of a shared inode would break the link
+                // relationship. A directory walk can skip these files, but
+                // an explicitly selected hard-linked file must fail visibly
+                // instead of letting the CLI report a successful no-op.
+                progress.error(path, &format!("refusing to {action} a hard-linked input root"));
                 continue;
             }
             if let Err(e) = volumes.add_root_dir(path, &metadata) {
