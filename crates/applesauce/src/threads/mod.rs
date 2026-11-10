@@ -49,6 +49,7 @@ pub struct OperationContext {
     finished_stats: crossbeam_channel::Sender<Stats>,
     volumes: Volumes,
     verify: bool,
+    pub(crate) directory_timestamp_errors: times::ResetFailureLog,
 }
 
 impl OperationContext {
@@ -64,6 +65,7 @@ impl OperationContext {
             finished_stats,
             volumes,
             verify,
+            directory_timestamp_errors: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -228,6 +230,7 @@ impl BackgroundThreads {
             walker.add_path(path);
         }
         let operation = Arc::new(OperationContext::new(mode, finished_stats, volumes, verify));
+        let timestamp_errors = Arc::clone(&operation.directory_timestamp_errors);
         let stats = &operation.stats;
         let chan = self.reader.chan();
         // Overlapping directory and explicit-file roots can select the same
@@ -342,9 +345,16 @@ impl BackgroundThreads {
         });
         drop(operation);
 
-        finished_stats_rx
+        // Each file Context drops its parent resetter before releasing the
+        // operation reference. By the time the stats sender is dropped, every
+        // activated directory reset has completed and any failures are ready.
+        let stats = finished_stats_rx
             .recv()
-            .expect("OperationContext will send stats on drop of all arcs")
+            .expect("OperationContext will send stats on drop of all arcs");
+        for (directory, message) in timestamp_errors.lock().unwrap().drain(..) {
+            progress.error(&directory, &message);
+        }
+        stats
     }
 }
 
