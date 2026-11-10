@@ -177,32 +177,32 @@ impl BackgroundThreads {
         let volumes = Volumes::new();
         let mut walker = scan::Walker::new(progress);
         for path in paths {
-            // Restoration must inspect the root itself. Following a root
-            // symlink can silently restore a different file or whole tree
-            // than the operator selected.
-            let metadata_result = if mode.is_compressing() {
-                path.metadata()
-            } else {
-                path.symlink_metadata()
-            };
-            let metadata = match metadata_result {
+            // Never follow an explicitly selected symlink root in either
+            // direction. In particular, following a symlink to a directory
+            // during compression could walk and replace files outside the
+            // tree the caller intended to select.
+            let metadata = match path.symlink_metadata() {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    // Every explicitly requested root is part of the operation.
-                    // Silently dropping a missing or unreadable root could make
-                    // restoration appear successful without touching any file.
+                    // Silently dropping an explicit input can make a partial
+                    // compression or restoration appear successful.
                     progress.error(path, &format!("unable to inspect input root: {error}"));
                     continue;
                 }
             };
-            if !mode.is_compressing() && metadata.file_type().is_symlink() {
-                progress.error(path, "refusing to restore a symlink input root");
+            let action = if mode.is_compressing() {
+                "compress"
+            } else {
+                "restore"
+            };
+            if metadata.file_type().is_symlink() {
+                progress.error(path, &format!("refusing to {action} a symlink input root"));
                 continue;
             }
-            if !mode.is_compressing() && !metadata.is_file() && !metadata.is_dir() {
-                // Explicit FIFOs, sockets and devices must fail before the
-                // walker can silently skip them (or attempt to open a FIFO).
-                progress.error(path, "refusing to restore a non-regular input root");
+            if !metadata.is_file() && !metadata.is_dir() {
+                // A FIFO, device or socket is not a legitimate input root.
+                // Reject it before the walker can silently skip or open it.
+                progress.error(path, &format!("refusing to {action} a non-regular input root"));
                 continue;
             }
             if !mode.is_compressing() && metadata.is_file() && metadata.nlink() > 1 {
