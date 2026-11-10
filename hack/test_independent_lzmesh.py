@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import struct
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -140,6 +141,29 @@ class IndependentMeshProofTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(InvalidArchive, "independent decoder failed"):
             verify(self.archive, self.original, self.decoder)
+
+    def test_reaps_decoder_descendants_after_success(self):
+        # A successful decoder can still leave a helper process running.
+        # The proof runner must terminate the entire process group.
+        leaked = self.root / "orphaned-mesh-helper"
+        child = (
+            "import pathlib,time; time.sleep(1.0); "
+            f"pathlib.Path({str(leaked)!r}).write_text('leaked')"
+        )
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\n"
+            "import subprocess,sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL)\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            verify(self.archive, self.original, self.decoder)["chunk_count"], 1
+        )
+        time.sleep(1.3)
+        self.assertFalse(leaked.exists(), "decoder helper escaped cleanup")
 
     def test_rejects_original_modified_during_decode(self):
         self.decoder.write_text(
