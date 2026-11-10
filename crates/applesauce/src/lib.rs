@@ -535,10 +535,17 @@ mod tests {
                 true,
             );
             let errors = reporter.errors.lock().unwrap();
-            assert_eq!(errors.len(), 1, "missing compression error for {}", root.display());
+            assert_eq!(
+                errors.len(),
+                1,
+                "missing compression error for {}",
+                root.display()
+            );
             assert_eq!(&errors[0].0, root);
             assert!(
-                errors[0].1.contains("refusing to compress a symlink input root"),
+                errors[0]
+                    .1
+                    .contains("refusing to compress a symlink input root"),
                 "wrong error for {}: {}",
                 root.display(),
                 errors[0].1
@@ -598,10 +605,17 @@ mod tests {
                 true,
             );
             let errors = reporter.errors.lock().unwrap();
-            assert_eq!(errors.len(), 1, "missing compression refusal for {}", root.display());
+            assert_eq!(
+                errors.len(),
+                1,
+                "missing compression refusal for {}",
+                root.display()
+            );
             assert_eq!(&errors[0].0, root);
             assert!(
-                errors[0].1.contains("refusing to compress a non-regular input root"),
+                errors[0]
+                    .1
+                    .contains("refusing to compress a non-regular input root"),
                 "wrong compression error for {}: {}",
                 root.display(),
                 errors[0].1

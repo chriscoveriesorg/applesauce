@@ -202,7 +202,10 @@ impl BackgroundThreads {
             if !metadata.is_file() && !metadata.is_dir() {
                 // A FIFO, device or socket is not a legitimate input root.
                 // Reject it before the walker can silently skip or open it.
-                progress.error(path, &format!("refusing to {action} a non-regular input root"));
+                progress.error(
+                    path,
+                    &format!("refusing to {action} a non-regular input root"),
+                );
                 continue;
             }
             if metadata.is_file() && metadata.nlink() > 1 {
@@ -210,7 +213,10 @@ impl BackgroundThreads {
                 // relationship. A directory walk can skip these files, but
                 // an explicitly selected hard-linked file must fail visibly
                 // instead of letting the CLI report a successful no-op.
-                progress.error(path, &format!("refusing to {action} a hard-linked input root"));
+                progress.error(
+                    path,
+                    &format!("refusing to {action} a hard-linked input root"),
+                );
                 continue;
             }
             if let Err(e) = volumes.add_root_dir(path, &metadata) {

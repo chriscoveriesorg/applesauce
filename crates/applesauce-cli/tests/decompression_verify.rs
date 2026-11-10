@@ -229,7 +229,10 @@ fn explicit_hardlinked_compression_root_fails_and_preserves_both_names() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success(), "explicit hard link silently succeeded");
+    assert!(
+        !output.status.success(),
+        "explicit hard link silently succeeded"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("refusing to compress a hard-linked input root"),
@@ -262,11 +265,12 @@ fn explicit_hardlinked_compression_fails_even_when_a_second_root_succeeds() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success(), "partial compression reported success");
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("refusing to compress a hard-linked input root")
+        !output.status.success(),
+        "partial compression reported success"
     );
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("refusing to compress a hard-linked input root"));
     assert_eq!(fs::read(&original).unwrap(), source);
     assert_eq!(fs::read(&selected_link).unwrap(), source);
     assert!(!applesauce::info::get(&original).unwrap().is_compressed);
@@ -311,12 +315,10 @@ fn explicit_symlink_compression_roots_exit_nonzero_and_preserve_targets() {
             report["operation_errors"][0]["error"]["kind"].as_str(),
             Some("operation_failed")
         );
-        assert!(
-            report["operation_errors"][0]["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("refusing to compress a symlink input root")
-        );
+        assert!(report["operation_errors"][0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("refusing to compress a symlink input root"));
         assert!(root.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(fs::read(&regular).unwrap(), original);
         assert!(!applesauce::info::get(&regular).unwrap().is_compressed);
