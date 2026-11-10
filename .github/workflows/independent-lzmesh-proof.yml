@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/workflows/independent-lzmesh-proof.yml'
       - 'hack/verify_independent_lzmesh.py'
+      - 'hack/prove_independent_corruptions.py'
+      - 'hack/test_independent_corruptions.py'
       - 'hack/test_independent_lzmesh.py'
       - 'crates/applesauce-core/src/cold_archive.rs'
       - 'crates/applesauce-cli/src/archive.rs'
@@ -111,6 +113,30 @@ jobs:
           PY
           printf '## Independent LZMESH byte proof\n\nTen generated Apple-buffer ASCF fixtures were independently decoded. See per-fixture evidence and exact toolchain provenance in the artifact. This does not establish native APFS/decmpfs support.\n' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Reject corrupted real Apple LZMESH ASCF payloads
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mesh-proof/negative"
+          for family in records digest; do
+            input="$RUNNER_TEMP/mesh-proof/$family-131103.bin"
+            archive="$RUNNER_TEMP/mesh-proof/$family-131103.ascf"
+            report="$RUNNER_TEMP/mesh-proof/negative/$family-131103.json"
+            python3 hack/prove_independent_corruptions.py \
+              --archive "$archive" --original "$input" \
+              --decoder "$RUNNER_TEMP/lzmesh/port_cli" --codec lzmesh > "$report"
+            python3 - "$report" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = json.load(stream)
+          assert report["status"] == "independent_corruptions_rejected"
+          assert report["case_count"] == 5
+          assert len(report["cases"]) == 5
+          print(report["codec"], "5/5 negative cases rejected")
+          PY
+          done
+          printf 'Two generated content families each rejected five corrupted archive variants through the independent decoder. Original ASCF vectors, plaintext and negative-case reports are attached.\n' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload generated proof reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -118,6 +144,9 @@ jobs:
           name: independent-lzmesh-buffer-proof
           path: |
             ${{ runner.temp }}/mesh-proof/*.json
+            ${{ runner.temp }}/mesh-proof/*.ascf
+            ${{ runner.temp }}/mesh-proof/*.bin
+            ${{ runner.temp }}/mesh-proof/negative/*.json
             ${{ runner.temp }}/mesh-proof/environment.txt
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30
