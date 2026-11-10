@@ -237,7 +237,7 @@ fn explicit_hardlinked_compression_root_fails_and_preserves_both_names() {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
         .expect("compression failure should still produce valid JSON");
-    assert_eq!(report["complete"], false);
+    assert_eq!(report["complete"].as_bool(), Some(false));
     assert_eq!(fs::read(&original).unwrap(), source);
     assert_eq!(fs::read(&selected_link).unwrap(), source);
     assert_eq!(fs::metadata(&original).unwrap().nlink(), 2);
