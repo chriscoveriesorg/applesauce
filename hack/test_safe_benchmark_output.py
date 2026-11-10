@@ -180,6 +180,28 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_temporary_file_sync_failure_never_publishes(self):
+        # A failed file durability barrier must not publish an unverified
+        # CSV, even if its rows have already been written successfully.
+        real_fsync = os.fsync
+        failed = False
+
+        def refuse_file_sync(fd):
+            nonlocal failed
+            if not failed and os.fstat(fd).st_mode & 0o170000 == 0o100000:
+                failed = True
+                raise OSError("injected temporary CSV sync failure")
+            return real_fsync(fd)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fsync", side_effect=refuse_file_sync):
+                with self.assertRaisesRegex(OSError, "temporary CSV sync failure"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(failed)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_cleanup_unlink_failure_preserves_original_sync_error(self):
         # Cleanup is best-effort: a second filesystem failure must not hide
         # the publication durability error or affect original evidence.
