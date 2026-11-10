@@ -50,6 +50,12 @@ class SafeCsvOutput:
             opened = os.fstat(fd)
             if (opened.st_dev, opened.st_ino) != (known.st_dev, known.st_ino):
                 raise ValueError("benchmark output directory changed during open")
+            # The pathname can be swapped after opening the descriptor but
+            # before stale-output cleanup. Refuse to delete from a displaced
+            # directory, even though the descriptor itself remains valid.
+            visible = os.stat(output.parent, follow_symlinks=False)
+            if (visible.st_dev, visible.st_ino) != (opened.st_dev, opened.st_ino):
+                raise ValueError("benchmark output directory changed during open")
             # The output may be a hardlink. Verify the actual directory entry
             # after opening its parent, and before unlinking old evidence.
             try:
