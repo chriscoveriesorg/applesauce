@@ -78,7 +78,10 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
                 return Some("bundle_non_resource");
             }
             let resources = &parts[app_index + 3..];
-            if resources.iter().any(|part| sensitive_bundle_component(part)) {
+            if resources
+                .iter()
+                .any(|part| sensitive_bundle_component(part))
+            {
                 return Some("bundle_nested_code_or_signature");
             }
             // A candidate resource still needs codesign and launch tests
@@ -1424,7 +1427,10 @@ mod tests {
             );
         }
         assert_eq!(
-            profile_exclusion(Profile::Bundles, &resources.join("data/localization.strings")),
+            profile_exclusion(
+                Profile::Bundles,
+                &resources.join("data/localization.strings")
+            ),
             None
         );
     }
