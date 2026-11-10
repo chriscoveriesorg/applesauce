@@ -5,12 +5,15 @@ closed. The macOS workflows use pinned independent C11 decoders instead.
 """
 
 import hashlib
+import os
 from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 from prove_independent_corruptions import check_corruptions
+from verify_independent_lzmesh import InvalidArchive
 
 
 class NegativeProofTests(unittest.TestCase):
@@ -99,6 +102,82 @@ class NegativeProofTests(unittest.TestCase):
             check_corruptions(
                 self.archive, self.original, self.decoder, codec="lzmesh"
             )
+
+
+    def test_rejects_archive_replaced_after_successful_baseline(self):
+        # A byte-identical replacement cannot inherit the original proof.
+        self.make_fixture("lzmesh")
+        replacement = self.root / "replacement.ascf"
+        replacement.write_bytes(self.archive.read_bytes())
+        from prove_independent_corruptions import verify as real_verify
+
+        def replace_after_baseline(*args, **kwargs):
+            result = real_verify(*args, **kwargs)
+            os.replace(replacement, self.archive)
+            return result
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=replace_after_baseline):
+            with self.assertRaisesRegex(
+                InvalidArchive, "proof input changed during decode"
+            ):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFOs")
+    def test_rejects_fifo_swapped_into_archive_after_baseline(self):
+        # The previous read_bytes() path could hang indefinitely here.
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+
+        def replace_after_baseline(*args, **kwargs):
+            result = real_verify(*args, **kwargs)
+            self.archive.unlink()
+            os.mkfifo(self.archive)
+            return result
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=replace_after_baseline):
+            with self.assertRaisesRegex(
+                InvalidArchive, "proof input changed during decode"
+            ):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+
+    def test_rejects_oversize_archive_before_baseline(self):
+        self.make_fixture("lzmesh")
+        with mock.patch("prove_independent_corruptions.MAX_ARCHIVE_BYTES",
+                        self.archive.stat().st_size - 1):
+            with self.assertRaisesRegex(
+                InvalidArchive, "archive exceeds fixture budget"
+            ):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+
+    def test_rejects_archive_growth_during_baseline(self):
+        self.make_fixture("lzmesh")
+        initial_size = self.archive.stat().st_size
+        from prove_independent_corruptions import verify as real_verify
+
+        def grow_after_baseline(*args, **kwargs):
+            result = real_verify(*args, **kwargs)
+            with self.archive.open("ab") as source:
+                source.write(b"!" * 64)
+            return result
+
+        with mock.patch("prove_independent_corruptions.MAX_ARCHIVE_BYTES",
+                        initial_size + 16):
+            with mock.patch("prove_independent_corruptions.verify",
+                            side_effect=grow_after_baseline):
+                with self.assertRaisesRegex(
+                    InvalidArchive, "grew beyond fixture budget"
+                ):
+                    check_corruptions(
+                        self.archive, self.original, self.decoder, codec="lzmesh"
+                    )
 
 
 if __name__ == "__main__":
