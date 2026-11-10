@@ -154,6 +154,32 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_failed_atomic_replace_cleans_temporary_without_publishing(self):
+        # A rename refusal must not leave a plausible upload artifact or
+        # abandon a partially completed temporary CSV.
+        real_replace = os.replace
+        attempted = False
+
+        def refuse_publication(src, dst, *args, **kwargs):
+            nonlocal attempted
+            if (
+                dst == self.output.name
+                and kwargs.get("src_dir_fd") is not None
+                and kwargs.get("dst_dir_fd") is not None
+            ):
+                attempted = True
+                raise PermissionError("injected atomic replace refusal")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.replace", side_effect=refuse_publication):
+                with self.assertRaisesRegex(PermissionError, "atomic replace refusal"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(attempted)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_cleanup_unlink_failure_preserves_original_sync_error(self):
         # Cleanup is best-effort: a second filesystem failure must not hide
         # the publication durability error or affect original evidence.
