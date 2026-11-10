@@ -54,8 +54,10 @@ fn walk_dir_over(
                         // in this directory. Never publish a replacement when
                         // its parent timestamps could not be captured.
                         let reset_times = reset_times.get_or_insert_with(|| {
-                            let setup = times::save_times(path)
-                                .and_then(|saved| times::Resetter::new(path, saved));
+                            let setup = times::Resetter::capture_with_failure_log(
+                                path,
+                                Arc::clone(&context.directory_timestamp_errors),
+                            );
                             checked_resetter(path, setup, &failures)
                         });
                         if reset_times.is_none() {
