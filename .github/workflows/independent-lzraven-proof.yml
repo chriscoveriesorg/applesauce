@@ -115,7 +115,7 @@ jobs:
           from pathlib import Path
           import sys
           root = Path(sys.argv[1])
-          reports = [json.loads(path.read_text()) for path in root.glob("*.json")]
+          reports = [json.loads(path.read_text()) for path in root.glob("*.json") if path.name != "committed-fixtures.json"]
           assert len(reports) == 10, f"expected ten independent reports, got {len(reports)}"
           assert any(r["chunk_count"] > 1 for r in reports)
           assert {r["logical_size_bytes"] for r in reports} == {
