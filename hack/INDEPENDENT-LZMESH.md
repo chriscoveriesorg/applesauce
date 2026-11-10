@@ -39,9 +39,13 @@ Raven/Mesh write gate (#88) and FSKit physical acceptance (#86) remain closed.
    recorded chunk count and bytes. Every ASCF index record is checked before the
    external decoder runs. Each independently decoded chunk must have its exact
    declared length, the original bytes and the ASCF SHA-256, then the complete
-   decoded data must match the ASCF whole-file SHA-256. Malformed index geometry
-   and insufficient decoder output fail closed. The tool bounds logical fixture
-   size to 64 MiB by default; larger tests require an explicit override.
+   decoded data must match the ASCF whole-file SHA-256. Malformed index geometry,
+   insufficient or excessive decoder output, and changes to evidence inputs
+   during verification fail closed. Decoder stdout goes to a bounded temporary
+   file protected by a POSIX file-size limit. Archive, original, and executable
+   identities are checked after decoding; the executable SHA-256 is checked
+   before and after execution. The tool bounds logical fixture size to 64 MiB
+   by default; larger tests require an explicit override.
 
 4. Have an independent reviewer inspect the pinned decoder, commands, evidence,
    differences from Apple's `compression_decode_buffer`, and failure cases.
