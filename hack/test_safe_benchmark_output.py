@@ -90,6 +90,30 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_replaced_entry_survives_failed_publication_cleanup(self):
+        # A concurrent writer can substitute the entry just before cleanup.
+        # The cleanup must not knowingly unlink the replacement.
+        replacement = self.root / "unrelated.csv"
+        replacement.write_text("independent evidence", encoding="utf-8")
+        real_fsync = os.fsync
+        triggered = False
+
+        def fail_after_rename(fd):
+            nonlocal triggered
+            if not triggered and self.output.exists():
+                triggered = True
+                os.replace(replacement, self.output)
+                raise OSError("injected post-rename sync failure")
+            return real_fsync(fd)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fsync", side_effect=fail_after_rename):
+                with self.assertRaisesRegex(OSError, "injected post-rename"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(triggered)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_real_directory_swap_during_open_is_rejected(self):
         moved = self.root / "evidence-moved"
         incoming = self.root / "replacement-directory"
