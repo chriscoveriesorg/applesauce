@@ -85,5 +85,7 @@ JSON reports, negative JSON reports and environment provenance. The workflow
 requests 30-day artifact retention, but the repository's current effective
 expiry is approximately 24 hours (verified from the run 42757335808
 artifact metadata on 10 November 2026). Reviewers must retrieve the artifacts
-promptly. Independent source review and committed durable vectors remain
-separate acceptance gates.
+promptly. Four durable Apple-generated differential vectors are committed
+under `tests/fixtures/codec-crossdecode/` and replayed with the pinned C11
+decoder on Linux before the native macOS proof job is allocated. Independent
+source/evidence review and PR approval are still required.
