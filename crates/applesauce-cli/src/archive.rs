@@ -864,7 +864,9 @@ mod tests {
     fn verified_staging_rejects_replaced_regular_file_and_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let mut temporary = NamedTempFile::new_in(dir.path()).unwrap();
-        temporary.write_all(b"generated verified staging bytes").unwrap();
+        temporary
+            .write_all(b"generated verified staging bytes")
+            .unwrap();
         temporary.flush().unwrap();
         let verified = temporary.as_file().metadata().unwrap();
         ensure_unchanged_staging_output(&temporary, &verified).unwrap();
@@ -905,8 +907,9 @@ mod tests {
         fs::write(temporary.path(), b"generated changed! bytes").unwrap();
         temporary
             .as_file()
-            .set_modified(std::time::SystemTime::UNIX_EPOCH
-                + std::time::Duration::from_secs(12_345))
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12_345),
+            )
             .unwrap();
         assert_eq!(
             temporary.as_file().metadata().unwrap().len(),
