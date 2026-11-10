@@ -119,6 +119,13 @@ class SafeCsvOutput:
             # as published at the path the caller supplied.
             visible = os.stat(self.destination.parent, follow_symlinks=False)
             if (visible.st_dev, visible.st_ino) != self.opened_identity:
+                # Publication reached the original inode, not the requested
+                # pathname. Do not leave apparently valid evidence behind.
+                try:
+                    os.unlink(self.destination.name, dir_fd=self.directory)
+                    os.fsync(self.directory)
+                except OSError:
+                    pass  # Preserve the directory-identity failure.
                 raise ValueError("benchmark output directory changed during publication")
         finally:
             if temporary is not None:
