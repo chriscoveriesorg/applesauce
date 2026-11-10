@@ -99,15 +99,15 @@ class IndependentMeshProofTests(unittest.TestCase):
 
     def test_external_decoder_cannot_inherit_ci_secrets_or_workspace(self):
         self.decoder.write_text(
-            "#!/usr/bin/env python3\\n"
-            "import os,sys\\n"
-            "payload = sys.stdin.buffer.read()\\n"
+            "#!/usr/bin/env python3\n"
+            "import os,sys\n"
+            "payload = sys.stdin.buffer.read()\n"
             "if any(k in os.environ for k in "
-            "('GITHUB_TOKEN', 'APPL_PROOF_SECRET', 'LD_PRELOAD')):\\n"
-            "    sys.exit(72)\\n"
-            "if os.environ.get('HOME') != os.getcwd(): sys.exit(73)\\n"
-            "if os.environ.get('DECODE_SIZE') != str(len(payload)): sys.exit(74)\\n"
-            "sys.stdout.buffer.write(payload)\\n",
+            "('GITHUB_TOKEN', 'APPL_PROOF_SECRET', 'LD_PRELOAD')):\n"
+            "    sys.exit(72)\n"
+            "if os.environ.get('HOME') != os.getcwd(): sys.exit(73)\n"
+            "if os.environ.get('DECODE_SIZE') != str(len(payload)): sys.exit(74)\n"
+            "sys.stdout.buffer.write(payload)\n",
             encoding="utf-8",
         )
         with mock.patch.dict(os.environ, {
