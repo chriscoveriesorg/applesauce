@@ -186,11 +186,14 @@ applesauce compress --dry-run --profile bundles --json /Applications/Example.app
 `--profile caches` and `--profile bundles` are **read-only audits**. They require
 `--dry-run`, and the mutating compressor rejects them. The caches classifier
 considers regular files beneath a `Library/Caches` directory pair and skips
-nested app/framework/plugin bundles. The bundles classifier considers only
-`Contents/Resources` within a `.app`; it excludes executable extensions,
-regular files with executable permission bits (including extensionless tools),
-Mach-O/fat binaries, ELF/PE images and shebang scripts detected from a four-byte
-header, plus nested code containers and signature directories. Excluded
+nested signed code containers, including Spotlight importers, preference
+panes, screensavers, Automator actions, services and audio plugins. The bundles
+classifier considers only `Contents/Resources` within a `.app`; it excludes
+executable extensions (including compiled AppleScript and bytecode), regular
+files with executable permission bits, Mach-O/fat binaries, ELF/PE images
+and shebang scripts detected from a four-byte header. Code-hosting Resources
+subtrees such as `Frameworks`, `PlugIns`, `XPCServices` and `Helpers` are
+pruned even when their contents lack bundle extensions. Excluded
 code/signature directories are recorded as skipped subtree roots without
 opening or enumerating their descendants, including unreadable directories.
 Parents leading to eligible Resources or Caches remain traversable. Skipped
