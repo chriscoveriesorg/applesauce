@@ -51,6 +51,10 @@ Final-component symlinks are rejected, including substitutions pointing
 to the same open inode. Source archive, original and executable identity changes fail verification;
 the executable is hashed before and after proof. Decoder operations time out
 after 30 seconds each, and total fixture size is bounded to 64 MiB by default.
+Each decoder runs in a new POSIX session; the harness kills its process group
+on successful exit, error or timeout, to reap normal forked helpers. This
+is best-effort lifecycle cleanup rather than a sandbox against code that
+explicitly creates another session.
 
 The portable Python tests use a synthetic identity decoder only to validate
 parsing, subprocess, provenance and failure conditions. They cannot prove
