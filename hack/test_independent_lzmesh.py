@@ -121,9 +121,9 @@ class IndependentMeshProofTests(unittest.TestCase):
         replacement = self.root / "replacement.ascf"
         replacement.write_bytes(self.archive.read_bytes())
         self.decoder.write_text(
-            "#!/usr/bin/env python3\\nimport os, sys\\n"
-            f"os.replace({str(replacement)!r}, {str(self.archive)!r})\\n"
-            "sys.stdout.buffer.write(sys.stdin.buffer.read())\\n",
+            "#!/usr/bin/env python3\nimport os, sys\n"
+            f"os.replace({str(replacement)!r}, {str(self.archive)!r})\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
             encoding="utf-8",
         )
         with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
