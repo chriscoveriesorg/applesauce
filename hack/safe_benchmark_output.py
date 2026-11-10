@@ -51,6 +51,11 @@ class SafeCsvOutput:
             opened = os.fstat(fd)
             if (opened.st_dev, opened.st_ino) != (known.st_dev, known.st_ino):
                 raise ValueError("benchmark output directory changed during open")
+            # A private mode is insufficient when this process does not own
+            # the directory (for example, access granted through an ACL).
+            # The owner can replace entries or relax permissions at any time.
+            if opened.st_uid != os.geteuid():
+                raise ValueError("benchmark output directory must be owned by current user")
             # Publication cleanup assumes exclusive control of this directory.
             # Refuse directories writable by other users: pathname identity
             # checks alone cannot prevent concurrent entry substitution.
