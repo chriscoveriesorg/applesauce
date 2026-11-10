@@ -286,7 +286,11 @@ impl BackgroundThreads {
                             IncompressibleReason::Empty,
                         )))
                     } else {
-                        None
+                        // Incompressible describes an uncompressed file that is
+                        // ineligible for *compression*, not a file needing
+                        // restoration. This includes empty, oversized, and
+                        // resource-fork-bearing files in ordinary mixed trees.
+                        Some(SkipReason::NotCompressed)
                     }
                 }
             };
