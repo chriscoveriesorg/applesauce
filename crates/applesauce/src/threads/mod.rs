@@ -298,7 +298,10 @@ impl BackgroundThreads {
             // writers can each verify a different staged file and race the
             // atomic rename. One inode must have one restore owner.
             if !mode.is_compressing()
-                && matches!(&file_info.compression_state, FileCompressionState::Compressed)
+                && matches!(
+                    &file_info.compression_state,
+                    FileCompressionState::Compressed
+                )
                 && !claim_restore_inode(&restore_claims, &metadata)
             {
                 progress.file_skipped(&path, SkipReason::DuplicateInput);
@@ -341,7 +344,9 @@ impl BackgroundThreads {
 // Only one writer may restore a compressed inode in an invocation, even when
 // selected via both a directory root and an explicit file path.
 fn claim_restore_inode(seen: &Mutex<HashSet<(u64, u64)>>, metadata: &Metadata) -> bool {
-    seen.lock().unwrap().insert((metadata.dev(), metadata.ino()))
+    seen.lock()
+        .unwrap()
+        .insert((metadata.dev(), metadata.ino()))
 }
 
 // A failed metadata or timestamp read while scanning an input for restoration
@@ -487,7 +492,10 @@ mod scan_failure_tests {
         assert!(claim_restore_inode(&seen, &fs::metadata(&source).unwrap()));
         assert!(!claim_restore_inode(&seen, &fs::metadata(&source).unwrap()));
         assert!(!claim_restore_inode(&seen, &fs::metadata(&alias).unwrap()));
-        assert!(claim_restore_inode(&seen, &fs::metadata(&separate).unwrap()));
+        assert!(claim_restore_inode(
+            &seen,
+            &fs::metadata(&separate).unwrap()
+        ));
         assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
