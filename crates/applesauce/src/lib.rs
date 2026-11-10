@@ -587,6 +587,26 @@ mod tests {
                 );
             }
         }
+        for root in [&fifo, &socket] {
+            let reporter = RootErrorProgress::default();
+            compressor.recursive_compress(
+                iter::once(root.as_path()),
+                Kind::default(),
+                1.0,
+                2,
+                &reporter,
+                true,
+            );
+            let errors = reporter.errors.lock().unwrap();
+            assert_eq!(errors.len(), 1, "missing compression refusal for {}", root.display());
+            assert_eq!(&errors[0].0, root);
+            assert!(
+                errors[0].1.contains("refusing to compress a non-regular input root"),
+                "wrong compression error for {}: {}",
+                root.display(),
+                errors[0].1
+            );
+        }
         assert!(fifo.symlink_metadata().unwrap().file_type().is_fifo());
         assert!(socket.exists());
     }
