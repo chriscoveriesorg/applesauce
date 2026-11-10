@@ -13,6 +13,9 @@ on:
       - 'hack/test_independent_corruptions.py'
       - 'hack/test_independent_lzmesh.py'
       - 'hack/test_independent_lzraven.py'
+      - 'hack/prove_committed_vectors.py'
+      - 'hack/test_committed_codec_vectors.py'
+      - 'tests/fixtures/codec-crossdecode/**'
       - '.github/workflows/portable-cold-archive.yml'
   push:
     branches: [main, 'feature/seekable-raven-mesh-fskit-backend-*']
@@ -24,6 +27,9 @@ on:
       - 'hack/test_independent_corruptions.py'
       - 'hack/test_independent_lzmesh.py'
       - 'hack/test_independent_lzraven.py'
+      - 'hack/prove_committed_vectors.py'
+      - 'hack/test_committed_codec_vectors.py'
+      - 'tests/fixtures/codec-crossdecode/**'
       - '.github/workflows/portable-cold-archive.yml'
 
 permissions:
@@ -52,6 +58,11 @@ jobs:
         run: python3 -m unittest discover -s hack -p 'test_independent_lzraven.py' -v
       - name: Test independent negative-proof enforcement for both codecs
         run: python3 -m unittest discover -s hack -p 'test_independent_corruptions.py' -v
+      - name: Check committed Apple ASCF vectors and corruption regressions
+        run: |
+          set -euo pipefail
+          python3 hack/prove_committed_vectors.py
+          python3 -m unittest discover -s hack -p 'test_committed_codec_vectors.py' -v
       - name: Check formatting and cross-platform clippy
         run: |
           set -euo pipefail

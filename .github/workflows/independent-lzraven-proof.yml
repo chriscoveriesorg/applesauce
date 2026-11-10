@@ -10,6 +10,9 @@ on:
       - 'hack/prove_independent_corruptions.py'
       - 'hack/test_independent_corruptions.py'
       - 'hack/test_independent_lzraven.py'
+      - 'hack/prove_committed_vectors.py'
+      - 'hack/test_committed_codec_vectors.py'
+      - 'tests/fixtures/codec-crossdecode/**'
       - 'crates/applesauce-core/src/cold_archive.rs'
       - 'crates/applesauce-cli/src/archive.rs'
       - 'Cargo.lock'
@@ -45,6 +48,15 @@ jobs:
             echo 'Refusing a purported independent decoder linked to Apple libcompression' >&2
             exit 1
           fi
+
+      - name: Independently decode committed Apple-generated LZRAVEN vectors
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/raven-proof"
+          python3 hack/prove_committed_vectors.py --codec lzraven \
+            --decoder "$RUNNER_TEMP/lzraven/build/lzraven_dec" \
+            > "$RUNNER_TEMP/raven-proof/committed-fixtures.json"
+          echo 'Committed LZRAVEN vectors independently decoded with pinned C11 implementation.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create Apple LZRAVEN ASCF fixtures and verify with independent decoder
         run: |
