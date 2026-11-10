@@ -85,6 +85,15 @@ def decode_bounded(decoder, payload, clear_len, index, codec):
             command = [str(decoder), "dec", "e05"]
             stdin_payload = payload
 
+        # The pinned Mesh port_cli otherwise allocates the decoded size
+        # advertised by *untrusted compressed framing*. Its DECODE_SIZE
+        # override caps that allocation to the trusted ASCF index clear_len.
+        # Override any inherited caller value, including an enormous one.
+        decoder_env = None
+        if codec == "lzmesh":
+            decoder_env = os.environ.copy()
+            decoder_env["DECODE_SIZE"] = str(clear_len)
+
         with tempfile.TemporaryFile() as output:
             try:
                 process = subprocess.run(
@@ -94,6 +103,7 @@ def decode_bounded(decoder, payload, clear_len, index, codec):
                     stderr=subprocess.DEVNULL,
                     timeout=30,
                     check=False,
+                    env=decoder_env,
                     preexec_fn=lambda: limit_decoder_output(clear_len),
                 )
             except subprocess.TimeoutExpired as exc:
