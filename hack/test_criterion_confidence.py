@@ -362,8 +362,9 @@ class ConfidenceTests(unittest.TestCase):
         self.assertEqual(
             protected.read_text(encoding="utf-8"), "protected Criterion input"
         )
-        with (moved / "confidence.csv").open(newline="", encoding="utf-8") as stream:
-            self.assertEqual(len(list(csv.DictReader(stream))), len(rows))
+        # A failed publication must not leave a valid-looking artifact in
+        # the moved directory, which may be uploaded by an always() step.
+        self.assertFalse((moved / "confidence.csv").exists())
         self.assertEqual(list(moved.glob(".confidence.csv.*.tmp")), [])
 
     def test_stale_output_removal_requires_directory_sync(self):
