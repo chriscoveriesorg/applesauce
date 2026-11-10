@@ -112,17 +112,11 @@ def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds
                 preexec_fn=lambda: limit_decoder_output(clear_len),
                 start_new_session=True,
             )
+            timeout_error = None
             try:
-                try:
-                    process.communicate(input=stdin_payload, timeout=timeout_seconds)
-                except subprocess.TimeoutExpired as exc:
-                    raise InvalidArchive(
-                        f"independent decoder timed out on chunk {index}"
-                    ) from exc
-                if process.returncode != 0:
-                    raise InvalidArchive(
-                        f"independent decoder failed on chunk {index} (exit {process.returncode})"
-                    )
+                process.communicate(input=stdin_payload, timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                timeout_error = exc
             finally:
                 # Also clean up descendants when their parent exits successfully
                 # or fails. This is best-effort process-group cleanup, not an
@@ -131,7 +125,20 @@ def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                process.wait()
+                if timeout_error is not None:
+                    # Python explicitly requires a second communicate() after
+                    # TimeoutExpired to finish cleaning up its pipe state.
+                    process.communicate()
+                else:
+                    process.wait()
+            if timeout_error is not None:
+                raise InvalidArchive(
+                    f"independent decoder timed out on chunk {index}"
+                ) from timeout_error
+            if process.returncode != 0:
+                raise InvalidArchive(
+                    f"independent decoder failed on chunk {index} (exit {process.returncode})"
+                )
             if codec == "lzraven":
                 try:
                     with open_regular(output_path) as result:
