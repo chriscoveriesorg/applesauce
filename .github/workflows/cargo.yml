@@ -62,14 +62,21 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: Run tests
         run: cargo test --workspace --all-targets
+      # Exercise every feature combination on stable. Beta/nightly still run
+      # the default check, tests and Clippy to catch compiler regressions,
+      # without repeating three expensive native-codec suites per toolchain.
       - name: Run tests with system lzfse
+        if: matrix.rust == 'stable'
         run: cargo test --workspace --features system-lzfse --all-targets
       - name: Test opt-in native LZBitmap on generated temporary files
+        if: matrix.rust == 'stable'
         run: cargo test --workspace --features lzbitmap --all-targets
       - name: Run tests with only zlib
+        if: matrix.rust == 'stable'
         run: cargo test --workspace --no-default-features --features zlib --all-targets
 
       - name: Check for clippy warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Check opt-in native LZBitmap for clippy warnings
+        if: matrix.rust == 'stable'
         run: cargo clippy --workspace --features lzbitmap --all-targets -- -D warnings
