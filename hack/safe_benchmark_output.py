@@ -82,6 +82,21 @@ class SafeCsvOutput:
             os.close(fd)
             raise
 
+    def _cleanup_published(self, identity):
+        # Do not knowingly remove an entry substituted after publication.
+        # This identity check narrows, but cannot eliminate, stat/unlink races.
+        try:
+            current = os.stat(
+                self.destination.name, dir_fd=self.directory,
+                follow_symlinks=False,
+            )
+            if (current.st_dev, current.st_ino) != identity:
+                return
+            os.unlink(self.destination.name, dir_fd=self.directory)
+            os.fsync(self.directory)
+        except OSError:
+            pass  # Best-effort cleanup; preserve the publication failure.
+
     def write_rows(self, rows, fields):
         if self.directory is None:
             raise RuntimeError("benchmark output directory is not open")
@@ -97,6 +112,8 @@ class SafeCsvOutput:
                 writer.writerows(rows)
                 stream.flush()
                 os.fsync(stream.fileno())
+            published = os.stat(temporary, dir_fd=self.directory, follow_symlinks=False)
+            identity = (published.st_dev, published.st_ino)
             os.replace(
                 temporary, self.destination.name,
                 src_dir_fd=self.directory, dst_dir_fd=self.directory,
@@ -109,11 +126,7 @@ class SafeCsvOutput:
             except OSError:
                 # Do not upload an apparently valid artifact after a failed
                 # durability barrier. Cleanup is best-effort; preserve error.
-                try:
-                    os.unlink(self.destination.name, dir_fd=self.directory)
-                    os.fsync(self.directory)
-                except OSError:
-                    pass
+                self._cleanup_published(identity)
                 raise
             # A renamed destination is still safe, but must not be certified
             # as published at the path the caller supplied.
@@ -122,20 +135,12 @@ class SafeCsvOutput:
             except OSError:
                 # The path can disappear or become inaccessible after rename.
                 # Remove evidence from the anchored directory before failing.
-                try:
-                    os.unlink(self.destination.name, dir_fd=self.directory)
-                    os.fsync(self.directory)
-                except OSError:
-                    pass
+                self._cleanup_published(identity)
                 raise
             if (visible.st_dev, visible.st_ino) != self.opened_identity:
                 # Publication reached the original inode, not the requested
                 # pathname. Do not leave apparently valid evidence behind.
-                try:
-                    os.unlink(self.destination.name, dir_fd=self.directory)
-                    os.fsync(self.directory)
-                except OSError:
-                    pass  # Preserve the directory-identity failure.
+                self._cleanup_published(identity)  # Preserve the directory-identity failure.
                 raise ValueError("benchmark output directory changed during publication")
         finally:
             if temporary is not None:
