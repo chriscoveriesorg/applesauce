@@ -39,6 +39,28 @@ class SafeOutputTests(unittest.TestCase):
             self.evidence.chmod(original_mode)
         self.assertEqual(self.input.read_text(), "source evidence")
 
+    def test_foreign_owned_directory_refuses_stale_cleanup(self):
+        # Simulate an ACL-accessible directory owned by another user. Even
+        # mode 0700 would not establish exclusive control for this process.
+        self.output.write_text("old derived evidence", encoding="utf-8")
+        real_fstat = os.fstat
+
+        def foreign_owner(fd):
+            result = real_fstat(fd)
+            class ForeignStat:
+                st_dev = result.st_dev
+                st_ino = result.st_ino
+                st_mode = result.st_mode
+                st_uid = os.geteuid() + 1
+            return ForeignStat()
+
+        with patch("safe_benchmark_output.os.fstat", side_effect=foreign_owner):
+            with self.assertRaisesRegex(ValueError, "owned by current user"):
+                with SafeCsvOutput(self.output, (self.input,)):
+                    pass
+        self.assertEqual(self.output.read_text(), "old derived evidence")
+        self.assertEqual(self.input.read_text(), "source evidence")
+
     def test_atomic_csv_replaces_stale_evidence(self):
         self.output.write_text("OLD", encoding="utf-8")
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
