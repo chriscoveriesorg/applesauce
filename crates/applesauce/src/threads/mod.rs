@@ -223,9 +223,10 @@ impl BackgroundThreads {
         let operation = Arc::new(OperationContext::new(mode, finished_stats, volumes, verify));
         let stats = &operation.stats;
         let chan = self.reader.chan();
-        // The same compressed inode can be selected through overlapping roots.
-        // Claim it before queuing any restore work to avoid concurrent replaces.
-        let restore_claims = Mutex::new(HashSet::new());
+        // Overlapping directory and explicit-file roots can select the same
+        // inode for both compression and restoration. Claim it before queueing
+        // either kind of writer to avoid competing atomic replacements.
+        let input_claims = Mutex::new(HashSet::new());
 
         walker.run(&operation, |file_type, path, dir_reset| {
             // We really only want to deal with files, not symlinks to files, or fifos, etc.
@@ -294,16 +295,11 @@ impl BackgroundThreads {
                 stats.add_end_file(&metadata, &file_info);
                 return;
             }
-            // Restoring a file twice in one invocation is unsafe: competing
-            // writers can each verify a different staged file and race the
-            // atomic rename. One inode must have one restore owner.
-            if !mode.is_compressing()
-                && matches!(
-                    &file_info.compression_state,
-                    FileCompressionState::Compressed
-                )
-                && !claim_restore_inode(&restore_claims, &metadata)
-            {
+            // A file may appear under multiple requested roots. Only one
+            // writer may compress or restore an eligible source inode. Without
+            // this guard, two compressors can both stage from the same source
+            // and race the final replacement (or report a spurious failure).
+            if !claim_input_inode(&input_claims, &metadata) {
                 progress.file_skipped(&path, SkipReason::DuplicateInput);
                 stats.add_end_file(&metadata, &file_info);
                 return;
@@ -341,9 +337,9 @@ impl BackgroundThreads {
     }
 }
 
-// Only one writer may restore a compressed inode in an invocation, even when
-// selected via both a directory root and an explicit file path.
-fn claim_restore_inode(seen: &Mutex<HashSet<(u64, u64)>>, metadata: &Metadata) -> bool {
+// Claim each eligible source inode once across all requested paths, including
+// overlapping directory and explicit-file roots, in either operation mode.
+fn claim_input_inode(seen: &Mutex<HashSet<(u64, u64)>>, metadata: &Metadata) -> bool {
     seen.lock()
         .unwrap()
         .insert((metadata.dev(), metadata.ino()))
