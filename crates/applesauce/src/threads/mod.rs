@@ -437,7 +437,7 @@ impl fmt::Debug for Context {
 
 #[cfg(test)]
 mod scan_failure_tests {
-    use super::{claim_restore_inode, report_scan_read_error, Mode};
+    use super::{claim_input_inode, report_scan_read_error, Mode};
     use crate::progress::{Progress, SkipReason, Task};
     use std::collections::HashSet;
     use std::fs;
@@ -475,7 +475,7 @@ mod scan_failure_tests {
     }
 
     #[test]
-    fn restore_claims_are_unique_for_paths_with_the_same_inode() {
+    fn input_claims_are_unique_for_paths_with_the_same_inode() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
         let alias = dir.path().join("hard-link-alias");
@@ -485,10 +485,10 @@ mod scan_failure_tests {
         fs::write(&separate, b"generated input").unwrap();
         let seen = Mutex::new(HashSet::new());
 
-        assert!(claim_restore_inode(&seen, &fs::metadata(&source).unwrap()));
-        assert!(!claim_restore_inode(&seen, &fs::metadata(&source).unwrap()));
-        assert!(!claim_restore_inode(&seen, &fs::metadata(&alias).unwrap()));
-        assert!(claim_restore_inode(
+        assert!(claim_input_inode(&seen, &fs::metadata(&source).unwrap()));
+        assert!(!claim_input_inode(&seen, &fs::metadata(&source).unwrap()));
+        assert!(!claim_input_inode(&seen, &fs::metadata(&alias).unwrap()));
+        assert!(claim_input_inode(
             &seen,
             &fs::metadata(&separate).unwrap()
         ));
