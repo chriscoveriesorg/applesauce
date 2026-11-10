@@ -190,6 +190,19 @@ fn ensure_unchanged_regular_input(
     Ok(())
 }
 
+// Read-only operations must validate the same opened inode and selected path
+// after parsing or decoding. Report success only after that final validation.
+fn read_unchanged_regular<T>(
+    path: &Path,
+    action: impl FnOnce(&mut File) -> io::Result<T>,
+) -> io::Result<T> {
+    let mut source = open_regular(path)?;
+    let before = source.metadata()?;
+    let result = action(&mut source)?;
+    ensure_unchanged_regular_input(path, &source, &before)?;
+    Ok(result)
+}
+
 fn unused_output(output: &Path) -> io::Result<()> {
     match fs::symlink_metadata(output) {
         Ok(_) => Err(io::Error::new(
@@ -283,6 +296,10 @@ fn create(
             "staged archive size changed after verification",
         ));
     }
+    // Encoding, re-hashing and staged verification can take substantial time.
+    // Recheck immediately before publishing in case the source changed after
+    // the earlier source hash check.
+    ensure_unchanged_regular_input(source_path, &source, &before)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -297,32 +314,36 @@ fn create(
 }
 
 fn info(path: &Path) -> io::Result<()> {
-    let source = open_regular(path)?;
-    let archive_bytes = source.metadata()?.len();
     // Header/index validation is portable and does not initialize decoder scratch.
-    let reader = ArchiveReader::open(source)?;
-    println!(
-        "ASCF {}: {} logical bytes, {} archive bytes, {} chunks of {} bytes, SHA-256 {} (metadata only)",
-        reader.codec().name(),
-        reader.logical_size(),
-        archive_bytes,
-        reader.chunk_count(),
-        reader.chunk_size(),
-        hex_digest(reader.logical_sha256())
-    );
+    let message = read_unchanged_regular(path, |source| {
+        let archive_bytes = source.metadata()?.len();
+        let reader = ArchiveReader::open(source)?;
+        Ok(format!(
+            "ASCF {}: {} logical bytes, {} archive bytes, {} chunks of {} bytes, SHA-256 {} (metadata only)",
+            reader.codec().name(),
+            reader.logical_size(),
+            archive_bytes,
+            reader.chunk_count(),
+            reader.chunk_size(),
+            hex_digest(reader.logical_sha256())
+        ))
+    })?;
+    println!("{message}");
     Ok(())
 }
 
 fn verify(path: &Path) -> io::Result<()> {
-    let source = open_regular(path)?;
-    let mut reader = ArchiveReader::open(source)?;
-    reader.verify_all()?;
-    println!(
-        "Verified {} archive; {} logical bytes, SHA-256 {}",
-        reader.codec().name(),
-        reader.logical_size(),
-        hex_digest(reader.logical_sha256())
-    );
+    let message = read_unchanged_regular(path, |source| {
+        let mut reader = ArchiveReader::open(source)?;
+        reader.verify_all()?;
+        Ok(format!(
+            "Verified {} archive; {} logical bytes, SHA-256 {}",
+            reader.codec().name(),
+            reader.logical_size(),
+            hex_digest(reader.logical_sha256())
+        ))
+    })?;
+    println!("{message}");
     Ok(())
 }
 
@@ -367,6 +388,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
             "staged restore failed read-back verification",
         ));
     }
+    ensure_unchanged_regular_input(archive_path, &source, &before)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -413,6 +435,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
             "staged logical range failed read-back verification",
         ));
     }
+    ensure_unchanged_regular_input(archive_path, &source, &before)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -746,6 +769,66 @@ mod tests {
         let mut bytes = Vec::new();
         opened.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"unexpected replacement bytes");
+    }
+
+    // The same post-read validation guards `archive info` and `archive
+    // verify` before their success messages. Mutations are deterministic
+    // and happen while the read-only operation still owns its descriptor.
+    #[test]
+    fn read_only_operations_reject_path_replacement_after_successful_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("selected.ascf");
+        let replacement = dir.path().join("replacement.ascf");
+        fs::write(&selected, b"original bytes").unwrap();
+        fs::write(&replacement, b"replacement bytes").unwrap();
+
+        let error = read_unchanged_regular(&selected, |source| {
+            let mut observed = Vec::new();
+            source.read_to_end(&mut observed)?;
+            assert_eq!(observed, b"original bytes");
+            fs::rename(&replacement, &selected)?;
+            Ok(observed)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&selected).unwrap(), b"replacement bytes");
+    }
+
+    #[test]
+    fn read_only_operations_reject_in_place_growth_after_successful_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("growing.ascf");
+        fs::write(&selected, b"original bytes").unwrap();
+
+        let error = read_unchanged_regular(&selected, |source| {
+            let mut observed = Vec::new();
+            source.read_to_end(&mut observed)?;
+            assert_eq!(observed, b"original bytes");
+            OpenOptions::new()
+                .append(true)
+                .open(&selected)?
+                .write_all(b" changed")?;
+            Ok(observed)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&selected).unwrap(), b"original bytes changed");
+    }
+
+    #[test]
+    fn read_only_operations_accept_stable_regular_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("stable.ascf");
+        fs::write(&selected, b"stable input").unwrap();
+        let observed = read_unchanged_regular(&selected, |source| {
+            let mut bytes = Vec::new();
+            source.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+        .unwrap();
+        assert_eq!(observed, b"stable input");
     }
 
     #[test]
