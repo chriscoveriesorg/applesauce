@@ -100,12 +100,12 @@ class IndependentMeshProofTests(unittest.TestCase):
         # port_cli's default output allocation follows the compressed framing.
         # A validated ASCF chunk length must override hostile inherited caps.
         self.decoder.write_text(
-            "#!/usr/bin/env python3\\n"
-            "import os,sys\\n"
-            "payload = sys.stdin.buffer.read()\\n"
-            "if os.environ.get('DECODE_SIZE') != str(len(payload)):\\n"
-            "    sys.exit(42)\\n"
-            "sys.stdout.buffer.write(payload)\\n",
+            "#!/usr/bin/env python3\n"
+            "import os,sys\n"
+            "payload = sys.stdin.buffer.read()\n"
+            "if os.environ.get('DECODE_SIZE') != str(len(payload)):\n"
+            "    sys.exit(42)\n"
+            "sys.stdout.buffer.write(payload)\n",
             encoding="utf-8",
         )
         for inherited in ("0", "1", "999999999999999"):
@@ -121,12 +121,12 @@ class IndependentMeshProofTests(unittest.TestCase):
         struct.pack_into("<I", data, 72, len(self.plaintext) + 3)
         self.archive.write_bytes(data)
         self.decoder.write_text(
-            "#!/usr/bin/env python3\\n"
-            "import os,sys\\n"
-            "payload = sys.stdin.buffer.read()\\n"
-            "if os.environ.get('DECODE_SIZE') != str(len(payload) - 3):\\n"
-            "    sys.exit(43)\\n"
-            "sys.stdout.buffer.write(payload[:-3])\\n",
+            "#!/usr/bin/env python3\n"
+            "import os,sys\n"
+            "payload = sys.stdin.buffer.read()\n"
+            "if os.environ.get('DECODE_SIZE') != str(len(payload) - 3):\n"
+            "    sys.exit(43)\n"
+            "sys.stdout.buffer.write(payload[:-3])\n",
             encoding="utf-8",
         )
         report = verify(self.archive, self.original, self.decoder)
