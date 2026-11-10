@@ -10,6 +10,7 @@ on:
       - 'Cargo.lock'
       - 'hack/verify_independent_lzmesh.py'
       - 'hack/test_independent_lzmesh.py'
+      - 'hack/test_independent_lzraven.py'
       - '.github/workflows/portable-cold-archive.yml'
   push:
     branches: [main, 'feature/seekable-raven-mesh-fskit-backend-*']
@@ -18,6 +19,7 @@ on:
       - 'Cargo.lock'
       - 'hack/verify_independent_lzmesh.py'
       - 'hack/test_independent_lzmesh.py'
+      - 'hack/test_independent_lzraven.py'
       - '.github/workflows/portable-cold-archive.yml'
 
 permissions:
@@ -42,6 +44,8 @@ jobs:
           cargo test --locked -p applesauce-core --no-default-features --features zlib cold_archive::tests:: -- --nocapture
       - name: Test independent LZMESH proof parser with synthetic fixture
         run: python3 -m unittest discover -s hack -p 'test_independent_lzmesh.py' -v
+      - name: Test independent LZRAVEN proof parser with synthetic fixture
+        run: python3 -m unittest discover -s hack -p 'test_independent_lzraven.py' -v
       - name: Check formatting and cross-platform clippy
         run: |
           set -euo pipefail
