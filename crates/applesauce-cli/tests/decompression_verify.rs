@@ -228,7 +228,7 @@ fn explicit_symlink_compression_roots_exit_nonzero_and_preserve_targets() {
 
     for root in [&file_link, &directory_link] {
         let output = Command::new(env!("CARGO_BIN_EXE_applesauce"))
-            .args(["compress", "-c", "zlib", "--verify"])
+            .args(["compress", "-c", "zlib", "--verify", "--json"])
             .arg(root)
             .output()
             .unwrap();
@@ -241,6 +241,19 @@ fn explicit_symlink_compression_roots_exit_nonzero_and_preserve_targets() {
         assert!(
             stderr.contains("refusing to compress a symlink input root"),
             "{stderr}"
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("failed compression should preserve valid JSON on stdout");
+        assert_eq!(report["complete"].as_bool(), Some(false));
+        assert_eq!(
+            report["operation_errors"][0]["error"]["kind"].as_str(),
+            Some("operation_failed")
+        );
+        assert!(
+            report["operation_errors"][0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("refusing to compress a symlink input root")
         );
         assert!(root.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(fs::read(&regular).unwrap(), original);
