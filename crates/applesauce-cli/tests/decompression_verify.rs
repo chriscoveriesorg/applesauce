@@ -213,6 +213,68 @@ fn explicit_link_restore_roots_exit_nonzero_and_preserve_data() {
 }
 
 #[test]
+fn explicit_hardlinked_compression_root_fails_and_preserves_both_names() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("original.txt");
+    let selected_link = dir.path().join("selected-hardlink.txt");
+    let source = vec![b'H'; 3 * 65_536 + 17];
+    fs::write(&original, &source).unwrap();
+    fs::hard_link(&original, &selected_link).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .args(["compress", "--verify", "--json", "-c", "zlib"])
+        .arg(&selected_link)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "explicit hard link silently succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refusing to compress a hard-linked input root"),
+        "{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("compression failure should still produce valid JSON");
+    assert_eq!(report["complete"], false);
+    assert_eq!(fs::read(&original).unwrap(), source);
+    assert_eq!(fs::read(&selected_link).unwrap(), source);
+    assert_eq!(fs::metadata(&original).unwrap().nlink(), 2);
+    assert!(!applesauce::info::get(&original).unwrap().is_compressed);
+}
+
+#[test]
+fn explicit_hardlinked_compression_fails_even_when_a_second_root_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("shared.txt");
+    let selected_link = dir.path().join("linked.txt");
+    let independent = dir.path().join("independent.txt");
+    let source = vec![b'S'; 3 * 65_536 + 17];
+    fs::write(&original, &source).unwrap();
+    fs::hard_link(&original, &selected_link).unwrap();
+    fs::write(&independent, &source).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_applesauce"))
+        .args(["compress", "--verify", "-c", "zlib"])
+        .arg(&selected_link)
+        .arg(&independent)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "partial compression reported success");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("refusing to compress a hard-linked input root")
+    );
+    assert_eq!(fs::read(&original).unwrap(), source);
+    assert_eq!(fs::read(&selected_link).unwrap(), source);
+    assert!(!applesauce::info::get(&original).unwrap().is_compressed);
+    assert!(applesauce::info::get(&independent).unwrap().is_compressed);
+    assert_eq!(fs::read(&independent).unwrap(), source);
+}
+
+#[test]
 fn explicit_symlink_compression_roots_exit_nonzero_and_preserve_targets() {
     let dir = tempfile::tempdir().unwrap();
     let directory = dir.path().join("outside-selected-root");
