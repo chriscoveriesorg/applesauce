@@ -51,7 +51,15 @@ class SafeCsvOutput:
             opened = os.fstat(fd)
             if (opened.st_dev, opened.st_ino) != (known.st_dev, known.st_ino):
                 raise ValueError("benchmark output directory changed during open")
-            # Publication cleanup assumes exclusive control of this directory.\n            # Refuse directories writable by other users: pathname identity\n            # checks alone cannot prevent concurrent entry substitution.\n            # Same-UID cooperating processes must still serialize writes.\n            if opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH):\n                raise ValueError(\"benchmark output directory must not be group/world writable\")\n            # The pathname can be swapped after opening the descriptor but
+            # Publication cleanup assumes exclusive control of this directory.
+            # Refuse directories writable by other users: pathname identity
+            # checks alone cannot prevent concurrent entry substitution.
+            # Same-UID cooperating processes must still serialize writes.
+            if opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise ValueError(
+                    "benchmark output directory must not be group/world writable"
+                )
+            # The pathname can be swapped after opening the descriptor but
             # before stale-output cleanup. Refuse to delete from a displaced
             # directory, even though the descriptor itself remains valid.
             visible = os.stat(output.parent, follow_symlinks=False)
