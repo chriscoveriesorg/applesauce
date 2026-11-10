@@ -359,10 +359,7 @@ fn prepare_root_volume<P: Progress>(
     match registration {
         Ok(()) => true,
         Err(error) => {
-            progress.error(
-                path,
-                &format!("unable to prepare staging volume: {error}"),
-            );
+            progress.error(path, &format!("unable to prepare staging volume: {error}"));
             false
         }
     }
