@@ -51,7 +51,12 @@ class SafeCsvOutput:
                 current = None
             if current is not None:
                 for source in self.sources:
-                    source_stat = os.stat(source, follow_symlinks=False)
+                    try:
+                        source_stat = os.stat(source, follow_symlinks=False)
+                    except FileNotFoundError:
+                        # Missing evidence must not prevent stale derived-output
+                        # cleanup; the subsequent evidence validation will fail.
+                        continue
                     if (current.st_dev, current.st_ino) == (
                         source_stat.st_dev, source_stat.st_ino
                     ):
