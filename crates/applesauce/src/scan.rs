@@ -144,7 +144,10 @@ mod tests {
         let path = Path::new("/synthetic/protected-directory");
         let resetter = checked_resetter(
             path,
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "timestamp denied")),
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "timestamp denied",
+            )),
             &failures,
         );
         assert!(resetter.is_none());
