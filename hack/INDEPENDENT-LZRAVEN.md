@@ -47,7 +47,8 @@ running the external decoder. Each compressed chunk is decoded with a strict
 `--cap` equal to its declared logical length and a POSIX output-file limit.
 The restored bytes must exactly equal the fixture and the index SHA-256.
 The concatenated bytes must match the archive's whole-file SHA-256.
-Source archive, original and executable identity changes fail verification;
+Final-component symlinks are rejected, including substitutions pointing
+to the same open inode. Source archive, original and executable identity changes fail verification;
 the executable is hashed before and after proof. Decoder operations time out
 after 30 seconds each, and total fixture size is bounded to 64 MiB by default.
 

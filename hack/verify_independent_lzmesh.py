@@ -28,7 +28,7 @@ class InvalidArchive(ValueError):
 
 def sha256_file(path):
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with open_regular(path) as stream:
         for part in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(part)
     return digest.hexdigest()
@@ -55,9 +55,13 @@ def identity(info):
 
 
 def require_unchanged(path, expected, stream=None):
-    if identity(path.stat()) != expected or (
-        stream is not None and identity(os.fstat(stream.fileno())) != expected
-    ):
+    # stat() follows a replacement symlink to the *same* open inode, making
+    # pathname substitution invisible. lstat() checks the leaf pathname.
+    current = path.lstat()
+    if (not stat.S_ISREG(current.st_mode)
+            or identity(current) != expected
+            or (stream is not None
+                and identity(os.fstat(stream.fileno())) != expected)):
         raise InvalidArchive(f"proof input changed during decode: {path.name}")
 
 
@@ -134,10 +138,12 @@ def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_
     if codec not in CODECS:
         raise InvalidArchive(f"unsupported independent codec: {codec}")
     requested_codec = codec
-    archive = Path(archive).resolve(strict=True)
-    original = Path(original).resolve(strict=True)
-    decoder = Path(decoder).resolve(strict=True)
-    if not decoder.is_file() or not os.access(decoder, os.X_OK):
+    # Keep the final path component for O_NOFOLLOW and lstat().
+    # resolve() would follow symlinks before either safety check.
+    archive = Path(os.path.abspath(archive))
+    original = Path(os.path.abspath(original))
+    decoder = Path(os.path.abspath(decoder))
+    if decoder.is_symlink() or not decoder.is_file() or not os.access(decoder, os.X_OK):
         raise InvalidArchive("decoder must be an executable regular file")
     decoder_snapshot = identity(decoder.stat())
     decoder_hash = sha256_file(decoder)

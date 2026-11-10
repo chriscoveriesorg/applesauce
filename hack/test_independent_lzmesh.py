@@ -187,5 +187,54 @@ class IndependentMeshProofTests(unittest.TestCase):
         with self.assertRaisesRegex(InvalidArchive, "regular file"):
             verify(self.archive, fifo, self.decoder)
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires POSIX symlinks")
+    def test_rejects_leaf_symlink_inputs(self):
+        for field in ("archive", "original", "decoder"):
+            with self.subTest(field=field):
+                alias = self.root / f"{field}.link"
+                alias.symlink_to(getattr(self, field))
+                paths = {
+                    "archive": self.archive,
+                    "original": self.original,
+                    "decoder": self.decoder,
+                }
+                paths[field] = alias
+                with self.assertRaises((OSError, InvalidArchive)):
+                    verify(**paths)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires POSIX symlinks")
+    def test_rejects_original_symlink_to_same_open_inode_during_decode(self):
+        # This used to pass: stat() follows the link to the still-open
+        # original inode, preserving every value in the identity tuple.
+        retained = self.root / "retained-original.bin"
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os,sys\n"
+            f"source={str(self.original)!r}\n"
+            f"retained={str(retained)!r}\n"
+            "os.replace(source, retained)\n"
+            "os.symlink(retained, source)\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+            verify(self.archive, self.original, self.decoder)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires POSIX symlinks")
+    def test_rejects_archive_symlink_to_same_open_inode_during_decode(self):
+        retained = self.root / "retained-archive.ascf"
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os,sys\n"
+            f"archive={str(self.archive)!r}\n"
+            f"retained={str(retained)!r}\n"
+            "os.replace(archive, retained)\n"
+            "os.symlink(retained, archive)\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+            verify(self.archive, self.original, self.decoder)
+
 if __name__ == "__main__":
     unittest.main()

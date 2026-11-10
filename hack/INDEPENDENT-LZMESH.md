@@ -44,7 +44,9 @@ Raven/Mesh write gate (#88) and FSKit physical acceptance (#86) remain closed.
    during verification fail closed. Decoder stdout goes to a bounded temporary
    file protected by a POSIX file-size limit. Archive, original, and executable
    identities are checked after decoding; the executable SHA-256 is checked
-   before and after execution. The tool bounds logical fixture size to 64 MiB
+   before and after execution. Final-component symlinks are rejected for
+   archive, original and decoder, including substitutions to a symlink that
+   targets the same inode already open for reading. The tool bounds logical fixture size to 64 MiB
    by default; larger tests require an explicit override.
 
 4. Have an independent reviewer inspect the pinned decoder, commands, evidence,
