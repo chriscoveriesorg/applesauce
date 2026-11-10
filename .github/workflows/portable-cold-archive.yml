@@ -9,6 +9,8 @@ on:
       - 'crates/applesauce-core/**'
       - 'Cargo.lock'
       - 'hack/verify_independent_lzmesh.py'
+      - 'hack/prove_independent_corruptions.py'
+      - 'hack/test_independent_corruptions.py'
       - 'hack/test_independent_lzmesh.py'
       - 'hack/test_independent_lzraven.py'
       - '.github/workflows/portable-cold-archive.yml'
@@ -18,6 +20,8 @@ on:
       - 'crates/applesauce-core/**'
       - 'Cargo.lock'
       - 'hack/verify_independent_lzmesh.py'
+      - 'hack/prove_independent_corruptions.py'
+      - 'hack/test_independent_corruptions.py'
       - 'hack/test_independent_lzmesh.py'
       - 'hack/test_independent_lzraven.py'
       - '.github/workflows/portable-cold-archive.yml'
@@ -46,6 +50,8 @@ jobs:
         run: python3 -m unittest discover -s hack -p 'test_independent_lzmesh.py' -v
       - name: Test independent LZRAVEN proof parser with synthetic fixture
         run: python3 -m unittest discover -s hack -p 'test_independent_lzraven.py' -v
+      - name: Test independent negative-proof enforcement for both codecs
+        run: python3 -m unittest discover -s hack -p 'test_independent_corruptions.py' -v
       - name: Check formatting and cross-platform clippy
         run: |
           set -euo pipefail
