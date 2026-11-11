@@ -159,7 +159,14 @@ class SafeCsvOutput:
                     if not failed:
                         raise
 
-    def __exit__(self, *_exc):
+    def __exit__(self, exc_type, _exc, _tb):
         if self.directory is not None:
-            os.close(self.directory)
+            fd = self.directory
             self.directory = None
+            try:
+                os.close(fd)
+            except OSError:
+                # A secondary close failure must not mask the original
+                # publication exception. Without one, report the close error.
+                if exc_type is None:
+                    raise
