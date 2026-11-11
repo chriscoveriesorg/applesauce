@@ -193,6 +193,18 @@ def check_corruptions(archive, original, decoder, *, codec,
                 )
 
     remaining_budget()
+    # The baseline archive is an input to all negative claims. Recheck its
+    # pathname, inode and complete bytes after the decoder has executed every
+    # mutation; otherwise a late archive replacement can go unreported.
+    with open_regular(archive) as final_archive:
+        require_unchanged(archive, archive_snapshot, final_archive)
+        final_archive_hash = hashlib.sha256()
+        for block in iter(lambda: final_archive.read(1024 * 1024), b""):
+            final_archive_hash.update(block)
+        require_unchanged(archive, archive_snapshot, final_archive)
+    if final_archive_hash.hexdigest() != baseline["archive_sha256"]:
+        raise InvalidArchive("negative proof archive bytes changed during suite")
+    remaining_budget()
     require_unchanged(original, original_snapshot)
     require_unchanged(decoder, decoder_snapshot)
     if sha256_file(original) != baseline["original_sha256"]:
