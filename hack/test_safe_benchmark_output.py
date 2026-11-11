@@ -109,7 +109,8 @@ class SafeOutputTests(unittest.TestCase):
         protected_output.write_text("never overwrite", encoding="utf-8")
         self.output.write_text("stale", encoding="utf-8")
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
-            self.assertEqual(self.output.stat().st_size, 0)
+            # Preflight must remove stale evidence before any publication.
+            self.assertFalse(self.output.exists())
             self.evidence.rename(moved)
             self.evidence.symlink_to(protected, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "changed during publication"):
@@ -267,7 +268,7 @@ class SafeOutputTests(unittest.TestCase):
         # Cleanup is best-effort: a second filesystem failure must not hide
         # the publication durability error or affect original evidence.
         real_fsync = os.fsync
-        real_invalidation = os.invalidation
+        real_invalidation = os.ftruncate
         triggered = False
         cleanup_attempted = False
 
