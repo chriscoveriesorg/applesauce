@@ -68,7 +68,16 @@ def check_macho(archive, arch):
     regular_files = set()
     nested_prefixes = set()
     try:
-        with tarfile.open(archive, "r:*") as tar:
+        # Match the decoder to the published extension. tarfile's "r:*"
+        # accepts an XZ payload under a .tar.gz filename (and vice versa),
+        # even though normal installers select the decoder by suffix.
+        if archive.name.endswith(".tar.xz"):
+            read_mode = "r:xz"
+        elif archive.name.endswith(".tar.gz"):
+            read_mode = "r:gz"
+        else:
+            raise AuditError(f"{archive.name}: unsupported archive suffix")
+        with tarfile.open(archive, read_mode) as tar:
             for index, member in enumerate(tar):
                 if index >= 4096:
                     raise AuditError(f"{archive.name}: excessive tar entries")
