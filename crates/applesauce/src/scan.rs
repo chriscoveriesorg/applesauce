@@ -33,6 +33,7 @@ fn walk_dir_over(
     path: &Path,
     context: Arc<OperationContext>,
     failures: ResetFailures,
+    direct_file: bool,
 ) -> jwalk::WalkDirGeneric<((), State)> {
     let walker = jwalk::WalkDirGeneric::new(path);
     walker.process_read_dir(
@@ -40,6 +41,12 @@ fn walk_dir_over(
               path: &Path,
               _state,
               entries: &mut Vec<jwalk::Result<jwalk::DirEntry<((), State)>>>| {
+            // jwalk calls this even for a directly selected file and may pass
+            // an empty path for a bare relative filename. Its parent was
+            // already captured by Walker::run; leave the file entry intact.
+            if direct_file {
+                return;
+            }
             let mut reset_times: Option<State> = None;
             // Remove ignored directories from the list of entries.
             // Also, add the client state to the entry.
@@ -132,7 +139,7 @@ impl<'a, P: Progress + Send + Sync> Walker<'a, P> {
                 None
             };
             let failures: ResetFailures = Arc::new(Mutex::new(Vec::new()));
-            let walker = walk_dir_over(path, Arc::clone(context), Arc::clone(&failures));
+            let walker = walk_dir_over(path, Arc::clone(context), Arc::clone(&failures), direct_file);
             for entry in walker {
                 let mut entry = match entry {
                     Ok(entry) => entry,
