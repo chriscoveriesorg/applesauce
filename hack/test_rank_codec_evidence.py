@@ -167,12 +167,19 @@ class RankCodecEvidenceTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), original)
         self.assertEqual(self.output.read_bytes(), original)
 
-    def test_failed_rerun_drops_stale_output_without_erasing_input(self):
+    def test_failed_rerun_preserves_occupied_output_and_rejects_bad_source(self):
         self.output.write_text("old measurements", encoding="utf-8")
         self.write(self.rows[:-1])
+        command = [sys.executable, str(SCRIPT), str(self.source), "smoke",
+                   str(self.output)]
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), str(self.source), "smoke",
-             str(self.output)], capture_output=True, text=True, timeout=6,
+            command, capture_output=True, text=True, timeout=6,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.output.read_text(), "old measurements")
+        self.output.unlink()  # Independent workflow reset before re-run.
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=6,
         )
         self.assertEqual(result.returncode, 1)
         self.assertFalse(self.output.exists())
