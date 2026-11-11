@@ -75,6 +75,13 @@ jobs:
         if: matrix.rust == 'stable'
         run: cargo test --workspace --no-default-features --features zlib --all-targets
 
+      - name: Validate disposable signed .app compression and restoration (#93)
+        if: matrix.rust == 'stable'
+        run: |
+          set -euo pipefail
+          cargo build --locked -p applesauce-cli
+          python3 hack/bundle-codesign-probe.py target/debug/applesauce
+
       - name: Check for clippy warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Check opt-in native LZBitmap for clippy warnings
