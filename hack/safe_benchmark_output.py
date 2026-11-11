@@ -110,7 +110,7 @@ class SafeCsvOutput:
         # A zero-length CSV is not valid benchmark evidence.
         try:
             fd = os.open(
-                self.destination.name, os.O_WRONLY | os.O_NOFOLLOW,
+                self.destination.name, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                 dir_fd=self.directory,
             )
         except OSError:
