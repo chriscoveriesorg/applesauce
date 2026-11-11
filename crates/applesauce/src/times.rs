@@ -240,6 +240,7 @@ impl Resetter {
             .open(path)
     }
 
+    #[cfg(test)]
     pub fn new(path: &Path, saved_times: Saved) -> io::Result<Self> {
         let dir_file = Self::open_directory(path)?;
         let metadata = dir_file.metadata()?;
