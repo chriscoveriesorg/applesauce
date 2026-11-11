@@ -390,7 +390,7 @@ fn report_scan_read_error<P: Progress>(
     progress: &P,
     mode: Mode,
     path: &Path,
-    error: std::io::Error,
+    error: io::Error,
 ) {
     if mode.is_compressing() {
         progress.file_skipped(path, SkipReason::ReadError(error));
