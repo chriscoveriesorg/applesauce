@@ -1,0 +1,141 @@
+# Independent ASCF LZMESH buffer decoding proof (#95)
+
+This is a **conformance tool**, not a native APFS `decmpfs` test. The native
+Raven/Mesh write gate (#88) and FSKit physical acceptance (#86) remain closed.
+
+## Reproducible procedure
+
+1. Review [mrowlinson/lzmesh](https://github.com/mrowlinson/lzmesh) and its
+   [0BSD license](https://github.com/mrowlinson/lzmesh/blob/8f9d5fd0ffef555b07eaf076bc610404b742f0a8/LICENSE).
+   Pin independent decoder sources to commit
+   `8f9d5fd0ffef555b07eaf076bc610404b742f0a8` (9 Oct 2026), check
+   upstream provenance, then build the C11 port **without linking libcompression**:
+
+   ```sh
+   git clone https://github.com/mrowlinson/lzmesh.git
+   cd lzmesh
+   git checkout --detach 8f9d5fd0ffef555b07eaf076bc610404b742f0a8
+   make
+   make unit
+   ```
+
+2. On a provisioned macOS 27+ host with Apple's supported LZMESH buffer API,
+   generate a disposable, unchanged plaintext input and an ASCF archive:
+
+   ```sh
+   applesauce archive create generated.bin generated.ascf --codec lzmesh --allow-expansion
+   applesauce archive verify generated.ascf
+   python3 hack/verify_independent_lzmesh.py \
+     --archive generated.ascf \
+     --original generated.bin \
+     --decoder /path/to/lzmesh/port_cli > independent-mesh-evidence.json
+   ```
+
+   Run this on at least two different generated content families and boundary
+   sizes, including multi-chunk payloads. The CLI command and exact source
+   file must be archived with the evidence JSON and macOS test logs.
+
+3. Inspect the resulting SHA-256 of the archive, original and decoder executable,
+   recorded chunk count and bytes. Every ASCF index record is checked before the
+   external decoder runs. Each independently decoded chunk must have its exact
+   declared length, the original bytes and the ASCF SHA-256, then the complete
+   decoded data must match the ASCF whole-file SHA-256. Malformed index geometry,
+   insufficient or excessive decoder output, and changes to evidence inputs
+   during verification fail closed. Decoder stdout goes to a bounded temporary
+   file protected by a POSIX file-size limit. Archive, original, and executable
+   identities are checked after decoding; the executable SHA-256 is checked
+   before and after execution. Final-component symlinks are rejected for
+   archive, original and decoder, including substitutions to a symlink that
+   targets the same inode already open for reading. Compressed input is supplied
+   to the Mesh CLI through a private regular file on stdin. This avoids a
+   decoder timeout hanging while a detached helper retains an inherited pipe
+   descriptor without reading it. Each decoder executes in
+   a new POSIX session: the proof tool terminates its process group on
+   success, failure and timeout, including ordinary forked helpers. A process
+   that deliberately creates a separate session can escape this cleanup;
+   audit decoder sources and run them on disposable hosts. The tool bounds logical fixture size to 64 MiB
+   by default; larger tests require an explicit override. A single decoder
+   invocation has a 30-second timeout, and **all chunk decoder invocations
+   combined have a 120-second monotonic deadline**. The optional
+   `--total-timeout-seconds` flag permits a reviewed override up to 3600
+   seconds; exhaustion fails the proof before launching another chunk.
+
+4. Have an independent reviewer inspect the pinned decoder, commands, evidence,
+   differences from Apple's `compression_decode_buffer`, and failure cases.
+   The synthetic identity-decoder tests run on Linux only to validate the
+   proof tool's format and error handling; they **cannot** establish LZMESH
+   interoperability.
+
+## Limitations
+
+The tool executes an **explicitly supplied** binary. It does not download code
+or promote a decoder to a project dependency. Audit and build that executable
+in an isolated environment. The upstream decoder documentation notes that
+a destination with insufficient capacity may silently truncate; this proof
+sets `DECODE_SIZE` to the already-validated ASCF chunk clear length, overriding
+the caller environment. This bounds the external Mesh CLI's output allocation,
+which otherwise trusts the compressed frame's claimed decoded size. Exact
+byte-for-byte equality and output length are still required before accepting
+any decode. A successful Apple-buffer-to-C decoder comparison does not show that
+macOS registers an LZMESH `decmpfs` handler or that FSKit is mountable.
+
+## Corruption rejection and evidence preservation
+
+For an independently decoded Apple-generated fixture, also run the negative
+qualification suite from the repository root:
+
+```sh
+python3 hack/prove_independent_corruptions.py \
+  --archive generated.ascf --original generated.bin \
+  --decoder /path/to/lzmesh/port_cli --codec lzmesh \
+  > independent-lzmesh-negative.json
+```
+
+The suite first requires the untouched archive to decode successfully. It then
+changes compressed payload bytes at two positions, flips the first chunk
+digest, truncates the last byte and appends a byte. Multi-chunk fixtures also corrupt
+the final chunk payload and digest. With three or more chunks, the middle
+chunk payload and digest are tested independently, so every chunk of the
+three-chunk proof fixtures is covered. All nine changes must be
+rejected. Payload-only changes must reach the independent decoder, preventing
+a parser-only failure from being mistaken for codec conformance testing.
+The digest, truncation and trailing-data variants must fail at their expected
+parser gates. A timed-out decoder does **not** count as a successful negative
+case. The clean baseline and all nine negative cases share a **180-second decoder budget** rather than receiving
+separate 120-second per-fixture budgets; an exhausted budget fails the suite,
+including during the last damaged case. Reviewers can increase the shared cap
+with `--total-timeout-seconds` (maximum 3600) for slow diagnostic hosts.
+
+The proof runner permits one extra output byte within `RLIMIT_FSIZE` so an
+external decoder cannot mask attempted overproduction by ignoring `SIGXFSZ`.
+The negative suite also snapshots the reference plaintext (at most 64 MiB) and
+executable (at most 32 MiB) into private files **once**, before the successful
+baseline. Every corruption case uses those same snapshots, rather than reopening
+mutable input pathnames and accidentally treating a substituted decoder's errors
+as evidence. Snapshot time counts against the suite's monotonic deadline.
+After all negative cases, it reopens the original Apple archive and rechecks
+inode identity and SHA-256. It also verifies the caller's original plaintext
+and executable identities and complete hashes against the private snapshots.
+
+The macOS proof workflow runs nine cases on each generated content
+family at the 131,103-byte three-chunk boundary (18 negative cases per codec).
+It attaches the generated `.ascf` archives, original `.bin` files, positive
+JSON reports, negative JSON reports and environment provenance. The workflow
+requests 30-day artifact retention, but the repository's current effective
+expiry is approximately 24 hours (verified from the run 42757335808
+artifact metadata on 10 November 2026). Reviewers must retrieve the artifacts
+promptly. Four durable Apple-generated differential vectors are now committed
+under `tests/fixtures/codec-crossdecode/` and replayed with the pinned C11
+decoder on Linux before the native macOS proof job is allocated. The independent
+source/evidence review and PR approval gates remain in force.
+
+## Private decoder executable snapshot
+
+The verifier copies the selected independently built C11 executable into a
+private mode-0700 temporary directory, limits the executable to 32 MiB, records
+its SHA-256, and invokes only the mode-0500 copy for every decoded chunk.
+It rechecks both original and copied binaries after verification and removes
+the private copy on success or failure. This prevents a temporary replacement
+of the caller-selected executable pathname from changing which implementation
+is run between the initial provenance check and chunk execution. A passing
+proof still requires review of the pinned C11 source and the native CI output.

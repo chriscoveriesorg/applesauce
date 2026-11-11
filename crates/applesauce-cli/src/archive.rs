@@ -113,18 +113,117 @@ fn parse_logical_range(input: &str) -> Result<(u64, u64), String> {
 }
 
 fn open_regular(path: &Path) -> io::Result<File> {
+    // Reject devices, sockets and FIFOs before open() can interact with them.
+    // Descriptor validation below remains essential if a path is swapped.
+    let before = fs::symlink_metadata(path)?;
+    if !before.file_type().is_file() {
+        return Err(invalid("archive input must be a regular file"));
+    }
+    open_checked_regular(path, &before)
+}
+
+// Kept separate so tests can reproduce a pathname swap AFTER the first
+// metadata check. All callers must still use open_regular for preflight.
+fn open_checked_regular(path: &Path, before: &fs::Metadata) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // O_NOFOLLOW rejects symlink inputs. O_NONBLOCK keeps a swapped-in
+        // FIFO from hanging before metadata() can reject non-regular files.
+        // Regular-file reads retain their normal blocking semantics.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let opened = file.metadata()?;
+    if !opened.is_file() {
         return Err(invalid("archive input must be a regular file"));
     }
+    // In-place edits are also substitutions, even if device and inode match.
+    if !same_regular_snapshot(before, &opened) {
+        return Err(invalid("archive input changed between preflight and open"));
+    }
     Ok(file)
+}
+
+// Compare identity and change times in addition to size. In particular,
+// matching device/inode alone does not catch a writer modifying the same file.
+// A same-size rewrite with a restored mtime still advances ctime on Unix.
+fn same_regular_snapshot(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        before.dev() == after.dev()
+            && before.ino() == after.ino()
+            && before.len() == after.len()
+            && before.mtime() == after.mtime()
+            && before.mtime_nsec() == after.mtime_nsec()
+            && before.ctime() == after.ctime()
+            && before.ctime_nsec() == after.ctime_nsec()
+    }
+    #[cfg(not(unix))]
+    {
+        before.len() == after.len() && before.modified().ok() == after.modified().ok()
+    }
+}
+
+// Recheck both the pinned descriptor and the selected path before publishing
+// output. A rename can replace the pathname while the original descriptor
+// continues yielding valid bytes. Neither case may publish under that identity.
+fn ensure_unchanged_regular_input(
+    path: &Path,
+    file: &File,
+    expected: &fs::Metadata,
+) -> io::Result<()> {
+    let opened = file.metadata()?;
+    let selected = fs::symlink_metadata(path)?;
+    if !selected.file_type().is_file()
+        || !same_regular_snapshot(expected, &opened)
+        || !same_regular_snapshot(expected, &selected)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive source changed during operation",
+        ));
+    }
+    Ok(())
+}
+
+// A verified staging descriptor is not enough for safe publication: the
+// temporary pathname can be renamed or replaced while decoding and hashing
+// run. Revalidate its identity and change timestamps immediately before the
+// NamedTempFile publication call. Like the source guard, this is a best-effort
+// check; it cannot make pathname validation and rename a single operation.
+fn ensure_unchanged_staging_output(
+    temporary: &NamedTempFile,
+    verified: &fs::Metadata,
+) -> io::Result<()> {
+    let opened = temporary.as_file().metadata()?;
+    let selected = fs::symlink_metadata(temporary.path())?;
+    if !selected.file_type().is_file()
+        || !same_regular_snapshot(verified, &opened)
+        || !same_regular_snapshot(verified, &selected)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "verified archive staging file changed before publication",
+        ));
+    }
+    Ok(())
+}
+
+// Read-only operations must validate the same opened inode and selected path
+// after parsing or decoding. Report success only after that final validation.
+fn read_unchanged_regular<T>(
+    path: &Path,
+    action: impl FnOnce(&mut File) -> io::Result<T>,
+) -> io::Result<T> {
+    let mut source = open_regular(path)?;
+    let before = source.metadata()?;
+    let result = action(&mut source)?;
+    ensure_unchanged_regular_input(path, &source, &before)?;
+    Ok(result)
 }
 
 fn unused_output(output: &Path) -> io::Result<()> {
@@ -200,13 +299,7 @@ fn create(
             "source changed while building the archive",
         ));
     }
-    let after = source.metadata()?;
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "source metadata changed while building the archive",
-        ));
-    }
+    ensure_unchanged_regular_input(source_path, &source, &before)?;
 
     temporary.as_file_mut().flush()?;
     temporary.as_file().sync_all()?;
@@ -220,12 +313,18 @@ fn create(
             ));
         }
     }
-    if temporary.as_file().metadata()?.len() != stats.archive_bytes {
+    let verified_staging = temporary.as_file().metadata()?;
+    if verified_staging.len() != stats.archive_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "staged archive size changed after verification",
         ));
     }
+    // Encoding, re-hashing and staged verification can take substantial time.
+    // Recheck immediately before publishing in case the source changed after
+    // the earlier source hash check.
+    ensure_unchanged_regular_input(source_path, &source, &before)?;
+    ensure_unchanged_staging_output(&temporary, &verified_staging)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -240,32 +339,36 @@ fn create(
 }
 
 fn info(path: &Path) -> io::Result<()> {
-    let source = open_regular(path)?;
-    let archive_bytes = source.metadata()?.len();
     // Header/index validation is portable and does not initialize decoder scratch.
-    let reader = ArchiveReader::open(source)?;
-    println!(
-        "ASCF {}: {} logical bytes, {} archive bytes, {} chunks of {} bytes, SHA-256 {} (metadata only)",
-        reader.codec().name(),
-        reader.logical_size(),
-        archive_bytes,
-        reader.chunk_count(),
-        reader.chunk_size(),
-        hex_digest(reader.logical_sha256())
-    );
+    let message = read_unchanged_regular(path, |source| {
+        let archive_bytes = source.metadata()?.len();
+        let reader = ArchiveReader::open(source)?;
+        Ok(format!(
+            "ASCF {}: {} logical bytes, {} archive bytes, {} chunks of {} bytes, SHA-256 {} (metadata only)",
+            reader.codec().name(),
+            reader.logical_size(),
+            archive_bytes,
+            reader.chunk_count(),
+            reader.chunk_size(),
+            hex_digest(reader.logical_sha256())
+        ))
+    })?;
+    println!("{message}");
     Ok(())
 }
 
 fn verify(path: &Path) -> io::Result<()> {
-    let source = open_regular(path)?;
-    let mut reader = ArchiveReader::open(source)?;
-    reader.verify_all()?;
-    println!(
-        "Verified {} archive; {} logical bytes, SHA-256 {}",
-        reader.codec().name(),
-        reader.logical_size(),
-        hex_digest(reader.logical_sha256())
-    );
+    let message = read_unchanged_regular(path, |source| {
+        let mut reader = ArchiveReader::open(source)?;
+        reader.verify_all()?;
+        Ok(format!(
+            "Verified {} archive; {} logical bytes, SHA-256 {}",
+            reader.codec().name(),
+            reader.logical_size(),
+            hex_digest(reader.logical_sha256())
+        ))
+    })?;
+    println!("{message}");
     Ok(())
 }
 
@@ -300,15 +403,10 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
         ));
     }
     drop(reader);
-    let after = source.metadata()?;
-    if after.len() != before.len() || after.modified().ok() != before.modified().ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "archive source changed during extraction",
-        ));
-    }
+    ensure_unchanged_regular_input(archive_path, &source, &before)?;
     temporary.as_file_mut().flush()?;
     temporary.as_file().sync_all()?;
+    let verified_staging = temporary.as_file().metadata()?;
     temporary.as_file_mut().rewind()?;
     if hash_reader(temporary.as_file_mut())? != digest {
         return Err(io::Error::new(
@@ -316,6 +414,8 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
             "staged restore failed read-back verification",
         ));
     }
+    ensure_unchanged_regular_input(archive_path, &source, &before)?;
+    ensure_unchanged_staging_output(&temporary, &verified_staging)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -350,15 +450,10 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
         offset += bytes.len() as u64;
     }
     drop(reader);
-    let after = source.metadata()?;
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "archive source changed during range extraction",
-        ));
-    }
+    ensure_unchanged_regular_input(archive_path, &source, &before)?;
     temporary.as_file_mut().flush()?;
     temporary.as_file().sync_all()?;
+    let verified_staging = temporary.as_file().metadata()?;
     temporary.as_file_mut().rewind()?;
     let output_digest = hash_reader(temporary.as_file_mut())?;
     let range_digest: [u8; 32] = digest.finalize().into();
@@ -368,6 +463,8 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
             "staged logical range failed read-back verification",
         ));
     }
+    ensure_unchanged_regular_input(archive_path, &source, &before)?;
+    ensure_unchanged_staging_output(&temporary, &verified_staging)?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -482,6 +579,348 @@ mod tests {
             std::os::unix::fs::symlink(source, &symlink).unwrap();
             assert!(open_regular(&symlink).is_err());
         }
+    }
+
+    // Run potentially blocking FIFO opens in a separate thread with a deadline.
+    // A regression that drops O_NONBLOCK must fail quickly instead of hanging
+    // the entire CI job until the runner's global timeout expires.
+    #[cfg(unix)]
+    fn assert_rejected_without_blocking<T, F>(action: F)
+    where
+        F: FnOnce() -> io::Result<T> + Send + 'static,
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let outcome = action().map(|_| ()).map_err(|error| error.kind());
+            let _ = sender.send(outcome);
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("archive operation blocked while opening a FIFO");
+        assert_eq!(outcome, Err(io::ErrorKind::InvalidInput));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_input_is_rejected_without_waiting_for_a_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("unopened-archive-pipe");
+        let raw = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: raw is NUL terminated, and the path belongs to this tempdir.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        let output = dir.path().join("must-not-exist");
+
+        // A FIFO opened with O_RDONLY alone would wait indefinitely for a
+        // writer. All archive entry points must reject it before reading.
+        // Each operation has its own bound. A single blocking entry point
+        // cannot prevent the remaining cases from being diagnosed.
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || open_regular(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || info(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            move || verify(&path)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || extract(&path, &destination)
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || extract_range(&path, &destination, (0, 1))
+        });
+        assert_rejected_without_blocking({
+            let path = fifo.clone();
+            let destination = output.clone();
+            move || create(&path, &destination, Codec::Lzraven, 64 * 1024, true)
+        });
+        assert!(!output.exists());
+
+        // The nonblocking flag must not stop an ordinary file being read.
+        let regular = dir.path().join("regular");
+        fs::write(&regular, b"ordinary archive input").unwrap();
+        let mut file = open_regular(&regular).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"ordinary archive input");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_and_directory_inputs_are_rejected_before_open() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("archive-socket");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        for path in [&socket, dir.path()] {
+            assert_eq!(
+                open_regular(path).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "accepted non-regular archive input: {path:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_fifo_is_rejected_after_a_successful_regular_file_preflight() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("formerly-regular");
+        let replacement = dir.path().join("replacement-fifo");
+        fs::write(&source, b"original").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
+
+        let raw = CString::new(replacement.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated path is owned by this disposable tempdir.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        // Simulate replacement between the metadata preflight and open().
+        // No writer exists for this FIFO. An O_RDONLY open without O_NONBLOCK
+        // would hang here; descriptor validation must reject the substituted
+        // object without returning a File.
+        fs::rename(&replacement, &source).unwrap();
+        assert_rejected_without_blocking(move || open_checked_regular(&source, &before));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_symlink_is_rejected_after_regular_file_preflight() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected-archive");
+        let target = dir.path().join("other-archive");
+        fs::write(&source, b"selected bytes").unwrap();
+        fs::write(&target, b"other bytes").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
+
+        // A pathname may become a symlink after the initial regular-file
+        // check. O_NOFOLLOW must still refuse it without reading its target.
+        fs::remove_file(&source).unwrap();
+        symlink(&target, &source).unwrap();
+        let error = open_checked_regular(&source, &before).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(fs::read(&target).unwrap(), b"other bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_place_growth_is_rejected_after_regular_file_preflight() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected-input");
+        fs::write(&source, b"original").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        let opened = open_regular(&source).unwrap();
+        ensure_unchanged_regular_input(&source, &opened, &before).unwrap();
+
+        // Preserve the inode while mutating the file between metadata checks.
+        OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap()
+            .write_all(b" changed")
+            .unwrap();
+        let after = fs::symlink_metadata(&source).unwrap();
+        assert_eq!(before.dev(), after.dev());
+        assert_eq!(before.ino(), after.ino());
+
+        let error = open_checked_regular(&source, &before).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            ensure_unchanged_regular_input(&source, &opened, &before)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_archive_path_replacement_is_rejected_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("selected.ascf");
+        let replacement = dir.path().join("replacement.ascf");
+        fs::write(&selected, b"original archived bytes").unwrap();
+        fs::write(&replacement, b"other archived bytes").unwrap();
+        let opened = open_regular(&selected).unwrap();
+        let before = opened.metadata().unwrap();
+
+        // The pinned descriptor remains readable after its path is replaced.
+        // A successful content check alone must not publish from this input.
+        fs::rename(&replacement, &selected).unwrap();
+        assert_eq!(
+            ensure_unchanged_regular_input(&selected, &opened, &before)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&selected).unwrap(), b"other archived bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_regular_file_is_rejected_after_metadata_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected-input");
+        let replacement = dir.path().join("different-regular-input");
+        fs::write(&source, b"authorized archive input").unwrap();
+        fs::write(&replacement, b"unexpected replacement bytes").unwrap();
+        let before = fs::symlink_metadata(&source).unwrap();
+        assert!(before.file_type().is_file());
+
+        // Identical path and file type are insufficient after a rename race.
+        fs::rename(&replacement, &source).unwrap();
+        let error = open_checked_regular(&source, &before).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("changed between preflight and open"));
+
+        // A subsequent explicit operation is free to select the new file.
+        let mut opened = open_regular(&source).unwrap();
+        let mut bytes = Vec::new();
+        opened.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"unexpected replacement bytes");
+    }
+
+    // The same post-read validation guards `archive info` and `archive
+    // verify` before their success messages. Mutations are deterministic
+    // and happen while the read-only operation still owns its descriptor.
+    #[test]
+    fn read_only_operations_reject_path_replacement_after_successful_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("selected.ascf");
+        let replacement = dir.path().join("replacement.ascf");
+        fs::write(&selected, b"original bytes").unwrap();
+        fs::write(&replacement, b"replacement bytes").unwrap();
+
+        let error = read_unchanged_regular(&selected, |source| {
+            let mut observed = Vec::new();
+            source.read_to_end(&mut observed)?;
+            assert_eq!(observed, b"original bytes");
+            fs::rename(&replacement, &selected)?;
+            Ok(observed)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&selected).unwrap(), b"replacement bytes");
+    }
+
+    #[test]
+    fn read_only_operations_reject_in_place_growth_after_successful_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("growing.ascf");
+        fs::write(&selected, b"original bytes").unwrap();
+
+        let error = read_unchanged_regular(&selected, |source| {
+            let mut observed = Vec::new();
+            source.read_to_end(&mut observed)?;
+            assert_eq!(observed, b"original bytes");
+            OpenOptions::new()
+                .append(true)
+                .open(&selected)?
+                .write_all(b" changed")?;
+            Ok(observed)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&selected).unwrap(), b"original bytes changed");
+    }
+
+    #[test]
+    fn read_only_operations_accept_stable_regular_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("stable.ascf");
+        fs::write(&selected, b"stable input").unwrap();
+        let observed = read_unchanged_regular(&selected, |source| {
+            let mut bytes = Vec::new();
+            source.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+        .unwrap();
+        assert_eq!(observed, b"stable input");
+    }
+
+    #[test]
+    fn verified_staging_rejects_replaced_regular_file_and_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut temporary = NamedTempFile::new_in(dir.path()).unwrap();
+        temporary
+            .write_all(b"generated verified staging bytes")
+            .unwrap();
+        temporary.flush().unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+        ensure_unchanged_staging_output(&temporary, &verified).unwrap();
+
+        let selected = temporary.path().to_owned();
+        let moved = dir.path().join("original-staged-inode");
+        fs::rename(&selected, &moved).unwrap();
+        fs::write(&selected, b"generated verified staging bytes").unwrap();
+        // Matching bytes and length must not allow a substituted inode.
+        assert_eq!(
+            ensure_unchanged_staging_output(&temporary, &verified)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        fs::remove_file(&selected).unwrap();
+        std::os::unix::fs::symlink(&moved, &selected).unwrap();
+        assert_eq!(
+            ensure_unchanged_staging_output(&temporary, &verified)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn verified_staging_rejects_in_place_same_length_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut temporary = NamedTempFile::new_in(dir.path()).unwrap();
+        temporary.write_all(b"generated verified bytes").unwrap();
+        temporary.flush().unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+        ensure_unchanged_staging_output(&temporary, &verified).unwrap();
+
+        // Retain the inode and length, then force a different timestamp so
+        // the test is deterministic even on coarse timestamp filesystems.
+        fs::write(temporary.path(), b"generated changed! bytes").unwrap();
+        temporary
+            .as_file()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12_345),
+            )
+            .unwrap();
+        assert_eq!(
+            temporary.as_file().metadata().unwrap().len(),
+            verified.len()
+        );
+        assert_eq!(
+            ensure_unchanged_staging_output(&temporary, &verified)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

@@ -32,12 +32,31 @@ on:
 permissions:
   contents: read
 
+# A newer PR or non-main branch push may supersede older work. Preserve
+# every main commit and each manually authorised filesystem investigation:
+# even pending jobs share a concurrency group, so manual runs need run_id.
 concurrency:
-  group: modern-compression-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  group: modern-compression-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || (github.ref == 'refs/heads/main' && github.sha || github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
 
 jobs:
+  # Run formatting validation before allocating the provisioned macOS host.
+  # Covers pull requests, main pushes and explicit operator dispatches; this
+  # read-only job never performs private APFS trials or consumes their opt-ins.
+  preflight:
+    name: Portable formatting preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
   probe:
+    needs: preflight
     runs-on: xcode-27
     timeout-minutes: 30
     steps:
