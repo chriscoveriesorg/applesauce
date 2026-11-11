@@ -104,19 +104,28 @@ class SafeCsvOutput:
             raise
 
     def _cleanup_published(self, identity):
-        # Do not knowingly remove an entry substituted after publication.
-        # This identity check narrows, but cannot eliminate, stat/unlink races.
+        # Never unlink a pathname after checking its identity: another
+        # same-UID process can substitute the entry between stat and unlink.
+        # Instead invalidate only the inode held by an open descriptor.
+        # A zero-length CSV is not valid benchmark evidence.
         try:
-            current = os.stat(
-                self.destination.name, dir_fd=self.directory,
-                follow_symlinks=False,
+            fd = os.open(
+                self.destination.name, os.O_WRONLY | os.O_NOFOLLOW,
+                dir_fd=self.directory,
             )
-            if (current.st_dev, current.st_ino) != identity:
+        except OSError:
+            return  # Preserve the original publication failure.
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != identity or not stat.S_ISREG(opened.st_mode):
                 return
-            os.unlink(self.destination.name, dir_fd=self.directory)
+            os.ftruncate(fd, 0)
+            os.fsync(fd)
             os.fsync(self.directory)
         except OSError:
-            pass  # Best-effort cleanup; preserve the publication failure.
+            pass  # Best-effort invalidation; preserve the original error.
+        finally:
+            os.close(fd)
 
     def write_rows(self, rows, fields):
         if self.directory is None:
