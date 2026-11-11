@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Descriptor-anchored, fail-closed publication of derived benchmark CSVs.
 
-The benchmark workflow uploads artifacts even after a failed step. Remove only
-the stale output entry before parsing evidence. A moved/symlinked destination
-directory must never redirect cleanup or publication to an input artifact.
+The workflow resets generated evidence before running exporters, and uploads
+derived CSVs only on success. Never unlink an occupied destination or mutate
+an already-published inode: concurrent path/hardlink substitution can damage
+an unrelated file. Publication is exclusive and anchored to one directory.
 """
 import csv
 import os
@@ -70,8 +71,11 @@ class SafeCsvOutput:
             visible = os.stat(output.parent, follow_symlinks=False)
             if (visible.st_dev, visible.st_ino) != (opened.st_dev, opened.st_ino):
                 raise ValueError("benchmark output directory changed during open")
-            # The output may be a hardlink. Verify the actual directory entry
-            # after opening its parent, and before unlinking old evidence.
+            # Every exporter writes into a freshly reset evidence directory.
+            # Refuse an occupied entry instead of deleting it: a concurrent
+            # same-UID writer could substitute an unrelated pathname between
+            # validation and unlink. Exclusive publication below is the final
+            # protection against a second writer appearing after this check.
             try:
                 current = os.stat(output.name, dir_fd=fd, follow_symlinks=False)
             except FileNotFoundError:
@@ -81,59 +85,20 @@ class SafeCsvOutput:
                     try:
                         source_stat = os.stat(source, follow_symlinks=False)
                     except FileNotFoundError:
-                        # Missing evidence must not prevent stale derived-output
-                        # cleanup; the subsequent evidence validation will fail.
                         continue
                     if (current.st_dev, current.st_ino) == (
                         source_stat.st_dev, source_stat.st_ino
                     ):
                         raise ValueError("benchmark output must differ from source evidence")
-            try:
-                os.unlink(output.name, dir_fd=fd)
-            except FileNotFoundError:
-                pass
-            else:
-                # The workflow uploads artifacts even when validation fails.
-                # Persist stale-entry removal before reading fresh evidence.
-                os.fsync(fd)
+                raise FileExistsError(
+                    "benchmark output already exists; reset generated evidence first"
+                )
             self.directory = fd
             self.opened_identity = (opened.st_dev, opened.st_ino)
             return self
         except BaseException:
             os.close(fd)
             raise
-
-    def _cleanup_published(self, identity):
-        # Never unlink a pathname after checking its identity: another
-        # same-UID process can substitute the entry between stat and unlink.
-        # Instead invalidate only the inode held by an open descriptor.
-        # A zero-length CSV is not valid benchmark evidence.
-        try:
-            fd = os.open(
-                self.destination.name, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                dir_fd=self.directory,
-            )
-        except OSError:
-            return  # Preserve the original publication failure.
-        try:
-            opened = os.fstat(fd)
-            if (
-                (opened.st_dev, opened.st_ino) != identity
-                or not stat.S_ISREG(opened.st_mode)
-                or opened.st_nlink != 1
-            ):
-                # Do not truncate a published inode shared with another
-                # pathname. Preserve the original publication error instead.
-                # This is best-effort, not a defense against a concurrent
-                # same-UID process creating a hardlink after this check.
-                return
-            os.ftruncate(fd, 0)
-            os.fsync(fd)
-            os.fsync(self.directory)
-        except OSError:
-            pass  # Best-effort invalidation; preserve the original error.
-        finally:
-            os.close(fd)
 
     def write_rows(self, rows, fields):
         if self.directory is None:
@@ -150,35 +115,25 @@ class SafeCsvOutput:
                 writer.writerows(rows)
                 stream.flush()
                 os.fsync(stream.fileno())
-            published = os.stat(temporary, dir_fd=self.directory, follow_symlinks=False)
-            identity = (published.st_dev, published.st_ino)
-            os.replace(
+            # Exclusive hard-link publication atomically refuses an occupied
+            # destination. os.replace() would silently overwrite a pathname
+            # introduced by another writer after __enter__ preflight.
+            os.link(
                 temporary, self.destination.name,
                 src_dir_fd=self.directory, dst_dir_fd=self.directory,
+                follow_symlinks=False,
             )
+            # Unlink only our random temporary entry; never remove or
+            # truncate the final destination after publication.
+            os.unlink(temporary, dir_fd=self.directory)
             temporary = None
-            # Persist the directory-entry replacement as well as the CSV bytes.
-            # A file fsync alone does not guarantee the rename survives a crash.
-            try:
-                os.fsync(self.directory)
-            except OSError:
-                # Do not upload an apparently valid artifact after a failed
-                # durability barrier. Cleanup is best-effort; preserve error.
-                self._cleanup_published(identity)
-                raise
-            # A renamed destination is still safe, but must not be certified
-            # as published at the path the caller supplied.
-            try:
-                visible = os.stat(self.destination.parent, follow_symlinks=False)
-            except OSError:
-                # The path can disappear or become inaccessible after rename.
-                # Remove evidence from the anchored directory before failing.
-                self._cleanup_published(identity)
-                raise
+            # Directory durability can fail after a visible publication. The
+            # workflow must treat this as a failed run and upload diagnostics
+            # only, never derived CSVs. The published inode is left intact:
+            # truncation would damage a concurrently created hardlink.
+            os.fsync(self.directory)
+            visible = os.stat(self.destination.parent, follow_symlinks=False)
             if (visible.st_dev, visible.st_ino) != self.opened_identity:
-                # Publication reached the original inode, not the requested
-                # pathname. Do not leave apparently valid evidence behind.
-                self._cleanup_published(identity)  # Preserve the directory-identity failure.
                 raise ValueError("benchmark output directory changed during publication")
         finally:
             if temporary is not None:
