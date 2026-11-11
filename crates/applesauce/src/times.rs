@@ -1,11 +1,13 @@
 use std::ffi::{c_void, CStr, CString};
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::{io, mem, ptr};
 
 #[derive(Copy, Clone)]
@@ -213,23 +215,62 @@ pub fn reset_times<F: GetSet + fmt::Debug + ?Sized>(f: &F, saved: &Saved) -> io:
     f.reset_times(saved)
 }
 
-/// Reset the times of a file/dir
-///
-/// By default, will do nothing on drop, unless `activate` is called at least once
+/// Failures which happen after an atomic file replacement must remain visible to
+/// the caller, even though the directory resetter runs in Drop on a worker.
+pub(crate) type ResetFailureLog = Arc<Mutex<Vec<(PathBuf, String)>>>;
+
+/// Restore the original directory timestamps when the last writer finishes.
+/// Open a no-follow directory descriptor for both capture and restoration.
+/// Bound open descriptors by closing each immediately after its operation.
 #[derive(Debug)]
 pub struct Resetter {
-    dir_path: CString,
+    dir_path: PathBuf,
+    dir_dev: u64,
+    dir_ino: u64,
     saved_times: Saved,
     activated: AtomicBool,
+    failures: Option<ResetFailureLog>,
 }
 
 impl Resetter {
+    fn open_directory(path: &Path) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+    }
+
+    #[cfg(test)]
     pub fn new(path: &Path, saved_times: Saved) -> io::Result<Self> {
-        let dir_path = CString::new(path.as_os_str().as_bytes())?;
+        let dir_file = Self::open_directory(path)?;
+        let metadata = dir_file.metadata()?;
         Ok(Self {
-            dir_path,
+            dir_path: path.to_path_buf(),
+            dir_dev: metadata.dev(),
+            dir_ino: metadata.ino(),
             saved_times,
             activated: AtomicBool::new(false),
+            failures: None,
+        })
+    }
+
+    /// Capture timestamps and inode identity from one descriptor. Restore
+    /// opens the path again with O_NOFOLLOW and checks the same inode before
+    /// applying the saved times, without retaining thousands of open handles.
+    pub(crate) fn capture_with_failure_log(
+        path: &Path,
+        failures: ResetFailureLog,
+    ) -> io::Result<Self> {
+        let dir_file = Self::open_directory(path)?;
+        let saved_times = save_times(&dir_file)?;
+        let metadata = dir_file.metadata()?;
+        Ok(Self {
+            dir_path: path.to_path_buf(),
+            dir_dev: metadata.dev(),
+            dir_ino: metadata.ino(),
+            saved_times,
+            activated: AtomicBool::new(false),
+            failures: Some(failures),
         })
     }
 
@@ -237,12 +278,107 @@ impl Resetter {
         self.activated
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    fn reset_if_same_directory(&self) -> io::Result<()> {
+        let dir_file = Self::open_directory(&self.dir_path)?;
+        let metadata = dir_file.metadata()?;
+        if metadata.dev() != self.dir_dev || metadata.ino() != self.dir_ino {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "parent directory changed before timestamp restoration",
+            ));
+        }
+        reset_times(&dir_file, &self.saved_times)
+    }
+
+    fn record_reset_result(&self, result: io::Result<()>) {
+        if let Err(error) = result {
+            let message =
+                format!("unable to restore directory timestamps after publication: {error}");
+            if let Some(failures) = &self.failures {
+                failures
+                    .lock()
+                    .unwrap()
+                    .push((self.dir_path.clone(), message));
+            } else {
+                tracing::error!(path = %self.dir_path.display(), "{message}");
+            }
+        }
+    }
 }
 
 impl Drop for Resetter {
     fn drop(&mut self) {
         if self.activated.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = reset_times(self.dir_path.as_c_str(), &self.saved_times);
+            self.record_reset_result(self.reset_if_same_directory());
         }
+    }
+}
+
+#[cfg(test)]
+mod resetter_tests {
+    use super::{ResetFailureLog, Resetter};
+    use std::fs;
+    use std::io;
+    use std::os::unix::fs::{symlink, MetadataExt};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn post_publication_directory_reset_failure_reaches_error_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
+        let resetter =
+            Resetter::capture_with_failure_log(dir.path(), Arc::clone(&failures)).unwrap();
+        resetter.record_reset_result(Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "synthetic timestamp refusal",
+        )));
+        let recorded = failures.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, dir.path());
+        assert!(recorded[0].1.contains("synthetic timestamp refusal"));
+    }
+
+    #[test]
+    fn directory_reset_succeeds_on_unchanged_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
+        let resetter =
+            Resetter::capture_with_failure_log(dir.path(), Arc::clone(&failures)).unwrap();
+        resetter.activate();
+        drop(resetter);
+        assert!(failures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn directory_capture_rejects_symlink_and_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link");
+        symlink(dir.path(), &link).unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, b"generated").unwrap();
+        let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
+        assert!(Resetter::capture_with_failure_log(&link, Arc::clone(&failures)).is_err());
+        assert!(Resetter::capture_with_failure_log(&file, failures).is_err());
+    }
+
+    #[test]
+    fn directory_reset_refuses_replaced_parent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("selected");
+        let moved = dir.path().join("moved");
+        fs::create_dir(&selected).unwrap();
+        let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
+        let resetter =
+            Resetter::capture_with_failure_log(&selected, Arc::clone(&failures)).unwrap();
+        let selected_ino = fs::metadata(&selected).unwrap().ino();
+        fs::rename(&selected, &moved).unwrap();
+        fs::create_dir(&selected).unwrap();
+        assert_ne!(fs::metadata(&selected).unwrap().ino(), selected_ino);
+        resetter.activate();
+        drop(resetter);
+        let errors = failures.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].1.contains("parent directory changed"));
     }
 }

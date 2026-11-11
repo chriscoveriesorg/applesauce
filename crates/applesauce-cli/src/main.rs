@@ -87,12 +87,25 @@ struct Decompress {
     #[arg(long)]
     manual: bool,
 
-    /// Verify restored bytes against the compressed source's logical contents before replacing it
+    /// Explicitly request verification (already enabled by default)
     ///
-    /// Requires the OS to read the compressed source, including with --manual.
-    /// If kernel decoding is unavailable, verification fails without replacing the source.
-    #[arg(long)]
+    /// The original compressed file must be readable through the kernel, including
+    /// when --manual is used. A failure leaves the compressed source intact.
+    #[arg(long, conflicts_with = "no_verify")]
     verify: bool,
+
+    /// Disable verification against kernel-visible original bytes (unsafe)
+    ///
+    /// Only for deliberate recovery on an OS that cannot decode the source.
+    /// Restored bytes still undergo format and size checks before publication.
+    #[arg(long, conflicts_with = "verify", requires = "manual")]
+    no_verify: bool,
+}
+
+impl Decompress {
+    fn verification_enabled(&self) -> bool {
+        self.verify || !self.no_verify
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -402,8 +415,11 @@ fn main() {
                 )
             };
             progress_bars.finish();
+            let errors = progress_bars.errors();
+            emit_operation_errors(&errors, "compression");
             let mut report = size_report::analyze(&paths);
-            report.operation_errors(progress_bars.errors());
+            report.operation_errors(errors);
+            report.kernel_verifications(progress_bars.kernel_readbacks());
             if json || verbosity >= Verbosity::Normal {
                 if let Err(error) = size_report::display(&report, json) {
                     eprintln!("applesauce: unable to write size report: {error}");
@@ -417,11 +433,18 @@ fn main() {
         Commands::Compress(Compress { dry_run: true, .. }) => {
             unreachable!("dry-run handled before tracing")
         }
-        Commands::Decompress(Decompress {
-            paths,
-            manual,
-            verify,
-        }) => {
+        Commands::Decompress(decompress) => {
+            // Compare staged plaintext against the kernel-visible source before
+            // publishing, except for explicit manual recovery on older hosts.
+            let verify = decompress.verification_enabled();
+            let Decompress { paths, manual, .. } = decompress;
+            if !verify {
+                // Default tracing filters may suppress warnings. Unsafe manual
+                // recovery must always warn visibly before touching any path.
+                eprintln!(
+                    "applesauce: WARNING: --manual --no-verify disables independent byte verification; back up the compressed source before proceeding"
+                );
+            }
             let mut compressor = applesauce::FileCompressor::new();
             let stats = compressor.recursive_decompress(
                 paths.iter().map(Path::new),
@@ -434,9 +457,35 @@ fn main() {
             if verbosity >= Verbosity::Normal {
                 display_stats(&stats, false);
             }
+            // Failed verification or source inspection must remain visible
+            // to scripts even when progress bars are suppressed.
+            let errors = progress_bars.errors();
+            if !errors.is_empty() {
+                emit_operation_errors(&errors, "decompression");
+                std::process::exit(1);
+            }
         }
         Commands::Info(_) => unreachable!("info handled before tracing"),
     }
+}
+
+// Progress-bar messages may disappear when stderr is redirected. Print a
+// bounded list of actionable failures for both mutating operations without
+// polluting machine-readable JSON on stdout.
+fn emit_operation_errors(errors: &[(PathBuf, String)], operation: &str) {
+    if errors.is_empty() {
+        return;
+    }
+    for (path, message) in errors.iter().take(20) {
+        eprintln!("applesauce: {}: {message}", path.display());
+    }
+    if errors.len() > 20 {
+        eprintln!(
+            "applesauce: {} additional {operation} error(s)",
+            errors.len() - 20
+        );
+    }
+    eprintln!("applesauce: {} {operation} error(s)", errors.len());
 }
 
 fn display_dry_run(report: &applesauce::dry_run::Report) {
@@ -681,4 +730,45 @@ fn compression_ratio_parser_accepts_only_finite_values() {
     for value in ["NaN", "nan", "inf", "+inf", "-inf"] {
         assert!(parse_finite_ratio(value).is_err(), "accepted {value}");
     }
+}
+
+#[test]
+fn decompress_verifies_by_default_and_requires_explicit_opt_out() {
+    for args in [
+        vec!["applesauce", "decompress", "fixture"],
+        vec!["applesauce", "decompress", "--manual", "fixture"],
+        vec!["applesauce", "decompress", "--verify", "fixture"],
+    ] {
+        let parsed = Cli::try_parse_from(args).unwrap();
+        let Commands::Decompress(decompress) = parsed.command else {
+            panic!("expected decompress command");
+        };
+        assert!(decompress.verification_enabled());
+    }
+
+    let parsed = Cli::try_parse_from([
+        "applesauce",
+        "decompress",
+        "--manual",
+        "--no-verify",
+        "fixture",
+    ])
+    .unwrap();
+    let Commands::Decompress(decompress) = parsed.command else {
+        panic!("expected decompress command");
+    };
+    assert!(!decompress.verification_enabled());
+    assert!(decompress.no_verify);
+
+    // Unsafe opt-out is meaningful only for manual decoding on older systems.
+    assert!(Cli::try_parse_from(["applesauce", "decompress", "--no-verify", "fixture"]).is_err());
+
+    assert!(Cli::try_parse_from([
+        "applesauce",
+        "decompress",
+        "--verify",
+        "--no-verify",
+        "fixture"
+    ])
+    .is_err());
 }

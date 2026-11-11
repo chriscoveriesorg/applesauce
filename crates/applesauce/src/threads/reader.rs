@@ -362,9 +362,13 @@ impl WorkHandler<WorkItem> for Handler {
 
 #[cfg(test)]
 mod tests {
-    use super::read_chunk;
+    use super::{open_scanned_regular_file, read_chunk};
     use applesauce_core::BLOCK_SIZE;
+    use std::ffi::CString;
+    use std::fs;
     use std::io::{self, Cursor, Read};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{symlink, FileTypeExt};
 
     #[test]
     fn auto_sampling_has_fixed_budget_and_nonoverlapping_windows() {
@@ -645,5 +649,47 @@ mod tests {
             read_chunk(FailingReader(false), 8).unwrap_err().kind(),
             io::ErrorKind::Other
         );
+    }
+
+    #[test]
+    fn source_preflight_rejects_regular_path_swaps_and_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let saved = dir.path().join("saved");
+        fs::write(&path, b"generated source").unwrap();
+        let scanned = fs::symlink_metadata(&path).unwrap();
+        open_scanned_regular_file(&path, &scanned).unwrap();
+
+        // A different regular inode of the same size is still unsafe.
+        fs::rename(&path, &saved).unwrap();
+        fs::write(&path, b"generated source").unwrap();
+        assert_eq!(
+            open_scanned_regular_file(&path, &scanned)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        fs::remove_file(&path).unwrap();
+        symlink(&saved, &path).unwrap();
+        assert!(open_scanned_regular_file(&path, &scanned).is_err());
+        assert_eq!(fs::read(&saved).unwrap(), b"generated source");
+    }
+
+    #[test]
+    fn source_preflight_rejects_fifo_substituted_after_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        fs::write(&path, b"generated source").unwrap();
+        let scanned = fs::symlink_metadata(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let fifo_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo_path is a valid NUL-terminated filesystem path.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        // O_NONBLOCK makes this return immediately even with no FIFO writer.
+        assert!(open_scanned_regular_file(&path, &scanned).is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
     }
 }

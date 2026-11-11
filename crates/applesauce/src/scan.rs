@@ -2,12 +2,44 @@ use crate::progress::Progress;
 use crate::threads::OperationContext;
 use crate::times;
 use std::fs::FileType;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+// jwalk invokes the directory callback concurrently. Keep any failed parent
+// timestamp capture in a shared ledger and report it after the walk. Without
+// this, an `.ok()` in the callback silently drops the resetter and a successful
+// file replacement can change the containing directory's timestamps.
+type ResetFailures = Arc<Mutex<Vec<(PathBuf, String)>>>;
+
+// Inspect the selected pathname itself: following a symlink here would
+// incorrectly treat a link to a regular file as a direct file root.
+fn is_direct_regular_file(path: &Path) -> io::Result<bool> {
+    path.symlink_metadata().map(|metadata| metadata.is_file())
+}
+
+fn checked_resetter(
+    directory: &Path,
+    setup: io::Result<times::Resetter>,
+    failures: &Mutex<Vec<(PathBuf, String)>>,
+) -> State {
+    match setup {
+        Ok(resetter) => Some(Arc::new(resetter)),
+        Err(error) => {
+            failures.lock().unwrap().push((
+                directory.to_path_buf(),
+                format!("unable to preserve directory timestamps: {error}"),
+            ));
+            None
+        }
+    }
+}
 
 fn walk_dir_over(
     path: &Path,
     context: Arc<OperationContext>,
+    failures: ResetFailures,
+    direct_file: bool,
 ) -> jwalk::WalkDirGeneric<((), State)> {
     let walker = jwalk::WalkDirGeneric::new(path);
     walker.process_read_dir(
@@ -15,6 +47,12 @@ fn walk_dir_over(
               path: &Path,
               _state,
               entries: &mut Vec<jwalk::Result<jwalk::DirEntry<((), State)>>>| {
+            // jwalk calls this even for a directly selected file and may pass
+            // an empty path for a bare relative filename. Its parent was
+            // already captured by Walker::run; leave the file entry intact.
+            if direct_file {
+                return;
+            }
             let mut reset_times: Option<State> = None;
             // Remove ignored directories from the list of entries.
             // Also, add the client state to the entry.
@@ -25,15 +63,19 @@ fn walk_dir_over(
                     }
                     #[allow(clippy::filetype_is_file)]
                     if entry.file_type().is_file() {
-                        let reset_times = match &mut reset_times {
-                            Some(reset_times) => reset_times,
-                            None => reset_times.insert(
-                                times::save_times(path)
-                                    .and_then(|saved_times| times::Resetter::new(path, saved_times))
-                                    .ok()
-                                    .map(Arc::new),
-                            ),
-                        };
+                        // One failed setup invalidates every regular-file entry
+                        // in this directory. Never publish a replacement when
+                        // its parent timestamps could not be captured.
+                        let reset_times = reset_times.get_or_insert_with(|| {
+                            let setup = times::Resetter::capture_with_failure_log(
+                                path,
+                                Arc::clone(&context.directory_timestamp_errors),
+                            );
+                            checked_resetter(path, setup, &failures)
+                        });
+                        if reset_times.is_none() {
+                            return false;
+                        }
                         entry.client_state.clone_from(reset_times);
                     }
                 }
@@ -68,7 +110,47 @@ impl<'a, P: Progress + Send + Sync> Walker<'a, P> {
         f: impl Fn(FileType, PathBuf, Option<Arc<times::Resetter>>) + Send + Sync,
     ) {
         for path in self.paths {
-            let walker = walk_dir_over(path, Arc::clone(context));
+            // A directly selected file never invokes jwalk's read-directory
+            // callback, so it cannot inherit the directory resetter installed
+            // for files found inside directory roots. Capture its parent here
+            // before queueing any writer, and fail closed on capture errors.
+            let direct_file = match is_direct_regular_file(path) {
+                Ok(is_regular) => is_regular,
+                Err(error) => {
+                    self.progress
+                        .error(path, &format!("unable to inspect selected root: {error}"));
+                    continue;
+                }
+            };
+            let direct_parent_resetter = if direct_file {
+                // A bare relative name has an empty parent Path; open ".".
+                let parent = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                match times::Resetter::capture_with_failure_log(
+                    parent,
+                    Arc::clone(&context.directory_timestamp_errors),
+                ) {
+                    Ok(resetter) => Some(Arc::new(resetter)),
+                    Err(error) => {
+                        self.progress.error(
+                            path,
+                            &format!("unable to preserve parent directory timestamps: {error}"),
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let failures: ResetFailures = Arc::new(Mutex::new(Vec::new()));
+            let walker = walk_dir_over(
+                path,
+                Arc::clone(context),
+                Arc::clone(&failures),
+                direct_file,
+            );
             for entry in walker {
                 let mut entry = match entry {
                     Ok(entry) => entry,
@@ -90,8 +172,75 @@ impl<'a, P: Progress + Send + Sync> Walker<'a, P> {
                 if metadata.is_dir() {
                     continue;
                 }
-                f(metadata.file_type(), path, entry.client_state.take())
+                f(
+                    metadata.file_type(),
+                    path,
+                    entry
+                        .client_state
+                        .take()
+                        .or_else(|| direct_parent_resetter.clone()),
+                )
+            }
+            // A callback failure can occur on another jwalk worker. Make the
+            // operation report it even if every affected file was filtered.
+            for (directory, message) in failures.lock().unwrap().drain(..) {
+                self.progress.error(&directory, &message);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checked_resetter, is_direct_regular_file};
+    use std::io;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    #[test]
+    fn explicit_root_classification_never_follows_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let regular = dir.path().join("regular.txt");
+        std::fs::write(&regular, b"generated fixture").unwrap();
+        let link = dir.path().join("link-to-regular.txt");
+        symlink(&regular, &link).unwrap();
+        let dangling = dir.path().join("dangling-link");
+        symlink(dir.path().join("absent"), &dangling).unwrap();
+
+        assert!(is_direct_regular_file(&regular).unwrap());
+        assert!(!is_direct_regular_file(dir.path()).unwrap());
+        assert!(!is_direct_regular_file(&link).unwrap());
+        assert!(!is_direct_regular_file(&dangling).unwrap());
+        assert!(is_direct_regular_file(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn failed_parent_timestamp_capture_is_a_visible_error_and_has_no_resetter() {
+        let failures = Mutex::new(Vec::new());
+        let path = Path::new("/synthetic/protected-directory");
+        let resetter = checked_resetter(
+            path,
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "timestamp denied",
+            )),
+            &failures,
+        );
+        assert!(resetter.is_none());
+        let errors = failures.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, path);
+        assert!(errors[0].1.contains("timestamp denied"));
+    }
+
+    #[test]
+    fn accessible_parent_timestamp_capture_retains_resetter() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = crate::times::save_times(dir.path()).unwrap();
+        let resetter = crate::times::Resetter::new(dir.path(), saved).unwrap();
+        let failures = Mutex::new(Vec::new());
+        assert!(checked_resetter(dir.path(), Ok(resetter), &failures).is_some());
+        assert!(failures.lock().unwrap().is_empty());
     }
 }

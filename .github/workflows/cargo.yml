@@ -2,8 +2,40 @@ on: push
 
 name: Continuous integration
 
+# A new push may supersede only an unmerged feature-branch run. Give every
+# main commit its own group so merges and release qualification are never
+# silently cancelled or displaced by a later push.
+permissions:
+  contents: read
+
+concurrency:
+  group: applesauce-cargo-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && startsWith(github.ref, 'refs/heads/') }}
+
 jobs:
+  # Check formatting on a disposable Linux runner before reserving any of
+  # the scarce macOS xcode-27 slots. rustfmt is platform-independent here.
+  # Offline Python benchmark contracts are platform-independent and run
+  # once here, instead of three times on scarce macOS matrix workers.
+  preflight:
+    name: Formatting preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+      - name: Install Rust formatting
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Test formatting
+        run: cargo fmt --all -- --check
+      - name: Validate offline benchmark summary contract
+        run: python3 -m unittest discover -s hack -p 'test_benchmark_summary.py'
+      - name: Validate offline benchmark matrix contract
+        run: python3 -m unittest discover -s hack -p 'test_benchmark_matrix.py'
+
   ci:
+    needs: preflight
     # Use the same provisioned macOS runner that executes the native codec probe.
     # The macos-latest matrix has been cancelled before runner assignment.
     runs-on: xcode-27
@@ -21,7 +53,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
+          components: clippy
 
       - name: Caching
         uses: Swatinem/rust-cache@v2
@@ -30,21 +62,21 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: Run tests
         run: cargo test --workspace --all-targets
-      - name: Validate offline benchmark summary contract
-        run: python3 -m unittest discover -s hack -p 'test_benchmark_summary.py'
-      - name: Validate offline benchmark matrix contract
-        run: python3 -m unittest discover -s hack -p 'test_benchmark_matrix.py'
+      # Exercise every feature combination on stable. Beta/nightly still run
+      # the default check, tests and Clippy to catch compiler regressions,
+      # without repeating three expensive native-codec suites per toolchain.
       - name: Run tests with system lzfse
+        if: matrix.rust == 'stable'
         run: cargo test --workspace --features system-lzfse --all-targets
       - name: Test opt-in native LZBitmap on generated temporary files
+        if: matrix.rust == 'stable'
         run: cargo test --workspace --features lzbitmap --all-targets
       - name: Run tests with only zlib
+        if: matrix.rust == 'stable'
         run: cargo test --workspace --no-default-features --features zlib --all-targets
-
-      - name: Test formatting
-        run: cargo fmt --all -- --check
 
       - name: Check for clippy warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Check opt-in native LZBitmap for clippy warnings
+        if: matrix.rust == 'stable'
         run: cargo clippy --workspace --features lzbitmap --all-targets -- -D warnings

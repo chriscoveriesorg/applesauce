@@ -79,6 +79,8 @@ applesauce archive verify chatlog.ascf
 applesauce archive extract chatlog.ascf chatlog-restored.jsonl
 applesauce archive extract chatlog.ascf chatlog-slice.jsonl --range 65535:131073
 # Or choose --codec lzmesh for the create command.
+# Explicit opt-in auto selection, with verified bounded sampling:
+applesauce archive create chatlog.jsonl chatlog-auto.ascf --codec auto
 ```
 
 `archive info` reads the header and validated index without loading a
@@ -91,8 +93,24 @@ unrelated chunks, so the range digest is evidence for the selected bytes.
 Run `archive verify` to authenticate the complete logical archive; that
 requires an available Raven/Mesh decoder on macOS 27+.
 
+`archive create --codec auto` encodes and decodes at most 64 KiB total
+from the opened source with both Apple buffer codecs. For files of 192 KiB or
+more, the sample budget is split between the beginning, middle and end, reducing
+first-block bias on mixed-content logs. Smaller files use one contiguous sample.
+Both codecs must round-trip every sampled window; their encoded lengths include
+each window's overhead. LZRAVEN is selected only when its combined sample is at
+least 20% smaller than LZMESH's; otherwise LZMESH avoids Raven's measured
+encoding slowdown. The rule is deterministic, explicitly requested, and prints
+the sample sizes, window count and selected codec. The final whole-file savings
+and SHA-256 verification checks remain mandatory. Explicit `--codec lzraven` retains the existing default behavior.
+No automatic native APFS codec selection or `decmpfs` writer is involved.
+
 The writer rereads and hashes the original, verifies every staged chunk and
-publishes a new file only after verification. Archives that cannot save space
+rechecks input path identity immediately before publishing to reject a replaced
+source (including same-sized inode swaps on macOS/Linux). Full and ranged
+restoration apply the same pathname check before publishing their new output.
+A concurrent rename after the final check remains a normal filesystem race.
+Archives that cannot save space
 are refused unless you set `--allow-expansion`. Use `--chunk-bytes 1048576`
 to select a power-of-two chunk size between 64 KiB and 8 MiB. Keep the original
 log until you have validated its restoration. The archive is not an APFS
@@ -150,8 +168,13 @@ applesauce archive [create|verify|extract] ...
 
 The options are as follows:
 
-- `compress`: Compresses the specified file/directory using one of three compression algorithms (LZFSE, LZVN, or ZLIB).
-- `decompress`: Decompresses the specified file/directory.
+- `compress`: Compresses the specified file/directory using one of three compression algorithms (LZFSE, LZVN, or ZLIB). The compressed staging file is verified when requested, has the source timestamps restored and is synced before the atomic replacement; a timestamp or sync error leaves the original uncompressed file intact. Explicit symlink, FIFO, socket and device roots are rejected before walking; a selected directory symlink cannot redirect compression into a different tree.
+- `decompress`: Restores files through a temporary file and verifies every restored byte against the kernel-visible compressed source before replacing it. The original file is preserved if content verification, timestamp restoration or staging-file sync fails. Restored timestamps are set on the temporary file before atomic publication. Explicit symlink, hard-linked file and special-file roots are refused with an error, rather than silently skipped or followed. While walking a selected directory, compressed hard-linked files are reported as restoration errors and left unchanged; unrelated uncompressed hard links remain skipped. Overlapping compression and restoration roots are deduplicated by source inode before scheduling writers, preventing competing replacements. Verification is enabled by default, including with `--manual`. Before writing restored bytes, a same-volume free-space preflight refuses a restore larger than the available space. This is a point-in-time check: concurrent disk usage can still exhaust space during the write, which also fails safely without replacing the source. A successful restore clears the decmpfs attribute and, for resource-fork-backed compression, its consumed compressed resource fork; inline-xattr compression preserves unrelated resource-fork data.
+
+With `compress --verify`, Applesauce reopens the **staged** native compressed file before replacement, requiring its kernel-visible logical bytes to match the source. A failure at this stage preserves the original. After atomic publication it independently reopens the **published** path and checks the complete logical content through macOS's ordinary file API. It compares the SHA-256 with the original and checks independent 4 KiB `pread` windows at the boundaries, midpoint and four content-derived offsets. Use `-v` to see a per-file `verified: kernel-read sha256=...` record. These checks operate on potentially warm filesystem cache; they do not prove cold-cache decoding. Post-publication failures return an error and leave the compressed file at its new path, so retain external backups for critical files. This additional readback is only performed when verification is requested or forced by a codec. For `compress --verify --json`, successful per-file readbacks also appear in the actual-storage JSON as `kernel_readbacks`, containing the pathname (including lossless hex bytes), SHA-256, verification coverage and `potentially_warm` cache status. These are operation-time attestations and are omitted from read-only `info --json` reports. Kernel reads can change the file's access time on APFS; Applesauce restores the saved times after both the staged and published readback. A post-publication timestamp or sync failure is reported as an operation error, with the compressed file left in place.
+
+For recovery on a macOS release whose kernel cannot decode the source, `decompress --manual --no-verify PATH` explicitly disables the independent kernel comparison. This is an unsafe recovery option and always prints a warning on standard error; inspect and back up the source before using it. The decoder's block-length and format checks still apply. `--verify` remains accepted as an explicit affirmation of the default and conflicts with `--no-verify`.
+
 - `info`: Prints information about the specified compressed file/directory, including the compression ratio and
   compression algorithm used.
 
