@@ -69,8 +69,12 @@ def require_unchanged(path, expected, stream=None):
 
 
 def limit_decoder_output(clear_len):
-    """Cap decoder output on disk before spawning an independently built executable."""
-    resource.setrlimit(resource.RLIMIT_FSIZE, (clear_len, clear_len))
+    """Cap decoder output with one extra byte to detect attempted overproduction."""
+    # If the limit equals clear_len, a decoder can ignore SIGXFSZ, attempt
+    # another byte, then exit 0 with only the expected prefix on disk.
+    # Preserve a sentinel byte so verification rejects that output instead.
+    limit = clear_len + 1
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
 
 
 def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds=30):
