@@ -239,6 +239,42 @@ class SafeOutputTests(unittest.TestCase):
             self.assertEqual(list(csv.DictReader(stream)), self.rows)
         self.assertEqual(self.input.read_text(), "source evidence")
 
+    @unittest.expectedFailure
+    def test_hardlink_created_after_cleanup_identity_check_is_preserved(self):
+        # KNOWN UNSAFE: st_nlink == 1 is only a snapshot. Another same-UID
+        # writer can create an alias after fstat and before ftruncate.
+        # Keep this red test visible until cleanup cannot mutate that alias.
+        alias = self.root / "late-hardlink.csv"
+        real_fsync = os.fsync
+        real_ftruncate = os.ftruncate
+        injected = False
+        linked = False
+
+        def fail_directory_sync(fd):
+            nonlocal injected
+            if not injected and self.output.exists():
+                injected = True
+                raise OSError("injected directory sync failure")
+            return real_fsync(fd)
+
+        def link_before_truncate(fd, size):
+            nonlocal linked
+            if injected and not linked and size == 0:
+                linked = True
+                os.link(self.output, alias)
+            return real_ftruncate(fd, size)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fsync", side_effect=fail_directory_sync):
+                with patch("safe_benchmark_output.os.ftruncate", side_effect=link_before_truncate):
+                    with self.assertRaisesRegex(OSError, "directory sync failure"):
+                        publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(injected)
+        self.assertTrue(linked)
+        with alias.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), self.rows)
+        self.assertEqual(self.input.read_text(), "source evidence")
+
     def test_failed_atomic_replace_cleans_temporary_without_publishing(self):
         # A rename refusal must not leave a plausible upload artifact or
         # abandon a partially completed temporary CSV.
