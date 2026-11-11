@@ -362,9 +362,9 @@ class ConfidenceTests(unittest.TestCase):
         self.assertEqual(
             protected.read_text(encoding="utf-8"), "protected Criterion input"
         )
-        # A failed publication must not leave a valid-looking artifact in
-        # the moved directory, which may be uploaded by an always() step.
-        self.assertFalse((moved / "confidence.csv").exists())
+        # A displaced directory must retain only an invalid, empty artifact.
+        # This descriptor-based truncation preserves unrelated path replacements.
+        self.assertEqual((moved / "confidence.csv").stat().st_size, 0)
         self.assertEqual(list(moved.glob(".confidence.csv.*.tmp")), [])
 
     def test_stale_output_removal_requires_directory_sync(self):
@@ -411,9 +411,9 @@ class ConfidenceTests(unittest.TestCase):
                     self.summary, self.criterion, self.output, manifest, "smoke"
                 )
         self.assertTrue(directory_sync_attempted)
-        # The workflow uploads artifacts on failure; a failed durability
-        # barrier must not leave a seemingly valid confidence.csv behind.
-        self.assertFalse(self.output.exists())
+        # A post-rename sync failure invalidates the published inode without
+        # unlinking a potentially replaced pathname.
+        self.assertEqual(self.output.stat().st_size, 0)
         self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
 
     def test_real_output_directory_swap_during_open_refuses_foreign_cleanup(self):
