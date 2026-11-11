@@ -202,6 +202,32 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_directory_sync_failure_removes_published_csv(self):
+        # A successful rename is not durable until the parent directory
+        # sync succeeds. Refuse to leave a plausible upload artifact.
+        real_fsync = os.fsync
+        failed = False
+
+        def refuse_directory_sync(fd):
+            nonlocal failed
+            if (
+                not failed
+                and self.output.exists()
+                and os.fstat(fd).st_mode & 0o170000 == 0o040000
+            ):
+                failed = True
+                raise OSError("injected directory durability failure")
+            return real_fsync(fd)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fsync", side_effect=refuse_directory_sync):
+                with self.assertRaisesRegex(OSError, "directory durability failure"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(failed)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_cleanup_unlink_failure_preserves_original_sync_error(self):
         # Cleanup is best-effort: a second filesystem failure must not hide
         # the publication durability error or affect original evidence.
