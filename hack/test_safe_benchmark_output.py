@@ -447,6 +447,41 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_directory_close_failure_preserves_publication_error(self):
+        # A secondary descriptor-close error must not mask the real reason
+        # the benchmark evidence was rejected.
+        real_close = os.close
+        closed = []
+
+        def close_then_fail(fd):
+            closed.append(fd)
+            real_close(fd)
+            raise OSError("injected directory close failure")
+
+        with patch("safe_benchmark_output.os.close", side_effect=close_then_fail):
+            with self.assertRaisesRegex(ValueError, "injected publication failure"):
+                with SafeCsvOutput(self.output, (self.input,)):
+                    raise ValueError("injected publication failure")
+        self.assertEqual(len(closed), 1)
+        with self.assertRaises(OSError):
+            os.fstat(closed[0])
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.input.read_text(), "source evidence")
+
+    def test_directory_close_failure_without_primary_error_propagates(self):
+        real_close = os.close
+
+        def close_then_fail(fd):
+            real_close(fd)
+            raise OSError("injected directory close failure")
+
+        with patch("safe_benchmark_output.os.close", side_effect=close_then_fail):
+            with self.assertRaisesRegex(OSError, "injected directory close failure"):
+                with SafeCsvOutput(self.output, (self.input,)):
+                    pass
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.input.read_text(), "source evidence")
+
     def test_temporary_file_sync_failure_never_publishes(self):
         # A failed file durability barrier must not publish an unverified
         # CSV, even if its rows have already been written successfully.
