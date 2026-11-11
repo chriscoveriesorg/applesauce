@@ -14,6 +14,7 @@ pub enum SkipReason {
     HasRequiredXattr,
     FsNotSupported,
     HardLink,
+    DuplicateInput,
 }
 
 impl From<IncompressibleReason> for SkipReason {
@@ -91,6 +92,7 @@ impl fmt::Display for SkipReason {
             SkipReason::FsNotSupported => write!(f, "Filesystem does not support compression"),
             SkipReason::EmptyFile => write!(f, "Empty file"),
             SkipReason::HardLink => write!(f, "Other hard links exist to file"),
+            SkipReason::DuplicateInput => write!(f, "Duplicate input (already scheduled)"),
         }
     }
 }

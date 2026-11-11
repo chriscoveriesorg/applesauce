@@ -3,15 +3,16 @@ use crate::progress::{self, Progress, SkipReason};
 use crate::volumes::Volumes;
 use crate::{info, scan, times, Stats};
 use applesauce_core::compressor;
+use std::collections::HashSet;
 use std::fs::Metadata;
+use std::io;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::{fmt, mem};
-use tracing::warn;
 
 pub mod compressing;
 pub mod reader;
@@ -48,6 +49,7 @@ pub struct OperationContext {
     finished_stats: crossbeam_channel::Sender<Stats>,
     volumes: Volumes,
     verify: bool,
+    pub(crate) directory_timestamp_errors: times::ResetFailureLog,
 }
 
 impl OperationContext {
@@ -57,12 +59,14 @@ impl OperationContext {
         volumes: Volumes,
         verify: bool,
     ) -> Self {
+        let directory_timestamp_errors = volumes.timestamp_errors();
         Self {
             mode,
             stats: Stats::default(),
             finished_stats,
             volumes,
             verify,
+            directory_timestamp_errors,
         }
     }
 
@@ -73,6 +77,11 @@ impl OperationContext {
 
 impl Drop for OperationContext {
     fn drop(&mut self) {
+        // Last file context has completed its parent reset before releasing
+        // the operation Arc. Remove all on-volume scratch directories, then
+        // restore their parent timestamps and record cleanup failures before
+        // waking the caller to drain the shared error ledger.
+        self.volumes.finish();
         let stats = mem::take(&mut self.stats);
         let _ = self.finished_stats.send(stats);
     }
@@ -176,46 +185,64 @@ impl BackgroundThreads {
         let volumes = Volumes::new();
         let mut walker = scan::Walker::new(progress);
         for path in paths {
-            // Restoration must inspect the root itself. Following a root
-            // symlink can silently restore a different file or whole tree
-            // than the operator selected.
-            let metadata_result = if mode.is_compressing() {
-                path.metadata()
-            } else {
-                path.symlink_metadata()
-            };
-            let metadata = match metadata_result {
+            // Never follow an explicitly selected symlink root in either
+            // direction. In particular, following a symlink to a directory
+            // during compression could walk and replace files outside the
+            // tree the caller intended to select.
+            let metadata = match path.symlink_metadata() {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    // Every explicitly requested root is part of the operation.
-                    // Silently dropping a missing or unreadable root could make
-                    // restoration appear successful without touching any file.
+                    // Silently dropping an explicit input can make a partial
+                    // compression or restoration appear successful.
                     progress.error(path, &format!("unable to inspect input root: {error}"));
                     continue;
                 }
             };
-            if !mode.is_compressing() && metadata.file_type().is_symlink() {
-                progress.error(path, "refusing to restore a symlink input root");
+            let action = if mode.is_compressing() {
+                "compress"
+            } else {
+                "restore"
+            };
+            if metadata.file_type().is_symlink() {
+                progress.error(path, &format!("refusing to {action} a symlink input root"));
                 continue;
             }
-            if !mode.is_compressing() && metadata.is_file() && metadata.nlink() > 1 {
-                // The recursive scanner already skips hard-linked files. An
-                // explicitly requested hard link must fail visibly instead of
-                // appearing to have been restored.
-                progress.error(path, "refusing to restore a hard-linked input root");
-                continue;
-            }
-            if let Err(e) = volumes.add_root_dir(path, &metadata) {
-                warn!(
-                    "failed to find a temp directory for {}: {e}",
-                    path.display()
+            if !metadata.is_file() && !metadata.is_dir() {
+                // A FIFO, device or socket is not a legitimate input root.
+                // Reject it before the walker can silently skip or open it.
+                progress.error(
+                    path,
+                    &format!("refusing to {action} a non-regular input root"),
                 );
+                continue;
+            }
+            if metadata.is_file() && metadata.nlink() > 1 {
+                // Replacing one name of a shared inode would break the link
+                // relationship. A directory walk can skip these files, but
+                // an explicitly selected hard-linked file must fail visibly
+                // instead of letting the CLI report a successful no-op.
+                progress.error(
+                    path,
+                    &format!("refusing to {action} a hard-linked input root"),
+                );
+                continue;
+            }
+            // No staging directory means this root cannot be restored safely.
+            // Report the preflight failure through Progress so CLI invocations
+            // exit nonzero even when scanning would otherwise skip every file.
+            if !prepare_root_volume(path, progress, volumes.add_root_dir(path, &metadata)) {
+                continue;
             }
             walker.add_path(path);
         }
         let operation = Arc::new(OperationContext::new(mode, finished_stats, volumes, verify));
+        let timestamp_errors = Arc::clone(&operation.directory_timestamp_errors);
         let stats = &operation.stats;
         let chan = self.reader.chan();
+        // Overlapping directory and explicit-file roots can select the same
+        // inode for both compression and restoration. Claim it before queueing
+        // either kind of writer to avoid competing atomic replacements.
+        let input_claims = Mutex::new(HashSet::new());
 
         walker.run(&operation, |file_type, path, dir_reset| {
             // We really only want to deal with files, not symlinks to files, or fifos, etc.
@@ -233,8 +260,20 @@ impl BackgroundThreads {
             };
             let link_count = metadata.nlink();
             if link_count > 1 {
-                // We don't want to break the hard link, so we skip it.
-                progress.file_skipped(&path, SkipReason::HardLink);
+                // An uncompressed shared inode can remain an ordinary skip.
+                // A compressed inode under a requested directory is work the
+                // caller asked us to restore. Refuse it visibly so the CLI
+                // cannot exit successfully with compressed data left behind.
+                if !mode.is_compressing()
+                    && matches!(
+                        info::get_compression_state(&path, &metadata, &operation.volumes),
+                        FileCompressionState::Compressed
+                    )
+                {
+                    progress.error(&path, "refusing to restore a hard-linked compressed file");
+                } else {
+                    progress.file_skipped(&path, SkipReason::HardLink);
+                }
                 return;
             }
             let mut file_info = info::get_file_info(&path, &metadata, &operation.volumes);
@@ -263,7 +302,11 @@ impl BackgroundThreads {
                             IncompressibleReason::Empty,
                         )))
                     } else {
-                        None
+                        // Incompressible describes an uncompressed file that is
+                        // ineligible for *compression*, not a file needing
+                        // restoration. This includes empty, oversized, and
+                        // resource-fork-bearing files in ordinary mixed trees.
+                        Some(SkipReason::NotCompressed)
                     }
                 }
             };
@@ -272,6 +315,16 @@ impl BackgroundThreads {
                 stats.add_end_file(&metadata, &file_info);
                 return;
             }
+            // A file may appear under multiple requested roots. Only one
+            // writer may compress or restore an eligible source inode. Without
+            // this guard, two compressors can both stage from the same source
+            // and race the final replacement (or report a spurious failure).
+            if !claim_input_inode(&input_claims, &metadata) {
+                progress.file_skipped(&path, SkipReason::DuplicateInput);
+                stats.add_end_file(&metadata, &file_info);
+                return;
+            }
+
             let saved_times = match times::save_times(path.as_path()) {
                 Ok(saved_times) => saved_times,
                 Err(e) => {
@@ -298,21 +351,48 @@ impl BackgroundThreads {
         });
         drop(operation);
 
-        finished_stats_rx
+        // Each file Context drops its parent resetter before releasing the
+        // operation reference. By the time the stats sender is dropped, every
+        // activated directory reset has completed and any failures are ready.
+        let stats = finished_stats_rx
             .recv()
-            .expect("OperationContext will send stats on drop of all arcs")
+            .expect("OperationContext will send stats on drop of all arcs");
+        for (directory, message) in timestamp_errors.lock().unwrap().drain(..) {
+            progress.error(&directory, &message);
+        }
+        stats
     }
+}
+
+// Fail closed before queueing work if the selected volume cannot provide a
+// staging directory. A warning-only preflight could make a whole restore look
+// successful when compression-state discovery later skips its entries.
+fn prepare_root_volume<P: Progress>(
+    path: &Path,
+    progress: &P,
+    registration: io::Result<()>,
+) -> bool {
+    match registration {
+        Ok(()) => true,
+        Err(error) => {
+            progress.error(path, &format!("unable to prepare staging volume: {error}"));
+            false
+        }
+    }
+}
+
+// Claim each eligible source inode once across all requested paths, including
+// overlapping directory and explicit-file roots, in either operation mode.
+fn claim_input_inode(seen: &Mutex<HashSet<(u64, u64)>>, metadata: &Metadata) -> bool {
+    seen.lock()
+        .unwrap()
+        .insert((metadata.dev(), metadata.ino()))
 }
 
 // A failed metadata or timestamp read while scanning an input for restoration
 // must propagate to the caller. Reporting it only as a skip would allow
 // decompress to exit successfully even though a requested file was untouched.
-fn report_scan_read_error<P: Progress>(
-    progress: &P,
-    mode: Mode,
-    path: &Path,
-    error: std::io::Error,
-) {
+fn report_scan_read_error<P: Progress>(progress: &P, mode: Mode, path: &Path, error: io::Error) {
     if mode.is_compressing() {
         progress.file_skipped(path, SkipReason::ReadError(error));
     } else {
@@ -396,8 +476,10 @@ impl fmt::Debug for Context {
 
 #[cfg(test)]
 mod scan_failure_tests {
-    use super::{report_scan_read_error, Mode};
+    use super::{claim_input_inode, prepare_root_volume, report_scan_read_error, Mode};
     use crate::progress::{Progress, SkipReason, Task};
+    use std::collections::HashSet;
+    use std::fs;
     use std::io;
     use std::path::Path;
     use std::sync::Mutex;
@@ -429,6 +511,48 @@ mod scan_failure_tests {
         fn file_task(&self, _path: &Path, _size: u64) -> Self::Task {
             NoTask
         }
+    }
+
+    #[test]
+    fn staging_volume_preflight_errors_are_reported_and_reject_roots() {
+        let path = Path::new("unavailable-volume");
+        let recorder = RecordingProgress::default();
+        assert!(!prepare_root_volume(
+            path,
+            &recorder,
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "temp directory cannot be created",
+            )),
+        ));
+        let errors = recorder.errors.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("unable to prepare staging volume"));
+        assert!(errors[0].contains("temp directory cannot be created"));
+        drop(errors);
+        assert!(recorder.skips.lock().unwrap().is_empty());
+
+        // Successful volume preparation may proceed to scanning.
+        assert!(prepare_root_volume(path, &recorder, Ok(())));
+        assert_eq!(recorder.errors.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn input_claims_are_unique_for_paths_with_the_same_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let alias = dir.path().join("hard-link-alias");
+        let separate = dir.path().join("separate");
+        fs::write(&source, b"generated input").unwrap();
+        fs::hard_link(&source, &alias).unwrap();
+        fs::write(&separate, b"generated input").unwrap();
+        let seen = Mutex::new(HashSet::new());
+
+        assert!(claim_input_inode(&seen, &fs::metadata(&source).unwrap()));
+        assert!(!claim_input_inode(&seen, &fs::metadata(&source).unwrap()));
+        assert!(!claim_input_inode(&seen, &fs::metadata(&alias).unwrap()));
+        assert!(claim_input_inode(&seen, &fs::metadata(&separate).unwrap()));
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
     #[test]
