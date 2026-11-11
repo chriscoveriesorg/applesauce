@@ -27,10 +27,11 @@ class NegativeProofTests(unittest.TestCase):
         self.decoder = self.root / "mock_decoder"
         self.clear = b"independent negative proof fixture, generated only" * 20
 
-    def make_fixture(self, codec, *, multi_chunk=False):
-        if multi_chunk:
-            # A genuine three-chunk ASCF geometry including a short tail.
-            self.clear = (self.clear * (131103 // len(self.clear) + 1))[:131103]
+    def make_fixture(self, codec, *, multi_chunk=False, two_chunk=False):
+        if multi_chunk or two_chunk:
+            # Two or three chunks, including a short tail, with exact indices.
+            length = 131103 if multi_chunk else 65537
+            self.clear = (self.clear * (length // len(self.clear) + 1))[:length]
         self.original.write_bytes(self.clear)
         header = bytearray(64)
         header[:8] = b"ASCF0001"
@@ -95,11 +96,12 @@ class NegativeProofTests(unittest.TestCase):
         result = check_corruptions(
             self.archive, self.original, self.decoder, codec="lzmesh"
         )
-        self.assertEqual(result["case_count"], 7)
+        self.assertEqual(result["case_count"], 9)
         self.assertEqual(
             {case["case"] for case in result["cases"]},
             {"payload_one_third", "payload_middle", "index_digest",
              "truncated_payload", "appended_payload",
+             "payload_middle_chunk", "middle_index_digest",
              "payload_final_chunk", "final_index_digest"},
         )
         self.assertEqual(self.archive.read_bytes()[208:], self.clear)
@@ -109,13 +111,21 @@ class NegativeProofTests(unittest.TestCase):
         result = check_corruptions(
             self.archive, self.original, self.decoder, codec="lzraven"
         )
-        self.assertEqual(result["case_count"], 7)
+        self.assertEqual(result["case_count"], 9)
         self.assertEqual(result["codec"], "lzraven")
 
-    def test_final_payload_corruption_rejects_wrong_chunk_error(self):
+    def test_two_chunks_does_not_duplicate_middle_and_final_checks(self):
+        self.make_fixture("lzmesh", two_chunk=True)
+        result = check_corruptions(
+            self.archive, self.original, self.decoder, codec="lzmesh"
+        )
+        self.assertEqual(result["case_count"], 7)
+        self.assertNotIn("payload_middle_chunk",
+                         {case["case"] for case in result["cases"]})
+
+    def test_middle_payload_corruption_rejects_wrong_chunk_error(self):
         self.make_fixture("lzmesh", multi_chunk=True)
         from prove_independent_corruptions import verify as real_verify
-
         calls = 0
 
         def fail_wrong_chunk(*args, **kwargs):
@@ -128,17 +138,16 @@ class NegativeProofTests(unittest.TestCase):
         with mock.patch("prove_independent_corruptions.verify",
                         side_effect=fail_wrong_chunk):
             with self.assertRaisesRegex(
-                AssertionError, "payload_final_chunk failed outside decoder result gate"
+                AssertionError, "payload_middle_chunk failed outside decoder result gate"
             ):
                 check_corruptions(
                     self.archive, self.original, self.decoder, codec="lzmesh"
                 )
         self.assertEqual(calls, 7)
 
-    def test_final_digest_corruption_rejects_wrong_parser_gate(self):
+    def test_middle_digest_corruption_rejects_wrong_parser_gate(self):
         self.make_fixture("lzmesh", multi_chunk=True)
         from prove_independent_corruptions import verify as real_verify
-
         calls = 0
 
         def fail_wrong_gate(*args, **kwargs):
@@ -151,12 +160,58 @@ class NegativeProofTests(unittest.TestCase):
         with mock.patch("prove_independent_corruptions.verify",
                         side_effect=fail_wrong_gate):
             with self.assertRaisesRegex(
-                AssertionError, "final_index_digest failed outside expected parser gate"
+                AssertionError, "middle_index_digest failed outside expected parser gate"
             ):
                 check_corruptions(
                     self.archive, self.original, self.decoder, codec="lzmesh"
                 )
         self.assertEqual(calls, 8)
+
+    def test_final_payload_corruption_rejects_wrong_chunk_error(self):
+        self.make_fixture("lzmesh", multi_chunk=True)
+        from prove_independent_corruptions import verify as real_verify
+
+        calls = 0
+
+        def fail_wrong_chunk(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 9:
+                raise InvalidArchive("independent decoder failed on chunk 0 (exit 1)")
+            return real_verify(*args, **kwargs)
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=fail_wrong_chunk):
+            with self.assertRaisesRegex(
+                AssertionError, "payload_final_chunk failed outside decoder result gate"
+            ):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 9)
+
+    def test_final_digest_corruption_rejects_wrong_parser_gate(self):
+        self.make_fixture("lzmesh", multi_chunk=True)
+        from prove_independent_corruptions import verify as real_verify
+
+        calls = 0
+
+        def fail_wrong_gate(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 10:
+                raise InvalidArchive("original chunk 0 differs from ASCF chunk digest")
+            return real_verify(*args, **kwargs)
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=fail_wrong_gate):
+            with self.assertRaisesRegex(
+                AssertionError, "final_index_digest failed outside expected parser gate"
+            ):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 10)
 
     def test_never_passes_a_decoder_that_ignores_corrupted_payload(self):
         self.make_fixture("lzmesh")
