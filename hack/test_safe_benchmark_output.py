@@ -274,6 +274,21 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(), "source evidence")
 
+    def test_two_preflighted_publishers_cannot_overwrite_each_other(self):
+        # Both publishers observe an absent destination. The second writer
+        # must still fail at the atomic exclusive-link operation, preserving
+        # the first writer's complete CSV and cleaning its own staging file.
+        competing_rows = [{"codec": "lzmesh", "value": "456"}]
+        with SafeCsvOutput(self.output, (self.input,)) as first:
+            with SafeCsvOutput(self.output, (self.input,)) as second:
+                first.write_rows(self.rows, ("codec", "value"))
+                with self.assertRaises(FileExistsError):
+                    second.write_rows(competing_rows, ("codec", "value"))
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), self.rows)
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_exclusive_publish_refuses_concurrent_symlink_to_source(self):
         # A same-UID writer can install a symlink after the preflight.
         # Exclusive publication must neither follow nor overwrite it.
