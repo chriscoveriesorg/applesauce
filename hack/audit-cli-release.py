@@ -6,6 +6,9 @@ remains mandatory on disposable arm64 and x86_64 macOS hosts.
 """
 import argparse
 import hashlib
+import os
+import stat
+import tempfile
 import json
 import shutil
 import struct
@@ -23,6 +26,7 @@ ARCH_CPUS = {"aarch64": 0x0100000C, "x86_64": 0x01000007}
 # require arm64e pointer authentication or the x86_64h Haswell variant.
 ARCH_SUBTYPES = {"aarch64": 0, "x86_64": 3}
 SUFFIXES = (".tar.xz", ".tar.gz")
+MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 
 
 class AuditError(Exception):
@@ -35,6 +39,62 @@ def sha256(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def file_identity(metadata):
+    """Fields that expose replacement, modification and permission changes."""
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def verify_download_unchanged(path, expected):
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise AuditError(f"{path.name}: cannot recheck downloaded source: {exc}") from exc
+    if file_identity(current) != file_identity(expected):
+        raise AuditError(f"{path.name}: downloaded source changed during audit")
+
+
+def stage_archive(source, private_directory):
+    """Bounded no-follow snapshot: every validator sees identical archive bytes.
+
+    Without this, the Mach-O parser, SHA-256, release-asset checker and
+    attestation each reopen a mutable download pathname at different times.
+    A concurrent replacement could let them certify different artifacts.
+    """
+    destination = private_directory / source.name
+    try:
+        before = os.stat(source, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise AuditError(f"{source.name}: downloaded archive is not a regular file")
+        if not 0 < before.st_size <= MAX_ARCHIVE_BYTES:
+            raise AuditError(f"{source.name}: downloaded archive exceeds size bounds")
+        # O_NONBLOCK also prevents a replaced FIFO from hanging open().
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        fd = os.open(source, flags)
+        with os.fdopen(fd, "rb") as stream:
+            if file_identity(os.fstat(stream.fileno())) != file_identity(before):
+                raise AuditError(f"{source.name}: downloaded archive replaced before open")
+            copied = 0
+            with destination.open("xb") as snapshot:
+                while True:
+                    block = stream.read(1024 * 1024)
+                    if not block:
+                        break
+                    copied += len(block)
+                    if copied > MAX_ARCHIVE_BYTES:
+                        raise AuditError(f"{source.name}: downloaded archive exceeds size bounds")
+                    snapshot.write(block)
+            if (copied != before.st_size
+                    or file_identity(os.fstat(stream.fileno())) != file_identity(before)):
+                raise AuditError(f"{source.name}: downloaded archive changed during snapshot")
+        verify_download_unchanged(source, before)
+    except OSError as exc:
+        raise AuditError(f"{source.name}: cannot snapshot downloaded archive: {exc}") from exc
+    return destination, before
 
 
 def find_archives(directory):
@@ -322,26 +382,41 @@ def audit(directory):
         raise AuditError("release tag does not point directly to qualified source commit")
 
     archives = find_archives(directory)
-    evidence = {}
-    for arch, asset in archives.items():
-        executable_digest = check_macho(asset, arch)
-        digest = sha256(asset)
-        # Remote asset correspondence is checked independently of downloaded
-        # checksum files. The attestation binds these same bytes to source SHA.
-        gh("release", "verify-asset", TAG, str(asset), "-R", REPO)
-        gh(
-            "attestation", "verify", str(asset), "-R", REPO,
-            "--source-ref", "refs/tags/" + TAG,
-            "--source-digest", QUALIFIED_SHA,
-            "--signer-workflow",
-            REPO + "/.github/workflows/applesauce-cli-release.yml",
-        )
-        evidence[arch] = {
-            "filename": asset.name,
-            "sha256": digest,
-            "executable_sha256": executable_digest,
+    # Stage both inputs before any independent tool sees them. This private
+    # mode-0700 directory prevents pathname races between tar parsing, hashing,
+    # GitHub asset matching and provenance verification.
+    with tempfile.TemporaryDirectory(prefix="applesauce-release-audit-") as temp:
+        staged = {
+            arch: (original, *stage_archive(original, Path(temp)))
+            for arch, original in archives.items()
         }
-    return evidence
+        evidence = {}
+        for arch, (original, asset, original_identity) in staged.items():
+            executable_digest = check_macho(asset, arch)
+            digest = sha256(asset)
+            # Both GitHub checks must consume precisely the snapshotted bytes,
+            # retaining the published filename for release asset lookup.
+            gh("release", "verify-asset", TAG, str(asset), "-R", REPO)
+            gh(
+                "attestation", "verify", str(asset), "-R", REPO,
+                "--source-ref", "refs/tags/" + TAG,
+                "--source-digest", QUALIFIED_SHA,
+                "--signer-workflow",
+                REPO + "/.github/workflows/applesauce-cli-release.yml",
+            )
+            if sha256(asset) != digest:
+                raise AuditError(f"{asset.name}: private audit snapshot changed")
+            evidence[arch] = {
+                "filename": original.name,
+                "sha256": digest,
+                "executable_sha256": executable_digest,
+            }
+        for arch, (original, asset, original_identity) in staged.items():
+            verify_download_unchanged(original, original_identity)
+            # An earlier architecture must remain stable while the next is audited.
+            if sha256(asset) != evidence[arch]["sha256"]:
+                raise AuditError(f"{asset.name}: private audit snapshot changed")
+        return evidence
 
 
 def main():

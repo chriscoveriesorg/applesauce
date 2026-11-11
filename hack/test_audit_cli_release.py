@@ -34,6 +34,11 @@ class AuditReleaseAssetsTests(unittest.TestCase):
             '    print(json.dumps({"tagName": "applesauce-cli/v0.5.31", "isDraft": False}))\n'
             'elif os.getenv("AUDIT_GH_FAIL") == sys.argv[1]:\n'
             '    sys.exit(3)\n'
+            'elif sys.argv[1:3] == ["release", "verify-asset"]:\n'
+            '    if os.getenv("AUDIT_MUTATE_ORIGINAL"):\n'
+            '        with open(os.environ["AUDIT_MUTATE_ORIGINAL"], "ab") as f: f.write(b"changed")\n'
+            '    if os.getenv("AUDIT_MUTATE_STAGED"):\n'
+            '        with open(sys.argv[4], "ab") as f: f.write(b"changed")\n'
             'elif sys.argv[1] == "api":\n'
             '    print(json.dumps({"ref": os.getenv("AUDIT_TAG_REF", "refs/tags/applesauce-cli/v0.5.31"),\n'
             '        "object": {"type": os.getenv("AUDIT_TAG_TYPE", "commit"),\n'
@@ -153,6 +158,54 @@ class AuditReleaseAssetsTests(unittest.TestCase):
             self.assertIn("1585dceb6c745cebf822588526ee5005255818c9", args)
             self.assertIn("refs/tags/applesauce-cli/v0.5.31", args)
             self.assertIn("chriscoveriesorg/applesauce/.github/workflows/applesauce-cli-release.yml", args)
+
+    def test_release_checks_consume_private_snapshots_with_original_filenames(self):
+        run = self.run_audit()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        verified = [c for c in self.calls() if c[:2] == ["release", "verify-asset"]]
+        attested = [c for c in self.calls() if c[:2] == ["attestation", "verify"]]
+        self.assertEqual(len(verified), 2)
+        self.assertEqual(len(attested), 2)
+        for call in verified:
+            staged = Path(call[3])
+            self.assertEqual(staged.parent, Path(attested[verified.index(call)][2]).parent)
+            self.assertNotEqual(staged.parent, self.downloads)
+            self.assertTrue(staged.name.startswith("applesauce-cli-v0.5.31-"))
+            self.assertFalse(staged.exists(), "private copy must be discarded after auditing")
+
+    def test_download_changed_during_remote_verification_is_rejected(self):
+        changed = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+        self.env["AUDIT_MUTATE_ORIGINAL"] = str(changed)
+        result = self.run_audit()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("downloaded source changed during audit", result.stderr)
+        self.assertNotIn("integrity and attestation verified", result.stdout)
+
+    def test_private_snapshot_changed_by_external_verifier_is_rejected(self):
+        self.env["AUDIT_MUTATE_STAGED"] = "1"
+        result = self.run_audit()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("private audit snapshot changed", result.stderr)
+        self.assertNotIn("integrity and attestation verified", result.stdout)
+
+    def test_nonregular_snapshot_sources_are_rejected_before_open(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("audit_cli_release", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "private"
+            destination.mkdir()
+            fifo = root / "pipe.tar.xz"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(module.AuditError, "not a regular file"):
+                module.stage_archive(fifo, destination)
+            link = root / "link.tar.xz"
+            link.symlink_to(self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz")
+            with self.assertRaisesRegex(module.AuditError, "not a regular file"):
+                module.stage_archive(link, destination)
+
 
     def repack_arm_archive_as_gzip(self):
         """Repackage the same generated valid Mach-O fixture as a gzip tar."""
