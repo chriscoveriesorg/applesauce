@@ -342,7 +342,7 @@ mod staging_parent_tests {
         let expected = fs::metadata(root.path()).unwrap().modified().unwrap();
         let mut volumes = Volumes::new();
         let errors = volumes.timestamp_errors();
-        let scratch = StagingDirectory::on_volume(root.path(), errors.clone()).unwrap();
+        let scratch = StagingDirectory::on_volume(root.path(), Arc::clone(&errors)).unwrap();
         let scratch_path = scratch.path().to_path_buf();
         volumes.infos.insert(
             u64::MAX,
