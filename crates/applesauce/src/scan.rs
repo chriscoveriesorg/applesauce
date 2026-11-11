@@ -139,7 +139,12 @@ impl<'a, P: Progress + Send + Sync> Walker<'a, P> {
                 None
             };
             let failures: ResetFailures = Arc::new(Mutex::new(Vec::new()));
-            let walker = walk_dir_over(path, Arc::clone(context), Arc::clone(&failures), direct_file);
+            let walker = walk_dir_over(
+                path,
+                Arc::clone(context),
+                Arc::clone(&failures),
+                direct_file,
+            );
             for entry in walker {
                 let mut entry = match entry {
                     Ok(entry) => entry,
