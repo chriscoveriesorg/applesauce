@@ -8,12 +8,13 @@ Only --decoder provides independent LZRAVEN/LZMESH codec interoperability proof.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import sys
 import tempfile
 
-from verify_independent_lzmesh import verify
+from verify_independent_lzmesh import identity, open_regular, require_unchanged, verify
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests/fixtures/codec-crossdecode"
@@ -27,6 +28,23 @@ VECTORS = {
     ("lzraven", 131103): ("0226c649ef454b21ceea88b0b783e429c54204fe63276591ab585fa662118792", 3),
 }
 CODEC_IDS = {"lzmesh": 0xE05, "lzraven": 0xD05}
+# Fixed proof vectors contain at most 131103 clear bytes. Bound the bytes
+# read even when an untrusted local checkout substitutes a larger file.
+MAX_COMMITTED_ARCHIVE_BYTES = 512 * 1024
+
+
+def load_committed_vector(path):
+    """Read one pinned fixture without following symlinks, FIFOs or replacements."""
+    with open_regular(path) as stream:
+        snapshot = identity(os.fstat(stream.fileno()))
+        require_unchanged(path, snapshot, stream)
+        if snapshot[3] > MAX_COMMITTED_ARCHIVE_BYTES:
+            raise ValueError("committed ASCF vector exceeds bounded fixture size")
+        archive = stream.read(MAX_COMMITTED_ARCHIVE_BYTES + 1)
+        if len(archive) > MAX_COMMITTED_ARCHIVE_BYTES:
+            raise ValueError("committed ASCF vector grew beyond fixture size limit")
+        require_unchanged(path, snapshot, stream)
+    return archive
 
 
 def plaintext(size):
@@ -71,9 +89,8 @@ def run(codec_filter=None, decoder=None):
         if codec_filter is not None and codec != codec_filter:
             continue
         path = FIXTURES / f"{codec}-records-{size}.ascf"
-        # Read the checked-in vector, never rewrite it in the proof tool.
-        with path.open("rb") as stream:
-            archive = stream.read()
+        # Read checked-in bytes through a bounded, identity-pinned descriptor.
+        archive = load_committed_vector(path)
         summary = validate_vector(codec, size, archive)
         if decoder is not None:
             with tempfile.TemporaryDirectory(prefix="ascf-committed-") as directory:
