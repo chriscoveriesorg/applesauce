@@ -1,0 +1,201 @@
+name: Independent LZMESH ASCF buffer proof
+
+# Only generated data and a separate archive are used. This is a buffer-codec
+# interoperability test; it does not exercise APFS decmpfs or FSKit.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/independent-lzmesh-proof.yml'
+      - 'hack/verify_independent_lzmesh.py'
+      - 'hack/prove_independent_corruptions.py'
+      - 'hack/test_independent_corruptions.py'
+      - 'hack/test_independent_lzmesh.py'
+      - 'hack/prove_committed_vectors.py'
+      - 'hack/test_committed_codec_vectors.py'
+      - 'tests/fixtures/codec-crossdecode/**'
+      - 'crates/applesauce-core/src/cold_archive.rs'
+      - 'crates/applesauce-cli/src/archive.rs'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: independent-lzmesh-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Check the pinned external decoder against permanent Apple-generated vectors
+  # on inexpensive Linux before allocating a scarce native macOS 27 runner.
+  portable-independent-vectors:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build pinned independent C11 LZMESH and replay committed vectors
+        env:
+          UPSTREAM_COMMIT: 8f9d5fd0ffef555b07eaf076bc610404b742f0a8
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none https://github.com/mrowlinson/lzmesh.git "$RUNNER_TEMP/lzmesh"
+          git -C "$RUNNER_TEMP/lzmesh" checkout --quiet --detach "$UPSTREAM_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/lzmesh" rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+          make -C "$RUNNER_TEMP/lzmesh" -j2 all
+          make -C "$RUNNER_TEMP/lzmesh" unit
+          decoder="$RUNNER_TEMP/lzmesh/port_cli"
+          test -x "$decoder"
+          # The independently compiled decoder must not resolve Apple's codec.
+          if ldd "$decoder" | grep -i 'libcompression'; then
+            echo 'Decoder unexpectedly depends on Apple libcompression' >&2
+            exit 1
+          fi
+          python3 hack/prove_committed_vectors.py --codec lzmesh --decoder "$decoder" > "$RUNNER_TEMP/lzmesh-vectors.json"
+          python3 - "$RUNNER_TEMP/lzmesh-vectors.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              vectors = json.load(stream)["vectors"]
+          assert len(vectors) == 2, f"expected two pinned vectors, got {len(vectors)}"
+          assert {v["chunk_count"] for v in vectors} == {2, 3}
+          assert all(v["status"] == "independent_lzmesh_buffer_decode_verified" for v in vectors)
+          print("PASS: two permanent Apple LZMESH vectors decoded independently on Linux")
+          PY
+
+  apple-to-independent:
+    needs: portable-independent-vectors
+    runs-on: xcode-27
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build independent pinned C11 decoder and run its unit suite
+        env:
+          UPSTREAM_COMMIT: 8f9d5fd0ffef555b07eaf076bc610404b742f0a8
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none https://github.com/mrowlinson/lzmesh.git "$RUNNER_TEMP/lzmesh"
+          git -C "$RUNNER_TEMP/lzmesh" checkout --quiet --detach "$UPSTREAM_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/lzmesh" rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+          make -C "$RUNNER_TEMP/lzmesh" -j2 all
+          make -C "$RUNNER_TEMP/lzmesh" unit
+          if otool -L "$RUNNER_TEMP/lzmesh/port_cli" | grep -i 'libcompression'; then
+            echo 'Refusing a purported independent decoder linked to Apple libcompression' >&2
+            exit 1
+          fi
+
+      - name: Independently decode committed Apple-generated LZMESH vectors
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mesh-proof"
+          python3 hack/prove_committed_vectors.py --codec lzmesh \
+            --decoder "$RUNNER_TEMP/lzmesh/port_cli" \
+            > "$RUNNER_TEMP/mesh-proof/committed-fixtures.json"
+          echo 'Committed LZMESH vectors independently decoded with pinned C11 implementation.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create Apple LZMESH ASCF fixtures and verify with independent decoder
+        run: |
+          set -euo pipefail
+          cargo build --locked -p applesauce-cli
+          mkdir -p "$RUNNER_TEMP/mesh-proof"
+          {
+            sw_vers
+            uname -srm
+            xcodebuild -version
+            rustc --version
+            git rev-parse HEAD
+            git -C "$RUNNER_TEMP/lzmesh" rev-parse HEAD
+          } > "$RUNNER_TEMP/mesh-proof/environment.txt"
+          python3 - "$RUNNER_TEMP/mesh-proof" <<'PY'
+          from pathlib import Path
+          import hashlib
+          import sys
+
+          root = Path(sys.argv[1])
+          # Include both a high-entropy-like family and compressible records.
+          for length in (65535, 65536, 65537, 131103, 262151):
+              for family in ("records", "digest"):
+                  if family == "records":
+                      row = b'{"event":"agent","turn":27,"payload":"repeatable proof"}\n'
+                      data = (row * ((length // len(row)) + 1))[:length]
+                  else:
+                      data = b"".join(
+                          hashlib.sha256(f"{length}:{i}".encode()).digest()
+                          for i in range((length + 31) // 32)
+                      )[:length]
+                  (root / f"{family}-{length}.bin").write_bytes(data)
+          PY
+          for input in "$RUNNER_TEMP"/mesh-proof/*.bin; do
+            archive="${input%.bin}.ascf"
+            report="${input%.bin}.json"
+            target/debug/applesauce archive create "$input" "$archive" \
+              --codec lzmesh --allow-expansion --chunk-bytes 65536
+            target/debug/applesauce archive verify "$archive"
+            python3 hack/verify_independent_lzmesh.py \
+              --archive "$archive" --original "$input" \
+              --decoder "$RUNNER_TEMP/lzmesh/port_cli" > "$report"
+            python3 - "$report" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = json.load(stream)
+          assert report["status"] == "independent_lzmesh_buffer_decode_verified"
+          assert report["codec_id"] == "0xE05"
+          assert report["chunk_count"] >= 1
+          print(report["logical_size_bytes"], report["chunk_count"], report["archive_sha256"])
+          PY
+          done
+          python3 - "$RUNNER_TEMP/mesh-proof" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          reports = [json.loads(path.read_text()) for path in root.glob("*.json") if path.name != "committed-fixtures.json"]
+          assert len(reports) == 10, f"expected ten independent reports, got {len(reports)}"
+          assert any(r["chunk_count"] > 1 for r in reports)
+          assert {r["logical_size_bytes"] for r in reports} == {
+              65535, 65536, 65537, 131103, 262151
+          }
+          print("PASS: 10 Apple-generated LZMESH ASCF fixtures decoded independently")
+          PY
+          printf '## Independent LZMESH byte proof\n\nTen generated Apple-buffer ASCF fixtures were independently decoded. See per-fixture evidence and exact toolchain provenance in the artifact. This does not establish native APFS/decmpfs support.\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Reject corrupted real Apple LZMESH ASCF payloads
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mesh-proof/negative"
+          for family in records digest; do
+            input="$RUNNER_TEMP/mesh-proof/$family-131103.bin"
+            archive="$RUNNER_TEMP/mesh-proof/$family-131103.ascf"
+            report="$RUNNER_TEMP/mesh-proof/negative/$family-131103.json"
+            python3 hack/prove_independent_corruptions.py \
+              --archive "$archive" --original "$input" \
+              --decoder "$RUNNER_TEMP/lzmesh/port_cli" --codec lzmesh > "$report"
+            python3 - "$report" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = json.load(stream)
+          assert report["status"] == "independent_corruptions_rejected"
+          assert report["case_count"] == 9
+          assert len(report["cases"]) == 9
+          print(report["codec"], "9/9 negative cases rejected")
+          PY
+          done
+          printf 'Two generated content families each rejected nine corrupted archive variants through the independent decoder. Original ASCF vectors, plaintext and negative-case reports are attached.\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload generated proof reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: independent-lzmesh-buffer-proof
+          path: |
+            ${{ runner.temp }}/mesh-proof/*.json
+            ${{ runner.temp }}/mesh-proof/*.ascf
+            ${{ runner.temp }}/mesh-proof/*.bin
+            ${{ runner.temp }}/mesh-proof/negative/*.json
+            ${{ runner.temp }}/mesh-proof/environment.txt
+          if-no-files-found: warn
+          retention-days: 30
