@@ -225,10 +225,10 @@ class IndependentMeshProofTests(unittest.TestCase):
         # Pipe stdin can make timeout cleanup hang if a detached descendant
         # inherits the read end and the decoder never drains the payload.
         self.decoder.write_text(
-            "#!/usr/bin/env python3\\n"
-            "import os,stat,sys\\n"
-            "if not stat.S_ISREG(os.fstat(0).st_mode): sys.exit(81)\\n"
-            "sys.stdout.buffer.write(sys.stdin.buffer.read())\\n",
+            "#!/usr/bin/env python3\n"
+            "import os,stat,sys\n"
+            "if not stat.S_ISREG(os.fstat(0).st_mode): sys.exit(81)\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
             encoding="utf-8",
         )
         report = verify(self.archive, self.original, self.decoder)
@@ -239,13 +239,13 @@ class IndependentMeshProofTests(unittest.TestCase):
         # A separate-session helper retains its stdin for 3s; wait() must
         # still finish when the direct decoder is killed at the 0.25s cap.
         self.decoder.write_text(
-            "#!/usr/bin/env python3\\n"
-            "import subprocess,sys,time\\n"
+            "#!/usr/bin/env python3\n"
+            "import subprocess,sys,time\n"
             "subprocess.Popen([sys.executable, '-c', "
             "'import time; time.sleep(3.0)'], "
             "start_new_session=True, stdout=subprocess.DEVNULL, "
-            "stderr=subprocess.DEVNULL)\\n"
-            "time.sleep(10)\\n",
+            "stderr=subprocess.DEVNULL)\n"
+            "time.sleep(10)\n",
             encoding="utf-8",
         )
         started = time.monotonic()
