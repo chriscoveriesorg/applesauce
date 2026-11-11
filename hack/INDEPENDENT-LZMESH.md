@@ -101,10 +101,16 @@ rejected. Payload-only changes must reach the independent decoder, preventing
 a parser-only failure from being mistaken for codec conformance testing.
 The digest, truncation and trailing-data variants must fail at their expected
 parser gates. A timed-out decoder does **not** count as a successful negative
-case. All eight checks share a **180-second decoder budget** instead of receiving
-eight independent 120-second budgets; an exhausted budget fails the suite,
+case. The clean baseline and all nine negative cases share a **180-second decoder budget** rather than receiving
+separate 120-second per-fixture budgets; an exhausted budget fails the suite,
 including during the last damaged case. Reviewers can increase the shared cap
 with `--total-timeout-seconds` (maximum 3600) for slow diagnostic hosts.
+
+The proof runner permits one extra output byte within `RLIMIT_FSIZE` so an
+external decoder cannot mask attempted overproduction by ignoring `SIGXFSZ`.
+After the entire negative suite, it reopens the original Apple archive and
+rechecks inode identity and SHA-256 as well as verifying the original plaintext
+and decoder binary are unchanged.
 
 The macOS proof workflow runs nine cases on each generated content
 family at the 131,103-byte three-chunk boundary (18 negative cases per codec).
