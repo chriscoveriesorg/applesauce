@@ -190,6 +190,31 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFO required")
+    def test_substituted_fifo_does_not_block_failed_publication_cleanup(self):
+        # Opening a substituted FIFO O_WRONLY without O_NONBLOCK would hang
+        # waiting for a reader. Preserve the independent FIFO and error.
+        replacement = self.root / "unrelated.fifo"
+        os.mkfifo(replacement)
+        real_fsync = os.fsync
+        substituted = False
+
+        def replace_then_fail(fd):
+            nonlocal substituted
+            if not substituted and self.output.exists():
+                substituted = True
+                os.replace(replacement, self.output)
+                raise OSError("injected directory sync failure")
+            return real_fsync(fd)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fsync", side_effect=replace_then_fail):
+                with self.assertRaisesRegex(OSError, "directory sync failure"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(substituted)
+        self.assertTrue(self.output.is_fifo())
+        self.assertEqual(self.input.read_text(), "source evidence")
+
     def test_post_publication_hardlink_preserves_independent_alias(self):
         # A same-UID process may link the published inode before a failing
         # durability barrier. Cleanup must not truncate the other pathname.
