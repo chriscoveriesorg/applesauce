@@ -98,6 +98,23 @@ Artifacts include:
 | `criterion.log` | Complete runner output, including measurement warnings/skips and macOS `/usr/bin/time -l` suite-level user/system CPU and peak resident memory statistics; these aggregate figures do not attribute allocations to individual codecs |
 | `resource-usage.json` | Machine-readable whole-command wall/user/system seconds and peak RSS bytes, tied to the SHA-256 of `criterion.log`; includes Cargo/build overhead and does not measure codec allocations |
 
+**Artifact qualification:** a successful benchmark run uploads the complete
+table above. If any benchmark, parser, publication or durability check fails,
+the workflow uploads an explicitly `unqualified` diagnostic artifact instead:
+raw `criterion/**` samples/estimates, fixture manifest and available logs.
+It omits every derived CSV and comparison report from failed-run uploads.
+A visible CSV on the failed runner is not a qualified result and must not be
+published or compared.
+
+The derived-CSV publisher requires a freshly reset evidence directory. It
+refuses an existing output filename and uses an exclusive hard-link publish,
+so a second writer cannot silently replace a newly introduced entry.
+After publication, a failed directory fsync or directory identity check
+fails the workflow without truncating or deleting the published inode.
+This protects hardlinks created by other processes. The workflow's
+success-only artifact gate is mandatory because a durability failure after
+a visible publish cannot safely roll back an uncooperative same-UID writer.
+
 The pure-Python
 [`hack/summarize-benchmarks.py`](summarize-benchmarks.py) exits nonzero when
 an expected result is missing; it will never silently fabricate speed data.
