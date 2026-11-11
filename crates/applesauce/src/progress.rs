@@ -41,6 +41,8 @@ pub trait Task {
     fn increment(&self, amt: u64);
     fn error(&self, message: &str);
     fn not_compressible_enough(&self, _path: &Path) {}
+    /// Called only after a whole-file kernel readback and offset probes pass.
+    fn kernel_verified(&self, _sha256: &str) {}
 }
 
 impl<P: Progress> Progress for &'_ P {
@@ -70,6 +72,10 @@ impl<T: Task> Task for &'_ T {
 
     fn not_compressible_enough(&self, path: &Path) {
         T::not_compressible_enough(self, path)
+    }
+
+    fn kernel_verified(&self, sha256: &str) {
+        T::kernel_verified(self, sha256)
     }
 }
 
