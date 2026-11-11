@@ -30,7 +30,7 @@ class NegativeProofTests(unittest.TestCase):
     def make_fixture(self, codec, *, multi_chunk=False, two_chunk=False):
         if multi_chunk or two_chunk:
             # Two or three chunks, including a short tail, with exact indices.
-            length = 131103 if multi_chunk else 65537
+            length = 131103 if multi_chunk else 65539
             self.clear = (self.clear * (length // len(self.clear) + 1))[:length]
         self.original.write_bytes(self.clear)
         header = bytearray(64)
