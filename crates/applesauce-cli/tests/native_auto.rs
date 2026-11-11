@@ -134,3 +134,38 @@ fn native_auto_real_allocation_benchmark() {
         }
     }
 }
+
+#[test]
+fn auto_refuses_explicit_hardlink_and_symlink_inputs() {
+    // Exercise the same root identity guards as ordinary compression after
+    // introducing a per-file sampler. Both rejected paths must stay unchanged.
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let source = dir.path().join("source.txt");
+    let alias = dir.path().join("alias.txt");
+    let original = vec![b'S'; 3 * 65_536 + 19];
+    fs::write(&source, &original).unwrap();
+    fs::hard_link(&source, &alias).unwrap();
+
+    let hardlink = run(&["compress", "--compression", "auto"], &source);
+    assert!(
+        !hardlink.status.success(),
+        "shared inode unexpectedly accepted: {}",
+        String::from_utf8_lossy(&hardlink.stderr)
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read(&alias).unwrap(), original);
+    assert!(!applesauce::info::get(&source).unwrap().is_compressed);
+
+    fs::remove_file(&alias).unwrap();
+    symlink(&source, &alias).unwrap();
+    let symlink_input = run(&["compress", "--compression", "auto"], &alias);
+    assert!(
+        !symlink_input.status.success(),
+        "symlink root unexpectedly accepted: {}",
+        String::from_utf8_lossy(&symlink_input.stderr)
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert!(!applesauce::info::get(&source).unwrap().is_compressed);
+}
