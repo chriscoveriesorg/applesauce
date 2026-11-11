@@ -250,10 +250,10 @@ class NegativeProofTests(unittest.TestCase):
             # exits with failure would falsely satisfy a corrupted-payload case
             # if the suite reopened that pathname on every check.
             self.decoder.write_text(
-                "#!/usr/bin/env python3\\n"
-                "from pathlib import Path\\n"
-                f"Path({str(marker)!r}).write_text('executed')\\n"
-                "raise SystemExit(88)\\n",
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('executed')\n"
+                "raise SystemExit(88)\n",
                 encoding="utf-8",
             )
             try:
