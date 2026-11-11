@@ -95,6 +95,62 @@ class IndependentMeshProofTests(unittest.TestCase):
         with self.assertRaisesRegex(InvalidArchive, "bounded fixture budget"):
             verify(self.archive, self.original, self.decoder, max_logical_bytes=10)
 
+    def test_rejects_invalid_cumulative_decoder_budget(self):
+        for invalid in (0, -1, 3601):
+            with self.subTest(value=invalid):
+                with self.assertRaisesRegex(InvalidArchive, "total decoder time budget"):
+                    verify(
+                        self.archive, self.original, self.decoder,
+                        total_timeout_seconds=invalid,
+                    )
+
+    def test_decoder_timeout_is_capped_by_remaining_proof_budget(self):
+        # A 30-second per-chunk limit must shrink near the overall deadline.
+        with mock.patch("verify_independent_lzmesh.time.monotonic",
+                        side_effect=[100.0, 109.25]):
+            with mock.patch("verify_independent_lzmesh.decode_bounded",
+                            return_value=self.plaintext) as decoder:
+                result = verify(
+                    self.archive, self.original, self.decoder,
+                    total_timeout_seconds=10,
+                )
+        self.assertEqual(result["chunk_count"], 1)
+        self.assertAlmostEqual(decoder.call_args.kwargs["timeout_seconds"], 0.75)
+
+    def test_cumulative_budget_exhaustion_skips_later_chunks(self):
+        # A valid two-chunk synthetic archive has two independent decoder
+        # invocations. The second must never start after the total deadline.
+        first = b"A" * 65536
+        second = b"B" * 17
+        clear = first + second
+        self.original.write_bytes(clear)
+        header = bytearray(64)
+        header[:8] = b"ASCF0001"
+        struct.pack_into("<IIQI", header, 8, 0xE05, 65536, len(clear), 2)
+        header[32:64] = hashlib.sha256(clear).digest()
+        entries = (
+            struct.pack("<QII", 160, len(first), len(first))
+            + hashlib.sha256(first).digest()
+            + struct.pack("<QII", 160 + len(first), len(second), len(second))
+            + hashlib.sha256(second).digest()
+        )
+        self.archive.write_bytes(header + entries + clear)
+
+        with mock.patch("verify_independent_lzmesh.time.monotonic",
+                        side_effect=[100.0, 100.5, 105.0]):
+            with mock.patch("verify_independent_lzmesh.decode_bounded",
+                            side_effect=lambda _decoder, payload, *_args, **_kwargs: payload
+                            ) as decoder:
+                with self.assertRaisesRegex(
+                    InvalidArchive, "independent decoder exceeded total time budget"
+                ):
+                    verify(
+                        self.archive, self.original, self.decoder,
+                        total_timeout_seconds=4,
+                    )
+        self.assertEqual(decoder.call_count, 1)
+
+
 
 
     def test_external_decoder_cannot_inherit_ci_secrets_or_workspace(self):
