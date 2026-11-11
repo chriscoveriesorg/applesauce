@@ -86,6 +86,7 @@ def check_corruptions(archive, original, decoder, *, codec,
     offset, stored_len, _ = struct.unpack_from("<QII", data, 64)
     if stored_len < 3 or offset < 64 + 48 * count or offset + stored_len > len(data):
         raise InvalidArchive("negative tests require a nonempty validated chunk")
+    middle_chunk = count // 2
     final_chunk = count - 1
     final_entry = 64 + 48 * final_chunk
     final_offset, final_stored_len, _ = struct.unpack_from("<QII", data, final_entry)
@@ -105,9 +106,25 @@ def check_corruptions(archive, original, decoder, *, codec,
     mutations["truncated_payload"] = data[:-1]
     mutations["appended_payload"] = data + b"\x00"
 
-    # The default negative suite used only chunk zero, even on three-chunk
-    # evidence fixtures. Test the last compressed chunk and its index digest
-    # independently so a verifier that skips tail chunks cannot qualify.
+    # Probe the first, middle and final chunks on multi-chunk fixtures.
+    # For the three-chunk Apple proof vectors this covers every chunk.
+    # Keep larger archives bounded by probing at most three distinct chunks.
+    if count > 2:
+        middle_entry = 64 + 48 * middle_chunk
+        middle_offset, middle_stored_len, _ = struct.unpack_from(
+            "<QII", data, middle_entry
+        )
+        if (middle_stored_len < 3
+                or middle_offset + middle_stored_len > len(data)):
+            raise InvalidArchive("negative tests require a nonempty middle chunk")
+        middle_damage = bytearray(data)
+        middle_damage[middle_offset + middle_stored_len // 2] ^= 0x40
+        mutations["payload_middle_chunk"] = bytes(middle_damage)
+
+        middle_digest_damage = bytearray(data)
+        middle_digest_damage[middle_entry + 16] ^= 0x01
+        mutations["middle_index_digest"] = bytes(middle_digest_damage)
+
     if count > 1:
         if final_stored_len < 3 or final_offset + final_stored_len > len(data):
             raise InvalidArchive("negative tests require a nonempty final chunk")
@@ -137,7 +154,10 @@ def check_corruptions(archive, original, decoder, *, codec,
                 # Only codec-specific decoding failures count as payload
                 # corruption rejection. Decoder provenance changes, missing
                 # inputs and unrelated proof failures must fail qualification.
-                expected_chunk = final_chunk if name == "payload_final_chunk" else 0
+                expected_chunk = {
+                    "payload_middle_chunk": middle_chunk,
+                    "payload_final_chunk": final_chunk,
+                }.get(name, 0)
                 if name.startswith("payload_") and not message.startswith((
                     f"independent decoder failed on chunk {expected_chunk} (exit ",
                     f"independent decoder omitted chunk {expected_chunk}",
@@ -149,6 +169,9 @@ def check_corruptions(archive, original, decoder, *, codec,
                     ) from exc
                 expected_parser_failure = {
                     "index_digest": "original chunk 0 differs from ASCF chunk digest",
+                    "middle_index_digest": (
+                        f"original chunk {middle_chunk} differs from ASCF chunk digest"
+                    ),
                     "final_index_digest": (
                         f"original chunk {final_chunk} differs from ASCF chunk digest"
                     ),
