@@ -241,7 +241,6 @@ class ConfidenceTests(unittest.TestCase):
     def test_partial_csv_write_never_publishes_evidence(self):
         manifest, _ = self.complete_smoke()
         # Simulate a disk-full/error after the header has been written.
-        self.output.write_text("previous run", encoding="utf-8")
         with patch.object(
             confidence.csv.DictWriter, "writerows",
             side_effect=OSError("simulated interrupted output"),
@@ -533,6 +532,8 @@ class ConfidenceTests(unittest.TestCase):
         ), expected)
         with self.output.open(newline="", encoding="utf-8") as stream:
             self.assertEqual(len(list(csv.DictReader(stream))), expected)
+        # The workflow resets the evidence directory between exports.
+        self.output.unlink()
         self.rewrite_summary(rows[:-1])
         with self.assertRaisesRegex(ValueError, "missing benchmark cases"):
             confidence.write_confidence(
