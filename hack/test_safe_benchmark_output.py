@@ -160,7 +160,7 @@ class SafeOutputTests(unittest.TestCase):
         replacement = self.root / "independent.csv"
         replacement.write_text("independent evidence", encoding="utf-8")
         real_fsync = os.fsync
-        real_stat = os.stat
+        real_fstat = os.fstat
         triggered = False
         swapped = False
 
@@ -171,21 +171,17 @@ class SafeOutputTests(unittest.TestCase):
                 raise OSError("injected directory sync failure")
             return real_fsync(fd)
 
-        def swap_after_identity_check(path, *args, **kwargs):
+        def swap_after_identity_check(fd):
             nonlocal swapped
-            result = real_stat(path, *args, **kwargs)
-            if (
-                triggered and not swapped and path == self.output.name
-                and kwargs.get("dir_fd") is not None
-                and kwargs.get("follow_symlinks") is False
-            ):
+            result = real_fstat(fd)
+            if triggered and not swapped and os.path.isfile(self.output):
                 swapped = True
                 os.replace(replacement, self.output)
             return result
 
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
             with patch("safe_benchmark_output.os.fsync", side_effect=fail_directory_sync):
-                with patch("safe_benchmark_output.os.stat", side_effect=swap_after_identity_check):
+                with patch("safe_benchmark_output.os.fstat", side_effect=swap_after_identity_check):
                     with self.assertRaisesRegex(OSError, "directory sync failure"):
                         publisher.write_rows(self.rows, ("codec", "value"))
         self.assertTrue(triggered)
