@@ -117,7 +117,15 @@ class SafeCsvOutput:
             return  # Preserve the original publication failure.
         try:
             opened = os.fstat(fd)
-            if (opened.st_dev, opened.st_ino) != identity or not stat.S_ISREG(opened.st_mode):
+            if (
+                (opened.st_dev, opened.st_ino) != identity
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+            ):
+                # Do not truncate a published inode shared with another
+                # pathname. Preserve the original publication error instead.
+                # This is best-effort, not a defense against a concurrent
+                # same-UID process creating a hardlink after this check.
                 return
             os.ftruncate(fd, 0)
             os.fsync(fd)
