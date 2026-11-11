@@ -61,21 +61,25 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(), "old derived evidence")
         self.assertEqual(self.input.read_text(), "source evidence")
 
-    def test_atomic_csv_replaces_stale_evidence(self):
+    def test_exclusive_csv_publish_and_stale_refusal(self):
         self.output.write_text("OLD", encoding="utf-8")
+        with self.assertRaisesRegex(FileExistsError, "already exists"):
+            with SafeCsvOutput(self.output, (self.input,)):
+                pass
+        self.assertEqual(self.output.read_text(), "OLD")
+        self.output.unlink()
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
-            self.assertFalse(self.output.exists())
             publisher.write_rows(self.rows, ("codec", "value"))
         with self.output.open(newline="", encoding="utf-8") as stream:
             self.assertEqual(list(csv.DictReader(stream)), self.rows)
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
 
-    def test_invalid_evidence_removes_stale_output_before_validation(self):
+    def test_invalid_evidence_retains_existing_output_without_cleanup(self):
         self.output.write_text("STALE", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "invalid benchmark evidence"):
+        with self.assertRaisesRegex(FileExistsError, "already exists"):
             with SafeCsvOutput(self.output, (self.input,)):
                 raise ValueError("invalid benchmark evidence")
-        self.assertFalse(self.output.exists())
+        self.assertEqual(self.output.read_text(), "STALE")
 
     def test_existing_hardlink_and_symlink_alias_leave_input_untouched(self):
         os.link(self.input, self.output)
@@ -101,33 +105,32 @@ class SafeOutputTests(unittest.TestCase):
                 pass
         self.assertEqual(self.output.read_text(), "prior")
 
-    def test_directory_swap_after_cleanup_cannot_redirect_publication(self):
+    def test_directory_swap_after_open_cannot_redirect_publication(self):
         moved = self.root / "evidence-moved"
         protected = self.root / "protected"
         protected.mkdir()
         protected_output = protected / self.output.name
         protected_output.write_text("never overwrite", encoding="utf-8")
-        self.output.write_text("stale", encoding="utf-8")
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
-            # Preflight must remove stale evidence before any publication.
-            self.assertFalse(self.output.exists())
             self.evidence.rename(moved)
             self.evidence.symlink_to(protected, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "changed during publication"):
                 publisher.write_rows(self.rows, ("codec", "value"))
         self.assertEqual(protected_output.read_text(), "never overwrite")
-        # A failed publication must not leave a plausible CSV in the
-        # displaced directory, even though the protected path is untouched.
-        self.assertEqual((moved / self.output.name).stat().st_size, 0)
+        # The failed job uploads raw diagnostics only; do not mutate any
+        # published inode because another same-UID process can hardlink it.
+        with (moved / self.output.name).open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), self.rows)
         self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
 
-    def test_missing_directory_after_publication_cleans_anchored_csv(self):
+    def test_missing_directory_after_publication_preserves_inodes(self):
         moved = self.root / "evidence-moved"
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
             self.evidence.rename(moved)
             with self.assertRaises(FileNotFoundError):
                 publisher.write_rows(self.rows, ("codec", "value"))
-        self.assertEqual((moved / self.output.name).stat().st_size, 0)
+        with (moved / self.output.name).open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), self.rows)
         self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
@@ -155,40 +158,27 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
-    def test_same_uid_replacement_between_cleanup_stat_and_unlink_survives(self):
-        # A concurrent pathname substitution must survive failed-publication
-        # invalidation, which operates on an already-open inode.
+    def test_same_uid_replacement_during_failed_publication_is_preserved(self):
         replacement = self.root / "independent.csv"
         replacement.write_text("independent evidence", encoding="utf-8")
         real_fsync = os.fsync
-        real_fstat = os.fstat
-        triggered = False
         swapped = False
 
-        def fail_directory_sync(fd):
-            nonlocal triggered
-            if not triggered and self.output.exists():
-                triggered = True
+        def swap_then_fail(fd):
+            nonlocal swapped
+            if not swapped and self.output.exists():
+                swapped = True
+                os.replace(replacement, self.output)
                 raise OSError("injected directory sync failure")
             return real_fsync(fd)
 
-        def swap_after_identity_check(fd):
-            nonlocal swapped
-            result = real_fstat(fd)
-            if triggered and not swapped and os.path.isfile(self.output):
-                swapped = True
-                os.replace(replacement, self.output)
-            return result
-
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
-            with patch("safe_benchmark_output.os.fsync", side_effect=fail_directory_sync):
-                with patch("safe_benchmark_output.os.fstat", side_effect=swap_after_identity_check):
-                    with self.assertRaisesRegex(OSError, "directory sync failure"):
-                        publisher.write_rows(self.rows, ("codec", "value"))
-        self.assertTrue(triggered)
+            with patch("safe_benchmark_output.os.fsync", side_effect=swap_then_fail):
+                with self.assertRaisesRegex(OSError, "directory sync failure"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
         self.assertTrue(swapped)
-        self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
-        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+        self.assertEqual(self.output.read_text(), "independent evidence")
+        self.assertEqual(self.input.read_text(), "source evidence")
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFO required")
     def test_substituted_fifo_does_not_block_failed_publication_cleanup(self):
@@ -239,67 +229,70 @@ class SafeOutputTests(unittest.TestCase):
             self.assertEqual(list(csv.DictReader(stream)), self.rows)
         self.assertEqual(self.input.read_text(), "source evidence")
 
-    @unittest.expectedFailure
-    def test_hardlink_created_after_cleanup_identity_check_is_preserved(self):
-        # KNOWN UNSAFE: st_nlink == 1 is only a snapshot. Another same-UID
-        # writer can create an alias after fstat and before ftruncate.
-        # Keep this red test visible until cleanup cannot mutate that alias.
+    def test_late_hardlink_preserved_after_directory_sync_failure(self):
+        # Previously expectedFailure: failure cleanup truncated an inode
+        # that a same-UID process hardlinked after its st_nlink check.
         alias = self.root / "late-hardlink.csv"
         real_fsync = os.fsync
-        real_ftruncate = os.ftruncate
-        injected = False
         linked = False
 
-        def fail_directory_sync(fd):
-            nonlocal injected
-            if not injected and self.output.exists():
-                injected = True
+        def link_then_fail(fd):
+            nonlocal linked
+            if not linked and self.output.exists():
+                linked = True
+                os.link(self.output, alias)
                 raise OSError("injected directory sync failure")
             return real_fsync(fd)
 
-        def link_before_truncate(fd, size):
-            nonlocal linked
-            if injected and not linked and size == 0:
-                linked = True
-                os.link(self.output, alias)
-            return real_ftruncate(fd, size)
-
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
-            with patch("safe_benchmark_output.os.fsync", side_effect=fail_directory_sync):
-                with patch("safe_benchmark_output.os.ftruncate", side_effect=link_before_truncate):
-                    with self.assertRaisesRegex(OSError, "directory sync failure"):
-                        publisher.write_rows(self.rows, ("codec", "value"))
-        self.assertTrue(injected)
+            with patch("safe_benchmark_output.os.fsync", side_effect=link_then_fail):
+                with self.assertRaisesRegex(OSError, "directory sync failure"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
         self.assertTrue(linked)
         with alias.open(newline="", encoding="utf-8") as stream:
             self.assertEqual(list(csv.DictReader(stream)), self.rows)
+
+    def test_exclusive_link_publication_refuses_concurrent_entry(self):
+        # Another writer introduces an entry after our preflight; exclusive
+        # linking must preserve it and remove only our random staging file.
+        real_link = os.link
+        raced = False
+
+        def introduce_competing_output(src, dst, *args, **kwargs):
+            nonlocal raced
+            if dst == self.output.name and kwargs.get("dst_dir_fd") is not None:
+                raced = True
+                self.output.write_text("independent evidence", encoding="utf-8")
+            return real_link(src, dst, *args, **kwargs)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.link", side_effect=introduce_competing_output):
+                with self.assertRaises(FileExistsError):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(raced)
+        self.assertEqual(self.output.read_text(), "independent evidence")
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(), "source evidence")
 
-    def test_failed_atomic_replace_cleans_temporary_without_publishing(self):
-        # A rename refusal must not leave a plausible upload artifact or
-        # abandon a partially completed temporary CSV.
-        real_replace = os.replace
+    def test_failed_exclusive_link_cleans_temporary_without_publishing(self):
+        real_link = os.link
         attempted = False
 
         def refuse_publication(src, dst, *args, **kwargs):
             nonlocal attempted
-            if (
-                dst == self.output.name
-                and kwargs.get("src_dir_fd") is not None
-                and kwargs.get("dst_dir_fd") is not None
-            ):
+            if dst == self.output.name and kwargs.get("dst_dir_fd") is not None:
                 attempted = True
-                raise PermissionError("injected atomic replace refusal")
-            return real_replace(src, dst, *args, **kwargs)
+                raise PermissionError("injected exclusive link refusal")
+            return real_link(src, dst, *args, **kwargs)
 
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
-            with patch("safe_benchmark_output.os.replace", side_effect=refuse_publication):
-                with self.assertRaisesRegex(PermissionError, "atomic replace refusal"):
+            with patch("safe_benchmark_output.os.link", side_effect=refuse_publication):
+                with self.assertRaisesRegex(PermissionError, "exclusive link refusal"):
                     publisher.write_rows(self.rows, ("codec", "value"))
         self.assertTrue(attempted)
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
-        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+        self.assertEqual(self.input.read_text(), "source evidence")
 
     def test_temporary_file_sync_failure_never_publishes(self):
         # A failed file durability barrier must not publish an unverified
@@ -323,17 +316,17 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
-    def test_directory_sync_failure_removes_published_csv(self):
-        # A successful rename is not durable until the parent directory
-        # sync succeeds. Refuse to leave a plausible upload artifact.
+    def test_directory_sync_failure_is_unqualified_and_keeps_published_inode(self):
+        # Publication can be visible before a failing durability barrier.
+        # Workflow failure must quarantine derived CSVs; the library leaves
+        # published inodes unmodified to protect concurrent hardlink owners.
         real_fsync = os.fsync
         failed = False
 
         def refuse_directory_sync(fd):
             nonlocal failed
             if (
-                not failed
-                and self.output.exists()
+                not failed and self.output.exists()
                 and os.fstat(fd).st_mode & 0o170000 == 0o040000
             ):
                 failed = True
@@ -345,17 +338,14 @@ class SafeOutputTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "directory durability failure"):
                     publisher.write_rows(self.rows, ("codec", "value"))
         self.assertTrue(failed)
-        self.assertEqual(self.output.stat().st_size, 0)
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), self.rows)
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
-    def test_cleanup_invalidation_failure_preserves_original_sync_error(self):
-        # Cleanup is best-effort: a second filesystem failure must not hide
-        # the publication durability error or affect original evidence.
+    def test_failed_publication_does_not_truncate_published_inode(self):
         real_fsync = os.fsync
-        real_invalidation = os.ftruncate
         triggered = False
-        cleanup_attempted = False
 
         def fail_publication_sync(fd):
             nonlocal triggered
@@ -364,22 +354,28 @@ class SafeOutputTests(unittest.TestCase):
                 raise OSError("injected publication sync failure")
             return real_fsync(fd)
 
-        def fail_cleanup_invalidation(fd, size):
-            nonlocal cleanup_attempted
-            if size == 0:
-                cleanup_attempted = True
-                raise PermissionError("injected cleanup refusal")
-            return real_invalidation(fd, size)
-
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
             with patch("safe_benchmark_output.os.fsync", side_effect=fail_publication_sync):
-                with patch("safe_benchmark_output.os.ftruncate", side_effect=fail_cleanup_invalidation):
+                with patch("safe_benchmark_output.os.ftruncate", side_effect=AssertionError("unsafe truncation")):
                     with self.assertRaisesRegex(OSError, "injected publication sync failure"):
                         publisher.write_rows(self.rows, ("codec", "value"))
         self.assertTrue(triggered)
-        self.assertTrue(cleanup_attempted)
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), self.rows)
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
-        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+
+    def test_failed_upload_excludes_derived_csvs(self):
+        workflow = (
+            Path(__file__).resolve().parent.parent / ".github/workflows/benchmark-codecs.yml"
+        ).read_text(encoding="utf-8")
+        qualified = workflow.split("- name: Retain fully qualified benchmark evidence", 1)[1]
+        self.assertIn("if: success()", qualified.split("- name:", 1)[0])
+        unqualified = workflow.split("- name: Retain unqualified raw diagnostics after failure", 1)[1]
+        self.assertIn("if: failure()", unqualified)
+        self.assertIn("target/criterion/**", unqualified)
+        for derived in ("confidence.csv", "summary.csv", "raven-mesh-comparison.csv",
+                        "all-codecs-ranking.csv"):
+            self.assertNotIn(derived, unqualified)
 
     def test_temporary_unlink_failure_preserves_original_write_error(self):
         # A failed write must remain the reported failure even if cleanup of
