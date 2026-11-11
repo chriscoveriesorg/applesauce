@@ -14,6 +14,14 @@ const TEMPDIR_PREFIX: &str = "applesauce_tmp";
 const TEMPFILE_PREFIX: &str = "applesauce_tmp";
 const ZFS_SUBTYPE: u32 = u32::from_be_bytes(*b"ZFS\0");
 
+// A bare relative file path has an empty parent, which cannot be opened.
+// Map it to the current directory when selecting the on-volume scratch area.
+fn staging_parent_for_file(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 #[derive(Debug)]
 enum VolumeInfo {
     NoCompression,
@@ -109,9 +117,7 @@ impl Volumes {
                 let tempdir_parent = if metadata.is_dir() {
                     path
                 } else {
-                    let parent = path
-                        .parent()
-                        .ok_or_else(|| io::Error::other("no parent of file on volume"))?;
+                    let parent = staging_parent_for_file(path);
 
                     if parent.metadata()?.dev() != device {
                         return Err(io::Error::other(
@@ -172,5 +178,24 @@ impl Volumes {
                 builder.tempfile_in(dir)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod staging_parent_tests {
+    use super::staging_parent_for_file;
+    use std::path::Path;
+
+    #[test]
+    fn relative_file_uses_current_directory_for_scratch_parent() {
+        assert_eq!(staging_parent_for_file(Path::new("source.txt")), Path::new("."));
+        assert_eq!(
+            staging_parent_for_file(Path::new("nested/source.txt")),
+            Path::new("nested")
+        );
+        assert_eq!(
+            staging_parent_for_file(Path::new("/tmp/source.txt")),
+            Path::new("/tmp")
+        );
     }
 }
