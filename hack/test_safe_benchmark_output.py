@@ -419,6 +419,34 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_fdopen_and_descriptor_close_failures_preserve_original_error(self):
+        # A secondary close failure must not hide the original fdopen error.
+        # The temporary pathname is still removed by write_rows cleanup.
+        real_close = os.close
+        captured = []
+
+        def reject_fdopen(fd, *args, **kwargs):
+            captured.append(fd)
+            raise ValueError("injected fdopen failure")
+
+        def reject_close(fd):
+            if fd in captured:
+                real_close(fd)
+                raise OSError("injected descriptor close failure")
+            return real_close(fd)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fdopen", side_effect=reject_fdopen):
+                with patch("safe_benchmark_output.os.close", side_effect=reject_close):
+                    with self.assertRaisesRegex(ValueError, "injected fdopen failure"):
+                        publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertEqual(len(captured), 1)
+        with self.assertRaises(OSError):
+            os.fstat(captured[0])
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_temporary_file_sync_failure_never_publishes(self):
         # A failed file durability barrier must not publish an unverified
         # CSV, even if its rows have already been written successfully.
