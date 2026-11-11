@@ -50,7 +50,8 @@ class ForkReleaseSafetyTests(unittest.TestCase):
         self.assertEqual(ci.count("'.github/fork-release-build-setup.yml'"), 2)
         self.assertEqual(ci.count("'crates/**/Cargo.toml'"), 2)
 
-    def _run_gate(self, *, tag="applesauce-cli/v0.5.30", relation="identical", green=True):
+    def _run_gate(self, *, tag="applesauce-cli/v0.5.30", relation="identical",
+                  green=True, sha=None, version="0.5.30"):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cargo = root / "cargo"
@@ -58,6 +59,9 @@ class ForkReleaseSafetyTests(unittest.TestCase):
                 '#!/bin/sh\nprintf \'{"packages":[{"name":"applesauce-cli","version":"0.5.30"}]}\\n\'\n',
                 encoding="utf-8",
             )
+            cargo.write_text(cargo.read_text(encoding="utf-8").replace(
+                '"version":"0.5.30"', f'"version":"{version}"'
+            ), encoding="utf-8")
             cargo.chmod(0o755)
             curl = root / "curl"
             curl.write_text(
@@ -70,7 +74,7 @@ class ForkReleaseSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             curl.chmod(0o755)
-            sha = "a" * 40
+            sha = sha or "a" * 40
             passed = (
                 f'{{"head_sha":"{sha}","head_branch":"main",'
                 '"event":"push","conclusion":"success"}'
@@ -92,6 +96,17 @@ class ForkReleaseSafetyTests(unittest.TestCase):
 
     def test_release_gate_accepts_green_main_tag(self):
         self.assertEqual(self._run_gate().returncode, 0)
+
+    def test_v0531_release_gate_refuses_same_version_on_wrong_main_commit(self):
+        tag = "applesauce-cli/v0.5.31"
+        wrong = self._run_gate(tag=tag, version="0.5.31")
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertIn("qualified exact commit", wrong.stderr)
+        qualified = self._run_gate(
+            tag=tag, version="0.5.31",
+            sha="1585dceb6c745cebf822588526ee5005255818c9",
+        )
+        self.assertEqual(qualified.returncode, 0, qualified.stderr)
 
     def test_release_gate_rejects_wrong_version(self):
         self.assertNotEqual(self._run_gate(tag="applesauce-cli/v99.0").returncode, 0)

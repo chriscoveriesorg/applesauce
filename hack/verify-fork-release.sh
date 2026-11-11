@@ -18,6 +18,15 @@ if [[ "${GITHUB_REF_NAME:-}" != "applesauce-cli/v$version" ]]; then
   exit 1
 fi
 
+# Never publish v0.5.31 from a newer main commit that still carries
+# the same Cargo version. Pinning only the owner's tag helper would leave
+# hand-created tags unguarded on source commits containing this check.
+if [[ "${GITHUB_REF_NAME:-}" == 'applesauce-cli/v0.5.31' &&
+      "$GITHUB_SHA" != '1585dceb6c745cebf822588526ee5005255818c9' ]]; then
+  echo 'v0.5.31 release source must be the qualified exact commit' >&2
+  exit 1
+fi
+
 # Anonymous GitHub reads keep this gate independent of write tokens/secrets.
 api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
 compare=$(curl --fail --silent --show-error --location --retry 3 --max-time 30 \
