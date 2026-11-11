@@ -110,3 +110,13 @@ promptly. Four durable Apple-generated differential vectors are committed
 under `tests/fixtures/codec-crossdecode/` and replayed with the pinned C11
 decoder on Linux before the native macOS proof job is allocated. Independent
 source/evidence review and PR approval are still required.
+
+## Private decoder executable snapshot
+
+The independent proof first copies the pinned C11 decoder to a mode-0700
+private temporary directory, checks a 32 MiB executable limit and SHA-256,
+then runs only the mode-0500 snapshot for each ASCF chunk. It rejects changes
+to either the copied executable or its original pathname and cleans up the
+snapshot on all exits. This closes the temporary decoder-path substitution
+gap during provenance checks. Independent source review and native CI evidence
+remain mandatory before qualifying the proof.
