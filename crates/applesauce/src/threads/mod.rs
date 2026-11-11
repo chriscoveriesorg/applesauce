@@ -392,12 +392,7 @@ fn claim_input_inode(seen: &Mutex<HashSet<(u64, u64)>>, metadata: &Metadata) -> 
 // A failed metadata or timestamp read while scanning an input for restoration
 // must propagate to the caller. Reporting it only as a skip would allow
 // decompress to exit successfully even though a requested file was untouched.
-fn report_scan_read_error<P: Progress>(
-    progress: &P,
-    mode: Mode,
-    path: &Path,
-    error: io::Error,
-) {
+fn report_scan_read_error<P: Progress>(progress: &P, mode: Mode, path: &Path, error: io::Error) {
     if mode.is_compressing() {
         progress.file_skipped(path, SkipReason::ReadError(error));
     } else {

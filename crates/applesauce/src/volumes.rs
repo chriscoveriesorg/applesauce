@@ -58,7 +58,10 @@ impl StagingDirectory {
     }
 
     fn path(&self) -> &Path {
-        self.temp_dir.as_ref().expect("staging directory exists").path()
+        self.temp_dir
+            .as_ref()
+            .expect("staging directory exists")
+            .path()
     }
 }
 
@@ -69,10 +72,10 @@ impl Drop for StagingDirectory {
         if let Some(temp_dir) = self.temp_dir.take() {
             let path = temp_dir.path().to_path_buf();
             if let Err(error) = temp_dir.close() {
-                self.errors.lock().unwrap().push((
-                    path,
-                    format!("unable to remove staging directory: {error}"),
-                ));
+                self.errors
+                    .lock()
+                    .unwrap()
+                    .push((path, format!("unable to remove staging directory: {error}")));
             }
         }
         // The resetter must run after removal, including on cleanup failures.
@@ -83,9 +86,7 @@ impl Drop for StagingDirectory {
 #[derive(Debug)]
 enum VolumeInfo {
     NoCompression,
-    SupportsCompression {
-        temp_dir: Option<StagingDirectory>,
-    },
+    SupportsCompression { temp_dir: Option<StagingDirectory> },
 }
 
 #[derive(Debug)]
@@ -274,7 +275,10 @@ mod staging_parent_tests {
 
         let root = tempfile::tempdir().unwrap();
         let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_690_000_000);
-        fs::File::open(root.path()).unwrap().set_modified(old).unwrap();
+        fs::File::open(root.path())
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         let expected = fs::metadata(root.path()).unwrap().modified().unwrap();
         let errors = Arc::new(Mutex::new(Vec::new()));
         let scratch = StagingDirectory::on_volume(root.path(), Arc::clone(&errors)).unwrap();
@@ -283,7 +287,10 @@ mod staging_parent_tests {
         fs::write(&generated, b"temporary generated content").unwrap();
         drop(scratch);
         assert!(!generated.exists());
-        assert_eq!(fs::metadata(root.path()).unwrap().modified().unwrap(), expected);
+        assert_eq!(
+            fs::metadata(root.path()).unwrap().modified().unwrap(),
+            expected
+        );
         assert!(errors.lock().unwrap().is_empty());
     }
 
@@ -303,7 +310,10 @@ mod staging_parent_tests {
         fs::rename(&parent, &moved).unwrap();
         fs::create_dir(&parent).unwrap();
         let marker = SystemTime::UNIX_EPOCH + Duration::from_secs(1_690_100_000);
-        fs::File::open(&parent).unwrap().set_modified(marker).unwrap();
+        fs::File::open(&parent)
+            .unwrap()
+            .set_modified(marker)
+            .unwrap();
         let expected = fs::metadata(&parent).unwrap().modified().unwrap();
         drop(scratch);
         assert_eq!(fs::metadata(&parent).unwrap().modified().unwrap(), expected);
@@ -325,7 +335,10 @@ mod staging_parent_tests {
 
         let root = tempfile::tempdir().unwrap();
         let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_690_200_000);
-        fs::File::open(root.path()).unwrap().set_modified(old).unwrap();
+        fs::File::open(root.path())
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         let expected = fs::metadata(root.path()).unwrap().modified().unwrap();
         let mut volumes = Volumes::new();
         let errors = volumes.timestamp_errors();
@@ -340,13 +353,19 @@ mod staging_parent_tests {
         assert!(scratch_path.exists());
         volumes.finish();
         assert!(!scratch_path.exists());
-        assert_eq!(fs::metadata(root.path()).unwrap().modified().unwrap(), expected);
+        assert_eq!(
+            fs::metadata(root.path()).unwrap().modified().unwrap(),
+            expected
+        );
         assert!(errors.lock().unwrap().is_empty());
     }
 
     #[test]
     fn relative_file_uses_current_directory_for_scratch_parent() {
-        assert_eq!(staging_parent_for_file(Path::new("source.txt")), Path::new("."));
+        assert_eq!(
+            staging_parent_for_file(Path::new("source.txt")),
+            Path::new(".")
+        );
         assert_eq!(
             staging_parent_for_file(Path::new("nested/source.txt")),
             Path::new("nested")

@@ -293,11 +293,13 @@ impl Resetter {
 
     fn record_reset_result(&self, result: io::Result<()>) {
         if let Err(error) = result {
-            let message = format!(
-                "unable to restore directory timestamps after publication: {error}"
-            );
+            let message =
+                format!("unable to restore directory timestamps after publication: {error}");
             if let Some(failures) = &self.failures {
-                failures.lock().unwrap().push((self.dir_path.clone(), message));
+                failures
+                    .lock()
+                    .unwrap()
+                    .push((self.dir_path.clone(), message));
             } else {
                 tracing::error!(path = %self.dir_path.display(), "{message}");
             }
@@ -325,8 +327,8 @@ mod resetter_tests {
     fn post_publication_directory_reset_failure_reaches_error_ledger() {
         let dir = tempfile::tempdir().unwrap();
         let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
-        let resetter = Resetter::capture_with_failure_log(dir.path(), Arc::clone(&failures))
-            .unwrap();
+        let resetter =
+            Resetter::capture_with_failure_log(dir.path(), Arc::clone(&failures)).unwrap();
         resetter.record_reset_result(Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "synthetic timestamp refusal",
@@ -341,8 +343,8 @@ mod resetter_tests {
     fn directory_reset_succeeds_on_unchanged_parent() {
         let dir = tempfile::tempdir().unwrap();
         let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
-        let resetter = Resetter::capture_with_failure_log(dir.path(), Arc::clone(&failures))
-            .unwrap();
+        let resetter =
+            Resetter::capture_with_failure_log(dir.path(), Arc::clone(&failures)).unwrap();
         resetter.activate();
         drop(resetter);
         assert!(failures.lock().unwrap().is_empty());
@@ -367,8 +369,8 @@ mod resetter_tests {
         let moved = dir.path().join("moved");
         fs::create_dir(&selected).unwrap();
         let failures: ResetFailureLog = Arc::new(Mutex::new(Vec::new()));
-        let resetter = Resetter::capture_with_failure_log(&selected, Arc::clone(&failures))
-            .unwrap();
+        let resetter =
+            Resetter::capture_with_failure_log(&selected, Arc::clone(&failures)).unwrap();
         let selected_ino = fs::metadata(&selected).unwrap().ino();
         fs::rename(&selected, &moved).unwrap();
         fs::create_dir(&selected).unwrap();
