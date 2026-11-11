@@ -113,7 +113,12 @@ class SafeCsvOutput:
                 stream = os.fdopen(fd, "w", newline="", encoding="utf-8")
             except BaseException:
                 # fdopen may fail before taking ownership of the raw fd.
-                os.close(fd)
+                # Preserve its original error if closing the raw descriptor
+                # also fails (for example, during injected I/O faults).
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
                 raise
             with stream:
                 writer = csv.DictWriter(stream, fieldnames=fields)
