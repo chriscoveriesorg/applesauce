@@ -170,8 +170,58 @@ def read_exact(stream, size):
     return data
 
 
+MAX_DECODER_BYTES = 32 * 1024 * 1024
+
+
 def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_LOGICAL,
            total_timeout_seconds=DEFAULT_TOTAL_DECODE_TIMEOUT_SECONDS):
+    """Pin a private executable copy before invoking the independent decoder.
+
+    Checking a mutable decoder pathname before and after Popen is insufficient:
+    a concurrent replacement can execute different code and then restore the
+    original inode. Copy and authenticate the decoder inside a mode-0700
+    directory, and execute only that private copy for every archive chunk.
+    """
+    decoder = Path(os.path.abspath(decoder))
+    if decoder.is_symlink() or not decoder.is_file() or not os.access(decoder, os.X_OK):
+        raise InvalidArchive("decoder must be an executable regular file")
+    with open_regular(decoder) as executable, tempfile.TemporaryDirectory(
+        prefix="ascf-pinned-decoder-"
+    ) as directory:
+        expected = identity(os.fstat(executable.fileno()))
+        require_unchanged(decoder, expected, executable)
+        if not 0 < expected[3] <= MAX_DECODER_BYTES:
+            raise InvalidArchive("independent decoder exceeds executable size bounds")
+        pinned = Path(directory) / "decoder"
+        digest = hashlib.sha256()
+        count = 0
+        with pinned.open("xb") as output:
+            while True:
+                block = executable.read(1024 * 1024)
+                if not block:
+                    break
+                count += len(block)
+                if count > MAX_DECODER_BYTES:
+                    raise InvalidArchive("independent decoder exceeds executable size bounds")
+                digest.update(block)
+                output.write(block)
+            # No executable writes through this pathname after the snapshot.
+            os.fchmod(output.fileno(), 0o500)
+        if count != expected[3]:
+            raise InvalidArchive("independent decoder changed during snapshot")
+        require_unchanged(decoder, expected, executable)
+        return _verify_pinned_decoder(
+            archive, original, pinned, codec=codec,
+            max_logical_bytes=max_logical_bytes,
+            total_timeout_seconds=total_timeout_seconds,
+            source_decoder=decoder, source_identity=expected,
+            source_digest=digest.hexdigest(),
+        )
+
+
+def _verify_pinned_decoder(archive, original, decoder, *, codec, max_logical_bytes,
+                           total_timeout_seconds, source_decoder, source_identity,
+                           source_digest):
     """Verify strict ASCF geometry, independent decode and original-byte hashes."""
     if codec not in CODECS:
         raise InvalidArchive(f"unsupported independent codec: {codec}")
@@ -186,6 +236,8 @@ def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_
     decoder_snapshot = identity(decoder.stat())
     decoder_hash = sha256_file(decoder)
     require_unchanged(decoder, decoder_snapshot)
+    if decoder_hash != source_digest:
+        raise InvalidArchive("private decoder snapshot differs from selected executable")
     if max_logical_bytes <= 0:
         raise InvalidArchive("maximum logical fixture size must be positive")
     if not 0 < total_timeout_seconds <= 3600:
@@ -283,6 +335,13 @@ def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_
     if sha256_file(decoder) != decoder_hash:
         raise InvalidArchive("independent decoder binary changed during proof")
     require_unchanged(decoder, decoder_snapshot)
+    # Recheck the caller-selected binary as well as the private executable.
+    # The private copy prevents transient path swaps from affecting execution;
+    # these checks still reject any observable change to the original source.
+    require_unchanged(source_decoder, source_identity)
+    if sha256_file(source_decoder) != source_digest:
+        raise InvalidArchive("independent decoder source changed during proof")
+    require_unchanged(source_decoder, source_identity)
 
     return {
         "schema_version": 1,
