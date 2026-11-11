@@ -51,7 +51,10 @@ fn verified_compression_reopens_and_hashes_inline_and_resource_fork_files() {
             String::from_utf8_lossy(&result.stderr)
         );
         let info = applesauce::info::get(&path).unwrap();
-        assert!(info.is_compressed, "fixture should produce native compression");
+        assert!(
+            info.is_compressed,
+            "fixture should produce native compression"
+        );
         let storage = info
             .decmpfs_info
             .expect("compressed fixture must have decmpfs metadata")
