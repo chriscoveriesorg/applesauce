@@ -213,6 +213,64 @@ class NegativeProofTests(unittest.TestCase):
                 )
         self.assertEqual(calls, 10)
 
+    def test_all_cases_use_the_same_private_reference_and_decoder(self):
+        self.make_fixture("lzmesh", multi_chunk=True)
+        from prove_independent_corruptions import verify as real_verify
+        observed = []
+
+        def observe_inputs(*args, **kwargs):
+            observed.append((Path(args[1]), Path(args[2])))
+            return real_verify(*args, **kwargs)
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=observe_inputs):
+            result = check_corruptions(
+                self.archive, self.original, self.decoder, codec="lzmesh"
+            )
+        self.assertEqual(result["case_count"], 9)
+        self.assertEqual(len(observed), 10)
+        self.assertEqual(len(set(observed)), 1)
+        original_pin, decoder_pin = observed[0]
+        self.assertNotEqual(original_pin, self.original)
+        self.assertNotEqual(decoder_pin, self.decoder)
+
+    def test_transient_decoder_rewrite_cannot_supply_corruption_rejections(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+        original_binary = self.decoder.read_bytes()
+        marker = self.root / "untrusted-decoder-executed"
+        calls = 0
+
+        def replace_decoder_during_negative_case(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls != 2:
+                return real_verify(*args, **kwargs)
+            # The caller's executable pathname is mutable. A replacement that
+            # exits with failure would falsely satisfy a corrupted-payload case
+            # if the suite reopened that pathname on every check.
+            self.decoder.write_text(
+                "#!/usr/bin/env python3\\n"
+                "from pathlib import Path\\n"
+                f"Path({str(marker)!r}).write_text('executed')\\n"
+                "raise SystemExit(88)\\n",
+                encoding="utf-8",
+            )
+            try:
+                self.assertNotEqual(Path(args[2]), self.decoder)
+                return real_verify(*args, **kwargs)
+            finally:
+                self.decoder.write_bytes(original_binary)
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=replace_decoder_during_negative_case):
+            with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 6)
+        self.assertFalse(marker.exists())
+
     def test_never_passes_a_decoder_that_ignores_corrupted_payload(self):
         self.make_fixture("lzmesh")
         # This decoder always emits the good plaintext. Its baseline passes,
