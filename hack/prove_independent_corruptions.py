@@ -17,7 +17,8 @@ import tempfile
 import time
 
 from verify_independent_lzmesh import (
-    DEFAULT_TOTAL_DECODE_TIMEOUT_SECONDS, InvalidArchive, identity,
+    DEFAULT_TOTAL_DECODE_TIMEOUT_SECONDS, MAX_DECODER_BYTES, MAX_LOGICAL,
+    InvalidArchive, identity,
     open_regular, require_unchanged, sha256_file, verify,
 )
 
@@ -29,7 +30,7 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def check_corruptions(archive, original, decoder, *, codec,
+def _check_corruptions_pinned(archive, original, decoder, *, codec,
                       total_timeout_seconds=DEFAULT_NEGATIVE_SUITE_TIMEOUT_SECONDS):
     if not 0 < total_timeout_seconds <= 3600:
         raise InvalidArchive("negative suite time budget must be between 0 and 3600 seconds")
@@ -225,6 +226,73 @@ def check_corruptions(archive, original, decoder, *, codec,
         "suite_timeout_seconds": total_timeout_seconds,
         "cases": cases,
     }
+
+
+
+def check_corruptions(archive, original, decoder, *, codec,
+                      total_timeout_seconds=DEFAULT_NEGATIVE_SUITE_TIMEOUT_SECONDS):
+    """Run all negative cases with one private copy of both trusted inputs.
+
+    Independent verification pins a decoder for one call, but this suite makes
+    several calls. If it reopens the caller's decoder pathname between cases,
+    a transient replacement can turn failures from a different executable into
+    false corruption evidence. The same rule applies to reference plaintext.
+    """
+    if not 0 < total_timeout_seconds <= 3600:
+        raise InvalidArchive("negative suite time budget must be between 0 and 3600 seconds")
+    deadline = time.monotonic() + total_timeout_seconds
+    sources = (
+        ("original", Path(os.path.abspath(original)), MAX_LOGICAL),
+        ("decoder", Path(os.path.abspath(decoder)), MAX_DECODER_BYTES),
+    )
+    pins = {}
+    with tempfile.TemporaryDirectory(prefix="ascf-negative-inputs-") as directory:
+        for label, path, limit in sources:
+            if label == "decoder" and not os.access(path, os.X_OK):
+                raise InvalidArchive("decoder must be executable")
+            with open_regular(path) as stream:
+                before = identity(os.fstat(stream.fileno()))
+                require_unchanged(path, before, stream)
+                if not 0 < before[3] <= limit:
+                    raise InvalidArchive(f"negative proof {label} exceeds bounded fixture size")
+                pin = Path(directory) / f"{label}.bin"
+                digest = hashlib.sha256()
+                copied = 0
+                with pin.open("xb") as output:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        copied += len(block)
+                        if copied > limit:
+                            raise InvalidArchive(f"negative proof {label} exceeds bounded fixture size")
+                        digest.update(block)
+                        output.write(block)
+                    if label == "decoder":
+                        os.fchmod(output.fileno(), 0o500)
+                if copied != before[3]:
+                    raise InvalidArchive(f"negative proof {label} changed while copying")
+                require_unchanged(path, before, stream)
+            pins[label] = (pin, before, digest.hexdigest())
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise InvalidArchive("negative proof suite exceeded total time budget")
+        result = _check_corruptions_pinned(
+            archive, pins["original"][0], pins["decoder"][0],
+            codec=codec, total_timeout_seconds=budget,
+        )
+        # The source files must still agree with the pinned copies. The full
+        # suite only executes private inputs, including after a pathname swap.
+        for label, path, _ in sources:
+            _, before, expected_hash = pins[label]
+            require_unchanged(path, before)
+            if sha256_file(path) != expected_hash:
+                raise InvalidArchive(f"negative proof {label} bytes changed during suite")
+            require_unchanged(path, before)
+        if (result["baseline_original_sha256"] != pins["original"][2]
+                or result["baseline_decoder_sha256"] != pins["decoder"][2]):
+            raise InvalidArchive("negative proof baseline differs from pinned inputs")
+        if deadline - time.monotonic() <= 0:
+            raise InvalidArchive("negative proof suite exceeded total time budget")
+        result["suite_timeout_seconds"] = total_timeout_seconds
+        return result
 
 
 def main():
