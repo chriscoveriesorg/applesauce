@@ -82,9 +82,13 @@ def check_corruptions(archive, original, decoder, *, codec,
     if digest(data) != baseline["archive_sha256"]:
         raise InvalidArchive("negative-test source changed after baseline proof")
 
+    count = struct.unpack_from("<I", data, 24)[0]
     offset, stored_len, _ = struct.unpack_from("<QII", data, 64)
-    if stored_len < 3 or offset < 112 or offset + stored_len > len(data):
+    if stored_len < 3 or offset < 64 + 48 * count or offset + stored_len > len(data):
         raise InvalidArchive("negative tests require a nonempty validated chunk")
+    final_chunk = count - 1
+    final_entry = 64 + 48 * final_chunk
+    final_offset, final_stored_len, _ = struct.unpack_from("<QII", data, final_entry)
 
     mutations = {}
     for name, position in (
@@ -100,6 +104,20 @@ def check_corruptions(archive, original, decoder, *, codec,
     mutations["index_digest"] = bytes(digest_damage)
     mutations["truncated_payload"] = data[:-1]
     mutations["appended_payload"] = data + b"\x00"
+
+    # The default negative suite used only chunk zero, even on three-chunk
+    # evidence fixtures. Test the last compressed chunk and its index digest
+    # independently so a verifier that skips tail chunks cannot qualify.
+    if count > 1:
+        if final_stored_len < 3 or final_offset + final_stored_len > len(data):
+            raise InvalidArchive("negative tests require a nonempty final chunk")
+        final_damage = bytearray(data)
+        final_damage[final_offset + final_stored_len // 2] ^= 0x40
+        mutations["payload_final_chunk"] = bytes(final_damage)
+
+        final_digest_damage = bytearray(data)
+        final_digest_damage[final_entry + 16] ^= 0x01
+        mutations["final_index_digest"] = bytes(final_digest_damage)
 
     cases = []
     with tempfile.TemporaryDirectory(prefix="ascf-negative-proof-") as tmp:
@@ -119,17 +137,21 @@ def check_corruptions(archive, original, decoder, *, codec,
                 # Only codec-specific decoding failures count as payload
                 # corruption rejection. Decoder provenance changes, missing
                 # inputs and unrelated proof failures must fail qualification.
+                expected_chunk = final_chunk if name == "payload_final_chunk" else 0
                 if name.startswith("payload_") and not message.startswith((
-                    "independent decoder failed on chunk 0 (exit ",
-                    "independent decoder omitted chunk 0",
-                    "independent decoder returned incorrect bytes/length at chunk 0",
-                    "independent decoder returned wrong digest at chunk 0",
+                    f"independent decoder failed on chunk {expected_chunk} (exit ",
+                    f"independent decoder omitted chunk {expected_chunk}",
+                    f"independent decoder returned incorrect bytes/length at chunk {expected_chunk}",
+                    f"independent decoder returned wrong digest at chunk {expected_chunk}",
                 )):
                     raise AssertionError(
                         f"{name} failed outside decoder result gate: {message}"
                     ) from exc
                 expected_parser_failure = {
                     "index_digest": "original chunk 0 differs from ASCF chunk digest",
+                    "final_index_digest": (
+                        f"original chunk {final_chunk} differs from ASCF chunk digest"
+                    ),
                     "truncated_payload": "ASCF index points past EOF",
                     "appended_payload": "ASCF payload has trailing",
                 }.get(name)
