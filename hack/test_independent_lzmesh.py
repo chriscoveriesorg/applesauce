@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest import mock
 
-from verify_independent_lzmesh import InvalidArchive, verify
+from verify_independent_lzmesh import InvalidArchive, decode_bounded, verify
 
 
 class IndependentMeshProofTests(unittest.TestCase):
@@ -220,6 +220,44 @@ class IndependentMeshProofTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(InvalidArchive, "independent decoder failed"):
             verify(self.archive, self.original, self.decoder)
+
+    def test_mesh_decoder_stdin_is_a_private_regular_file(self):
+        # Pipe stdin can make timeout cleanup hang if a detached descendant
+        # inherits the read end and the decoder never drains the payload.
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\n"
+            "import os,stat,sys\\n"
+            "if not stat.S_ISREG(os.fstat(0).st_mode): sys.exit(81)\\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\\n",
+            encoding="utf-8",
+        )
+        report = verify(self.archive, self.original, self.decoder)
+        self.assertEqual(report["chunk_count"], 1)
+
+    def test_nonreading_mesh_decoder_timeout_has_no_pipe_cleanup_wait(self):
+        # Send more than a pipe buffer to a decoder which never reads stdin.
+        # A separate-session helper retains its stdin for 3s; wait() must
+        # still finish when the direct decoder is killed at the 0.25s cap.
+        self.decoder.write_text(
+            "#!/usr/bin/env python3\\n"
+            "import subprocess,sys,time\\n"
+            "subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(3.0)'], "
+            "start_new_session=True, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL)\\n"
+            "time.sleep(10)\\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(InvalidArchive, "timed out"):
+            decode_bounded(
+                self.decoder, b"P" * (1024 * 1024), 1024 * 1024,
+                0, "lzmesh", timeout_seconds=0.25,
+            )
+        self.assertLess(
+            time.monotonic() - started, 2.0,
+            "decoder cleanup waited for detached helper's inherited stdin",
+        )
 
     def test_reaps_decoder_descendants_after_success(self):
         # A successful decoder can still leave a helper process running.
