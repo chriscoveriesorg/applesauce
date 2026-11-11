@@ -369,6 +369,36 @@ class SafeOutputTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_post_publish_temporary_unlink_failure_preserves_csv(self):
+        # Once the exclusive link succeeds, failing to remove our staging
+        # name must not delete or truncate the already-published inode.
+        # The failed job quarantines derived CSV uploads.
+        real_unlink = os.unlink
+        refused = False
+
+        def fail_staging_unlink(path, *args, **kwargs):
+            nonlocal refused
+            if (
+                not refused
+                and path.startswith(".comparison.csv.")
+                and path.endswith(".tmp")
+                and kwargs.get("dir_fd") is not None
+                and self.output.exists()
+            ):
+                refused = True
+                raise PermissionError("injected staging unlink failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.unlink", side_effect=fail_staging_unlink):
+                with self.assertRaisesRegex(PermissionError, "staging unlink failure"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(refused)
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), self.rows)
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_temporary_file_sync_failure_never_publishes(self):
         # A failed file durability barrier must not publish an unverified
         # CSV, even if its rows have already been written successfully.
