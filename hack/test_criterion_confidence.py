@@ -125,10 +125,10 @@ class ConfidenceTests(unittest.TestCase):
         self.rewrite_summary(summary_rows)
         return manifest, summary_rows
 
-    def test_cli_success_and_failure_remove_stale_evidence(self):
+    def test_cli_success_and_failed_evidence_produces_no_derived_csv(self):
         # Run the actual CLI, not only the in-process math functions.
-        # A self-hosted macOS runner may retain previous benchmark outputs,
-        # and the workflow uploads its artifact directory even on failure.
+        # The workflow resets generated evidence before this exporter and
+        # uploads derived CSVs only when the complete run succeeds.
         manifest, rows = self.complete_smoke()
         command = [
             sys.executable, str(MODULE), str(manifest), str(self.summary),
@@ -142,7 +142,7 @@ class ConfidenceTests(unittest.TestCase):
         self.assertEqual(len(output_rows), len(rows))
 
         # Deliberately invalidate the manifest after a successful export.
-        # The subsequent command must remove the previously valid artifact.
+        # The next run starts from a fresh output path.
         with manifest.open(newline="", encoding="utf-8") as stream:
             source = list(csv.DictReader(stream))
         source[0]["input_sha256"] = "a" * 64
@@ -152,24 +152,28 @@ class ConfidenceTests(unittest.TestCase):
             )
             writer.writeheader()
             writer.writerows(source)
+        self.output.unlink()  # Emulate the workflow's evidence reset.
         failure = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(failure.returncode, 1)
         self.assertIn("invalid or incomplete", failure.stderr)
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
 
-    def test_missing_source_removes_stale_derived_evidence(self):
+    def test_missing_source_and_existing_output_both_refused(self):
         manifest, _ = self.complete_smoke()
         self.output.write_text("stale confidence evidence", encoding="utf-8")
-        # A missing manifest must not short-circuit the stale-output cleanup.
-        # The artifact upload runs even if the exporter exits with an error.
+        with self.assertRaisesRegex(FileExistsError, "already exists"):
+            confidence.write_confidence(
+                self.summary, self.criterion, self.output, manifest, "smoke"
+            )
+        self.assertEqual(self.output.read_text(), "stale confidence evidence")
+        self.output.unlink()
         manifest.unlink()
         with self.assertRaises(FileNotFoundError):
             confidence.write_confidence(
                 self.summary, self.criterion, self.output, manifest, "smoke"
             )
         self.assertFalse(self.output.exists())
-        self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
 
     def test_invalid_utf8_estimates_fail_closed_without_traceback(self):
         manifest, _ = self.complete_smoke()
@@ -181,7 +185,6 @@ class ConfidenceTests(unittest.TestCase):
         )
         self.assertTrue(estimate.is_file())
         estimate.write_bytes(b"\xff\xfe\x80")
-        self.output.write_text("stale evidence", encoding="utf-8")
         command = [
             sys.executable, str(MODULE), str(manifest), str(self.summary),
             str(self.criterion), str(self.output), "smoke",
@@ -201,7 +204,6 @@ class ConfidenceTests(unittest.TestCase):
         with self.summary.open("w", newline="", encoding="utf-8") as stream:
             stream.write(",".join(confidence.SUMMARY_COLUMNS) + "\n")
             stream.write("x" * (csv.field_size_limit() + 1) + "\n")
-        self.output.write_text("stale evidence", encoding="utf-8")
         result = subprocess.run(
             [sys.executable, str(MODULE), str(manifest), str(self.summary),
              str(self.criterion), str(self.output), "smoke"],
@@ -335,7 +337,6 @@ class ConfidenceTests(unittest.TestCase):
         physical = self.root / "evidence"
         physical.mkdir()
         output = physical / "confidence.csv"
-        output.write_text("stale evidence", encoding="utf-8")
         moved = self.root / "evidence-moved"
         protected = self.criterion / "confidence.csv"
         protected.write_text("protected Criterion input", encoding="utf-8")
@@ -344,7 +345,7 @@ class ConfidenceTests(unittest.TestCase):
 
         def replace_parent(*args):
             # Replace the caller-visible destination *after* the writer has
-            # opened its anchored directory and removed the stale artifact.
+            # opened its anchored directory.
             physical.rename(moved)
             physical.symlink_to(self.criterion, target_is_directory=True)
             return validate(*args)
@@ -362,34 +363,22 @@ class ConfidenceTests(unittest.TestCase):
         self.assertEqual(
             protected.read_text(encoding="utf-8"), "protected Criterion input"
         )
-        # A displaced directory must retain only an invalid, empty artifact.
-        # This descriptor-based truncation preserves unrelated path replacements.
-        self.assertEqual((moved / "confidence.csv").stat().st_size, 0)
+        # This failed job excludes derived artifacts from its upload and
+        # leaves the published inode untouched for concurrent hardlink users.
+        with (moved / "confidence.csv").open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(len(list(csv.DictReader(stream))), len(rows))
         self.assertEqual(list(moved.glob(".confidence.csv.*.tmp")), [])
 
-    def test_stale_output_removal_requires_directory_sync(self):
+    def test_existing_output_never_invokes_destructive_cleanup(self):
         manifest, _ = self.complete_smoke()
         self.output.write_text("stale evidence", encoding="utf-8")
-        original_fsync = os.fsync
-        directory_sync_attempted = False
-
-        def reject_directory_sync(fd):
-            nonlocal directory_sync_attempted
-            if stat.S_ISDIR(os.fstat(fd).st_mode):
-                directory_sync_attempted = True
-                raise OSError("injected stale removal sync failure")
-            return original_fsync(fd)
-
-        # If the stale artifact cannot be durably removed, do not proceed
-        # to validation or publish a fresh CSV with an ambiguous failure.
-        with patch.object(confidence.os, "fsync", side_effect=reject_directory_sync):
-            with self.assertRaisesRegex(OSError, "stale removal sync failure"):
+        with patch.object(confidence.os, "unlink",
+                          side_effect=AssertionError("unexpected destructive cleanup")):
+            with self.assertRaisesRegex(FileExistsError, "already exists"):
                 confidence.write_confidence(
                     self.summary, self.criterion, self.output, manifest, "smoke"
                 )
-        self.assertTrue(directory_sync_attempted)
-        self.assertFalse(self.output.exists())
-        self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
+        self.assertEqual(self.output.read_text(), "stale evidence")
 
     def test_directory_fsync_failure_is_reported_after_publication(self):
         manifest, _ = self.complete_smoke()
@@ -411,9 +400,10 @@ class ConfidenceTests(unittest.TestCase):
                     self.summary, self.criterion, self.output, manifest, "smoke"
                 )
         self.assertTrue(directory_sync_attempted)
-        # A post-rename sync failure invalidates the published inode without
-        # unlinking a potentially replaced pathname.
-        self.assertEqual(self.output.stat().st_size, 0)
+        # A post-publish fsync failure disqualifies the whole run; its
+        # derived CSV is excluded from failed-run artifacts.
+        with self.output.open(newline="", encoding="utf-8") as stream:
+            self.assertGreater(len(list(csv.DictReader(stream))), 0)
         self.assertEqual(list(self.root.glob(".confidence.csv.*.tmp")), [])
 
     def test_real_output_directory_swap_during_open_refuses_foreign_cleanup(self):
@@ -472,8 +462,8 @@ class ConfidenceTests(unittest.TestCase):
                 os.link(self.summary, output)
             return original_open(path, flags, *args, **kwargs)
 
-        # Source-alias verification must occur relative to the descriptor
-        # that will be used for unlink, after the directory is opened.
+        # Source-alias verification must occur relative to the directory
+        # descriptor used for exclusive publication.
         with patch.object(confidence.os, "open", side_effect=replace_with_input_hardlink):
             with self.assertRaisesRegex(ValueError, "differ from source"):
                 confidence.write_confidence(
