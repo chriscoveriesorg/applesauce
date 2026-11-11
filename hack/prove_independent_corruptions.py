@@ -18,7 +18,7 @@ import time
 
 from verify_independent_lzmesh import (
     DEFAULT_TOTAL_DECODE_TIMEOUT_SECONDS, InvalidArchive, identity,
-    open_regular, require_unchanged, verify,
+    open_regular, require_unchanged, sha256_file, verify,
 )
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
@@ -57,6 +57,12 @@ def check_corruptions(archive, original, decoder, *, codec,
     archive = Path(archive)
     original = Path(original)
     decoder = Path(decoder)
+    # Pin both proof inputs before executing an independent decoder. A decoder
+    # that rewrites itself after the successful baseline must not turn its
+    # subsequent failures into false corruption-rejection evidence.
+    with open_regular(original) as clear_source, open_regular(decoder) as decoder_source:
+        original_snapshot = identity(os.fstat(clear_source.fileno()))
+        decoder_snapshot = identity(os.fstat(decoder_source.fileno()))
     # Keep the original archive descriptor open across baseline decoding and
     # mutation construction. A pathname swap to a FIFO, symlink or an equally
     # sized replacement must not hang read_bytes() or change the proof input.
@@ -110,11 +116,17 @@ def check_corruptions(archive, original, decoder, *, codec,
                     raise InvalidArchive(
                         f"{name} decoder timeout cannot qualify as corruption rejection"
                     ) from exc
-                if name.startswith("payload_") and not (
-                    "independent decoder" in message
-                ):
+                # Only codec-specific decoding failures count as payload
+                # corruption rejection. Decoder provenance changes, missing
+                # inputs and unrelated proof failures must fail qualification.
+                if name.startswith("payload_") and not message.startswith((
+                    "independent decoder failed on chunk 0 (exit ",
+                    "independent decoder omitted chunk 0",
+                    "independent decoder returned incorrect bytes/length at chunk 0",
+                    "independent decoder returned wrong digest at chunk 0",
+                )):
                     raise AssertionError(
-                        f"{name} failed before the independent decoder: {message}"
+                        f"{name} failed outside decoder result gate: {message}"
                     ) from exc
                 expected_parser_failure = {
                     "index_digest": "original chunk 0 differs from ASCF chunk digest",
@@ -135,6 +147,15 @@ def check_corruptions(archive, original, decoder, *, codec,
                     f"independent proof ACCEPTED corrupted archive ({name})"
                 )
 
+    remaining_budget()
+    require_unchanged(original, original_snapshot)
+    require_unchanged(decoder, decoder_snapshot)
+    if sha256_file(original) != baseline["original_sha256"]:
+        raise InvalidArchive("negative proof original bytes changed during suite")
+    if sha256_file(decoder) != baseline["decoder_sha256"]:
+        raise InvalidArchive("negative proof decoder bytes changed during suite")
+    require_unchanged(original, original_snapshot)
+    require_unchanged(decoder, decoder_snapshot)
     remaining_budget()
     return {
         "schema_version": 1,
