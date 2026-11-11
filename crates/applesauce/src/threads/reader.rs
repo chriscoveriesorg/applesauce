@@ -2,9 +2,11 @@ use crate::seq_queue::Slot;
 use crate::threads::{compressing, writer, BgWork, Context, Mode, WorkHandler};
 use crate::{rfork_storage, seq_queue, try_read_all};
 use applesauce_core::BLOCK_SIZE;
-use std::fs::File;
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::Read;
 use std::num::NonZeroUsize;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::{io, thread};
 
@@ -47,6 +49,19 @@ fn read_chunk<R: Read>(reader: R, limit: usize) -> io::Result<Vec<u8>> {
     buf.try_reserve_exact(limit).map_err(io::Error::other)?;
     reader.take(limit as u64).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+// Refuse path swaps to symlinks, FIFOs or other nonregular files between
+// scanning and reading. O_NONBLOCK prevents a substituted FIFO from hanging
+// before descriptor validation. O_NOFOLLOW prevents symlink traversal.
+// The writer repeats the same source-snapshot check before publication.
+fn open_scanned_regular_file(path: &Path, scanned: &Metadata) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    writer::ensure_source_path_matches_open_file(&file, path, scanned)?;
+    Ok(file)
 }
 
 impl Handler {
@@ -175,7 +190,7 @@ impl WorkHandler<WorkItem> for Handler {
     fn handle_item(&mut self, item: WorkItem) {
         let WorkItem { context } = item;
         let _guard = tracing::info_span!("reading file", path=%context.path.display()).entered();
-        let file = match File::open(&context.path) {
+        let file = match open_scanned_regular_file(&context.path, &context.orig_metadata) {
             Ok(file) => file,
             Err(e) => {
                 context
@@ -218,9 +233,13 @@ impl WorkHandler<WorkItem> for Handler {
 
 #[cfg(test)]
 mod tests {
-    use super::read_chunk;
+    use super::{open_scanned_regular_file, read_chunk};
     use applesauce_core::BLOCK_SIZE;
+    use std::ffi::CString;
+    use std::fs;
     use std::io::{self, Cursor, Read};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{symlink, FileTypeExt};
 
     #[test]
     fn chunk_reader_preserves_generated_bytes_and_boundaries() {
@@ -317,5 +336,47 @@ mod tests {
             read_chunk(FailingReader(false), 8).unwrap_err().kind(),
             io::ErrorKind::Other
         );
+    }
+
+    #[test]
+    fn source_preflight_rejects_regular_path_swaps_and_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let saved = dir.path().join("saved");
+        fs::write(&path, b"generated source").unwrap();
+        let scanned = fs::symlink_metadata(&path).unwrap();
+        open_scanned_regular_file(&path, &scanned).unwrap();
+
+        // A different regular inode of the same size is still unsafe.
+        fs::rename(&path, &saved).unwrap();
+        fs::write(&path, b"generated source").unwrap();
+        assert_eq!(
+            open_scanned_regular_file(&path, &scanned)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        fs::remove_file(&path).unwrap();
+        symlink(&saved, &path).unwrap();
+        assert!(open_scanned_regular_file(&path, &scanned).is_err());
+        assert_eq!(fs::read(&saved).unwrap(), b"generated source");
+    }
+
+    #[test]
+    fn source_preflight_rejects_fifo_substituted_after_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        fs::write(&path, b"generated source").unwrap();
+        let scanned = fs::symlink_metadata(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let fifo_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo_path is a valid NUL-terminated filesystem path.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        // O_NONBLOCK makes this return immediately even with no FIFO writer.
+        assert!(open_scanned_regular_file(&path, &scanned).is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
     }
 }

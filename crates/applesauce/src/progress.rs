@@ -14,6 +14,7 @@ pub enum SkipReason {
     HasRequiredXattr,
     FsNotSupported,
     HardLink,
+    DuplicateInput,
 }
 
 impl From<IncompressibleReason> for SkipReason {
@@ -40,6 +41,8 @@ pub trait Task {
     fn increment(&self, amt: u64);
     fn error(&self, message: &str);
     fn not_compressible_enough(&self, _path: &Path) {}
+    /// Called only after a whole-file kernel readback and offset probes pass.
+    fn kernel_verified(&self, _sha256: &str) {}
 }
 
 impl<P: Progress> Progress for &'_ P {
@@ -70,6 +73,10 @@ impl<T: Task> Task for &'_ T {
     fn not_compressible_enough(&self, path: &Path) {
         T::not_compressible_enough(self, path)
     }
+
+    fn kernel_verified(&self, sha256: &str) {
+        T::kernel_verified(self, sha256)
+    }
 }
 
 impl fmt::Display for SkipReason {
@@ -85,6 +92,7 @@ impl fmt::Display for SkipReason {
             SkipReason::FsNotSupported => write!(f, "Filesystem does not support compression"),
             SkipReason::EmptyFile => write!(f, "Empty file"),
             SkipReason::HardLink => write!(f, "Other hard links exist to file"),
+            SkipReason::DuplicateInput => write!(f, "Duplicate input (already scheduled)"),
         }
     }
 }

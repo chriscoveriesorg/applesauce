@@ -3,15 +3,98 @@ use crate::{compressed_payload_is_allowed, seq_queue, set_flags, times, xattr};
 use applesauce_core::compressor::Kind;
 use applesauce_core::decmpfs;
 use resource_fork::ResourceFork;
-use std::fs::{File, Metadata};
-use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
+use sha2::{Digest, Sha256};
+use std::fs::{File, Metadata, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::os::macos::fs::MetadataExt;
 use std::os::unix::fs::MetadataExt as UnixMetadataExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Arc;
-use std::{cmp, io, ptr};
+use std::{cmp, fmt, io, ptr};
 use tempfile::NamedTempFile;
+
+/// Compression ratio rejection is an expected skip, not a failed filesystem write.
+/// Preserve its identity through io::Error so other writer failures remain visible.
+#[derive(Debug)]
+struct BelowMinimumRatio(f64);
+
+impl fmt::Display for BelowMinimumRatio {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "did not compress to at least {}% of original size",
+            self.0 * 100.0
+        )
+    }
+}
+
+impl std::error::Error for BelowMinimumRatio {}
+
+fn record_write_result(progress: &dyn crate::progress::Task, path: &Path, result: &io::Result<()>) {
+    match result {
+        Ok(()) => {}
+        Err(error)
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<BelowMinimumRatio>()) => {}
+        Err(error) => {
+            progress.error(&format!("Error writing {}: {error}", path.display()));
+        }
+    }
+}
+
+// A decmpfs resource-fork payload is compressed storage, not a user-visible
+// resource fork to copy to the restored file. Inline compression may coexist
+// with a legitimate resource fork, which must survive the restoration.
+fn remove_consumed_compression_metadata(
+    staged: &File,
+    compression_type: decmpfs::CompressionType,
+) -> io::Result<()> {
+    xattr::remove_if_present(staged, decmpfs::XATTR_NAME)?;
+    if matches!(
+        compression_type.compression_storage(),
+        Some((_, decmpfs::Storage::ResourceFork))
+    ) {
+        xattr::remove_if_present(staged, resource_fork::XATTR_NAME)?;
+    }
+    Ok(())
+}
+
+// Restoring an APFS-compressed source expands its logical bytes into a
+// temporary file on the same volume. Check available blocks before copying
+// payloads so a clearly impossible restore fails while the source is intact.
+// This is an advisory snapshot: other writers can consume space afterwards,
+// and write_all/sync_all must still propagate ENOSPC.
+fn require_restore_capacity(
+    logical_size: u64,
+    blocks_available: u64,
+    block_size: u64,
+) -> io::Result<()> {
+    let bytes_available = u128::from(blocks_available) * u128::from(block_size);
+    if u128::from(logical_size) > bytes_available {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            format!(
+                "insufficient free space for restoration: need {logical_size} bytes, have {bytes_available} bytes"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_restore_capacity(stage: &File, logical_size: u64) -> io::Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: stage is an open descriptor and stat points to writable storage
+    // for the complete statfs structure. Its contents are read only on success.
+    if unsafe { libc::fstatfs(stage.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstatfs succeeded and initialized the entire result structure.
+    let stat = unsafe { stat.assume_init() };
+    require_restore_capacity(logical_size, stat.f_bavail, u64::from(stat.f_bsize))
+}
 
 pub(super) type Sender = crossbeam_channel::Sender<WorkItem>;
 
@@ -78,9 +161,8 @@ impl Handler {
                 minimum_compression_ratio,
             ) {
                 context.progress.not_compressible_enough(&context.path);
-                return Err(io::Error::other(format!(
-                    "did not compress to at least {}% of original size",
-                    minimum_compression_ratio * 100.0
+                return Err(io::Error::other(BelowMinimumRatio(
+                    minimum_compression_ratio,
                 )));
             }
 
@@ -129,6 +211,7 @@ impl Handler {
             item.context.orig_metadata.st_flags() | libc::UF_COMPRESSED,
         )?;
 
+        let mut source_sha256 = None;
         if item.context.operation.verify {
             let _entered = tracing::info_span!("verify").entered();
 
@@ -140,15 +223,48 @@ impl Handler {
             orig_file.rewind()?;
             new_file.rewind()?;
 
-            ensure_identical_files(orig_file, new_file).map_err(|e| {
+            let verified_hash =
+                ensure_identical_files_with_sha256(orig_file, new_file).map_err(|e| {
+                    io::Error::other(format!(
+                        "verification failed: {e}, {} unchanged",
+                        item.context.path.display()
+                    ))
+                })?;
+            source_sha256 = Some(verified_hash);
+        }
+
+        // A failed timestamp reset must leave the original uncompressed file
+        // intact, just like a failed content verification. Flush the fully
+        // prepared compressed staging inode before the atomic replacement.
+        // Restoration follows the same publication order below.
+        times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
+        tmp_file.as_file().sync_all()?;
+
+        // Reopening the staged pathname is a separate kernel decmpfs check:
+        // the earlier comparison used the descriptor opened before compressed
+        // metadata was installed. Refuse publication if a fresh open cannot
+        // reproduce the original logical bytes. The source is still intact.
+        if let Some(expected_sha256) = source_sha256 {
+            verify_published_kernel_reads(
+                item.file.as_ref(),
+                tmp_file.as_file(),
+                tmp_file.path(),
+                uncompressed_file_size,
+                expected_sha256,
+            )
+            .map_err(|error| {
                 io::Error::other(format!(
-                    "verification failed: {e}, {} unchanged",
+                    "staged kernel readback failed: {error}; {} unchanged",
                     item.context.path.display()
                 ))
             })?;
+            // Kernel reads may advance access time on APFS. Reapply the
+            // original timestamps and sync while the source is still intact.
+            times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
+            tmp_file.as_file().sync_all()?;
         }
 
-        let new_file = {
+        let published = {
             let _entered = tracing::debug_span!("rename tmp file").entered();
             ensure_source_path_matches_open_file(
                 &item.file,
@@ -160,8 +276,40 @@ impl Handler {
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
         }
-        if let Err(e) = times::reset_times(&new_file, &item.context.orig_times) {
-            tracing::error!("Unable to reset times: {e}");
+        if let Some(expected_sha256) = source_sha256 {
+            // Verification through the published pathname exercises the kernel's
+            // decmpfs read path. The original uncompressed descriptor remains
+            // open so pread probes do not depend on the compressed decoder.
+            // A failure is reported, but cannot safely undo an atomic rename.
+            if let Err(error) = verify_published_kernel_reads(
+                item.file.as_ref(),
+                &published,
+                &item.context.path,
+                uncompressed_file_size,
+                expected_sha256,
+            ) {
+                return Err(io::Error::other(format!(
+                    "post-publication kernel readback failed: {error}; compressed file remains at {}",
+                    item.context.path.display()
+                )));
+            }
+            // The final, post-rename kernel read may also update atime. Preserve
+            // original filesystem timestamps before reporting verified success.
+            // Fail visibly if this post-publication metadata step is denied.
+            times::reset_times(&published, &item.context.orig_times)
+                .and_then(|()| published.sync_all())
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "post-publication timestamp restoration failed: {error}; compressed file remains at {}",
+                        item.context.path.display()
+                    ))
+                })?;
+            let hex = expected_sha256
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            item.context.progress.kernel_verified(&hex);
+            tracing::info!("verified: kernel-read sha256={hex}");
         }
         Ok(())
     }
@@ -169,20 +317,24 @@ impl Handler {
     fn write_uncompressed_file(&mut self, item: WorkItem) -> io::Result<()> {
         let mut tmp_file = tmp_file_for(&item)?;
         copy_xattrs(&item.file, tmp_file.as_file())?;
-        // COPYFILE_XATTR may preserve com.apple.decmpfs from the compressed
-        // source. A restored plain file must not publish stale compression
-        // metadata, even when the compressed flag is subsequently cleared.
-        // Operate only on the temporary destination; fail closed if removal
-        // is denied, and tolerate filesystems that did not copy the attribute.
-        xattr::remove_if_present(tmp_file.as_file(), decmpfs::XATTR_NAME)?;
-
         let decmpfs_data = xattr::read(
             item.file.as_ref(),
             decmpfs::XATTR_NAME,
             decmpfs::MAX_XATTR_SIZE,
         )?
         .ok_or_else(|| io::Error::other("file is not compressed"))?;
-        let expected_size = decmpfs::Value::from_data(&decmpfs_data)?.uncompressed_size;
+        let header = decmpfs::Value::from_data(&decmpfs_data)?;
+
+        // COPYFILE_XATTR can copy both the decmpfs descriptor and the
+        // compressed payload's resource fork. Neither belongs in a restored
+        // plain file. Preserve an unrelated resource fork for inline-xattr
+        // compression: only resource-fork-backed types consume that fork.
+        // Fail before publication when clearing either attribute is denied.
+        remove_consumed_compression_metadata(tmp_file.as_file(), header.compression_type)?;
+        let expected_size = header.uncompressed_size;
+        // Refuse a clearly over-capacity restore before writing staged bytes.
+        // The staged destination is on the same volume as the source.
+        preflight_restore_capacity(tmp_file.as_file(), expected_size)?;
         let mut written_size = 0u64;
 
         item.blocks.try_for_each(|chunk| {
@@ -231,17 +383,25 @@ impl Handler {
             item.context.orig_metadata.st_flags() & !libc::UF_COMPRESSED,
         )?;
 
+        // Restore the scanned timestamps on staging, before touching the
+        // original pathname. A denied metadata update must fail the restore
+        // while the original compressed inode is still intact. Resetting
+        // timestamps after persist could instead report success with a
+        // partially restored metadata state.
+        times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
+
+        // Commit only a fully written, verified and durable staging file,
+        // including its restored timestamps.
+        tmp_file.as_file().sync_all()?;
+
         ensure_source_path_matches_open_file(
             &item.file,
             &item.context.path,
             &item.context.orig_metadata,
         )?;
-        let new_file = tmp_file.persist(&item.context.path)?;
+        tmp_file.persist(&item.context.path)?;
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
-        }
-        if let Err(e) = times::reset_times(&new_file, &item.context.orig_times) {
-            tracing::error!("Unable to reset times: {e}");
         }
         Ok(())
     }
@@ -259,6 +419,10 @@ impl WorkHandler<WorkItem> for Handler {
             }
         };
 
+        // Errors from verification, temporary-file publication, metadata and
+        // block decoding must reach CLI progress reporting. The ratio gate
+        // is a deliberate non-error skip.
+        record_write_result(context.progress.as_ref(), &context.path, &res);
         if res.is_ok() {
             context.report_new_stats();
             let compressing = context.operation.mode.is_compressing();
@@ -339,7 +503,7 @@ fn same_source_snapshot(expected: &Metadata, actual: &Metadata) -> bool {
         && UnixMetadataExt::ctime_nsec(expected) == UnixMetadataExt::ctime_nsec(actual)
 }
 
-fn ensure_source_path_matches_open_file(
+pub(super) fn ensure_source_path_matches_open_file(
     source: &File,
     path: &Path,
     scanned: &Metadata,
@@ -355,7 +519,140 @@ fn ensure_source_path_matches_open_file(
     Ok(())
 }
 
-fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) -> io::Result<()> {
+// Verify that the freshly reopened published inode yields the same logical
+// bytes as the old uncompressed source. Hash the complete transparent read,
+// then exercise independent random-offset pread windows. This is a warm-cache
+// verification and makes no claim of flushing macOS's file cache.
+fn verify_published_kernel_reads(
+    source: &File,
+    published: &File,
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: [u8; 32],
+) -> io::Result<()> {
+    let mut reopened = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let committed = published.metadata()?;
+    ensure_published_snapshot(&reopened, path, &committed, expected_size)?;
+
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = reopened.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let actual_sha256: [u8; 32] = hasher.finalize().into();
+    if actual_sha256 != expected_sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel-visible whole-file SHA-256 differs from the source",
+        ));
+    }
+
+    verify_random_offset_windows(source, &reopened, expected_size, expected_sha256)?;
+
+    // Recheck both the descriptor and pathname after every read. Inode and
+    // length alone miss same-size rewrites or new hard links during readback.
+    // ctime catches a rewrite even when an actor restores the original mtime.
+    ensure_published_snapshot(&reopened, path, &committed, expected_size)
+}
+
+// Require the logical file, its reopened descriptor and its pathname to keep
+// the same metadata snapshot throughout verification. atime is deliberately
+// excluded because readback itself may update it.
+fn ensure_published_snapshot(
+    reopened: &File,
+    path: &Path,
+    committed: &Metadata,
+    expected_size: u64,
+) -> io::Result<()> {
+    let opened_metadata = reopened.metadata()?;
+    let path_metadata = path.symlink_metadata()?;
+    if committed.len() != expected_size
+        || !same_source_snapshot(committed, &opened_metadata)
+        || !same_source_snapshot(committed, &path_metadata)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "published file or pathname changed during kernel readback",
+        ));
+    }
+    Ok(())
+}
+
+// Probe boundaries, midpoint and four reproducible content-derived offsets.
+// Kept separate from the full hash so corruption tests can prove that the
+// pread path itself detects an altered middle window.
+fn verify_random_offset_windows(
+    source: &File,
+    reopened: &File,
+    expected_size: u64,
+    expected_sha256: [u8; 32],
+) -> io::Result<()> {
+    let window_len = expected_size.min(4096) as usize;
+    if window_len != 0 {
+        let maximum_offset = expected_size - window_len as u64;
+        let mut offsets = vec![0, maximum_offset / 2, maximum_offset];
+        for chunk in expected_sha256.as_chunks::<8>().0 {
+            offsets.push(u64::from_le_bytes(*chunk) % (maximum_offset + 1));
+        }
+        offsets.sort_unstable();
+        offsets.dedup();
+        let mut expected = vec![0u8; window_len];
+        let mut observed = vec![0u8; window_len];
+        for offset in offsets {
+            read_exact_at(source, &mut expected, offset)?;
+            read_exact_at(reopened, &mut observed, offset)?;
+            if expected != observed {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("kernel-visible random-offset read differs at {offset}"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> io::Result<()> {
+    while !buffer.is_empty() {
+        let count = file.read_at(buffer, offset)?;
+        if count == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        offset += count as u64;
+        buffer = &mut buffer[count..];
+    }
+    Ok(())
+}
+
+// Restore verification needs byte equality, not a second full-file digest.
+// Keep its hot path free of SHA-256 while compression verification retains a
+// digest for the independent staged and published kernel readback gates.
+fn ensure_identical_files<R1: BufRead, R2: BufRead>(lhs: R1, rhs: R2) -> io::Result<()> {
+    ensure_identical_files_impl(lhs, rhs, None)
+}
+
+fn ensure_identical_files_with_sha256<R1: BufRead, R2: BufRead>(
+    lhs: R1,
+    rhs: R2,
+) -> io::Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    ensure_identical_files_impl(lhs, rhs, Some(&mut hasher))?;
+    Ok(hasher.finalize().into())
+}
+
+fn ensure_identical_files_impl<R1: BufRead, R2: BufRead>(
+    mut lhs: R1,
+    mut rhs: R2,
+    mut hasher: Option<&mut Sha256>,
+) -> io::Result<()> {
     loop {
         let l = lhs.fill_buf()?;
         let r = rhs.fill_buf()?;
@@ -380,6 +677,9 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
                 "Files are not identical",
             ));
         }
+        if let Some(digest) = hasher.as_mut() {
+            digest.update(l);
+        }
 
         lhs.consume(min_len);
         rhs.consume(min_len)
@@ -388,11 +688,242 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_identical_files, ensure_source_path_matches_open_file};
+    use super::{
+        ensure_identical_files, ensure_published_snapshot, ensure_source_path_matches_open_file,
+        record_write_result, require_restore_capacity, verify_published_kernel_reads,
+        verify_random_offset_windows, BelowMinimumRatio,
+    };
+    use crate::progress::Task;
     use std::fs::{self, File};
-    use std::io::{BufReader, Cursor, ErrorKind};
+    use std::io::{self, BufReader, Cursor, ErrorKind};
     use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn restore_metadata_cleanup_drops_only_consumed_resource_forks() {
+        use applesauce_core::compressor::Kind;
+        use applesauce_core::decmpfs::{self, CompressionType, Storage};
+        use resource_fork::{ResourceFork, XATTR_NAME};
+        use std::io::Write;
+
+        for storage in [Storage::ResourceFork, Storage::Xattr] {
+            let staged = tempfile::NamedTempFile::new().unwrap();
+            let file = staged.as_file();
+            ResourceFork::new(file)
+                .write_all(b"generated fork bytes")
+                .unwrap();
+            assert!(crate::xattr::is_present(file, XATTR_NAME).unwrap());
+
+            super::remove_consumed_compression_metadata(
+                file,
+                CompressionType::new(Kind::Zlib, storage),
+            )
+            .unwrap();
+
+            assert_eq!(
+                crate::xattr::is_present(file, XATTR_NAME).unwrap(),
+                storage == Storage::Xattr,
+                "inline compression must preserve an unrelated resource fork"
+            );
+            assert!(!crate::xattr::is_present(file, decmpfs::XATTR_NAME).unwrap());
+        }
+    }
+
+    #[test]
+    fn staged_second_open_gate_rejects_corruption_without_touching_original() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("source");
+        let clear: Vec<u8> = (0..(3 * 65_536 + 19))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        fs::write(&original_path, &clear).unwrap();
+
+        // A NamedTempFile has a separate pathname and descriptor, as used
+        // by the writer before its persist call.
+        let staged = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        fs::write(staged.path(), &clear).unwrap();
+        let source = File::open(&original_path).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&clear).into();
+
+        verify_published_kernel_reads(
+            &source,
+            staged.as_file(),
+            staged.path(),
+            clear.len() as u64,
+            digest,
+        )
+        .unwrap();
+
+        let mut corrupted = clear.clone();
+        corrupted[65_536 + 17] ^= 0xff;
+        fs::write(staged.path(), corrupted).unwrap();
+        let error = verify_published_kernel_reads(
+            &source,
+            staged.as_file(),
+            staged.path(),
+            clear.len() as u64,
+            digest,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(fs::read(&original_path).unwrap(), clear);
+    }
+
+    #[test]
+    fn published_kernel_readback_detects_middle_chunk_corruption() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let published_path = dir.path().join("published");
+        let source_bytes: Vec<u8> = (0..(3 * 65_536 + 19)).map(|i| (i % 251) as u8).collect();
+        fs::write(&original, &source_bytes).unwrap();
+        fs::write(&published_path, &source_bytes).unwrap();
+        let source = File::open(&original).unwrap();
+        let published = File::open(&published_path).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&source_bytes).into();
+        verify_published_kernel_reads(
+            &source,
+            &published,
+            &published_path,
+            source_bytes.len() as u64,
+            digest,
+        )
+        .unwrap();
+
+        let mut corrupted = source_bytes;
+        corrupted[65_536 + 17] ^= 0xff;
+        fs::write(&published_path, &corrupted).unwrap();
+        assert_eq!(
+            verify_published_kernel_reads(
+                &source,
+                &published,
+                &published_path,
+                corrupted.len() as u64,
+                digest,
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn published_kernel_readback_rejects_swapped_path_even_when_bytes_match() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("source");
+        let published_path = dir.path().join("published");
+        let moved_path = dir.path().join("original-published-inode");
+        let bytes = vec![0x5a; 3 * 4096 + 17];
+        fs::write(&original_path, &bytes).unwrap();
+        fs::write(&published_path, &bytes).unwrap();
+        let source = File::open(&original_path).unwrap();
+        let published = File::open(&published_path).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+
+        verify_published_kernel_reads(
+            &source,
+            &published,
+            &published_path,
+            bytes.len() as u64,
+            digest,
+        )
+        .unwrap();
+
+        // The substituted file has identical content and logical length, so
+        // the opened descriptor's inode identity must reject it independently
+        // of byte hashing.
+        fs::rename(&published_path, &moved_path).unwrap();
+        fs::write(&published_path, &bytes).unwrap();
+        let error = verify_published_kernel_reads(
+            &source,
+            &published,
+            &published_path,
+            bytes.len() as u64,
+            digest,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+
+        // A symlink to the original compressed inode must also fail rather
+        // than following a pathname substituted after publication.
+        fs::remove_file(&published_path).unwrap();
+        symlink(&moved_path, &published_path).unwrap();
+        assert!(verify_published_kernel_reads(
+            &source,
+            &published,
+            &published_path,
+            bytes.len() as u64,
+            digest,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn published_snapshot_rejects_same_length_rewrite_and_new_hard_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("published");
+        let hard_link = dir.path().join("alias");
+        let original = b"generated stable publication";
+        fs::write(&path, original).unwrap();
+        let opened = File::open(&path).unwrap();
+        let committed = opened.metadata().unwrap();
+        ensure_published_snapshot(&opened, &path, &committed, original.len() as u64).unwrap();
+
+        // A second name can appear after the first snapshot even though the
+        // bytes, device, inode and logical length remain unchanged.
+        fs::hard_link(&path, &hard_link).unwrap();
+        assert_eq!(
+            ensure_published_snapshot(&opened, &path, &committed, original.len() as u64)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        fs::remove_file(&hard_link).unwrap();
+
+        // Same-length writes can also leave an identical inode and length.
+        // Force the mtime apart to make this test independent of timestamp
+        // granularity and exercise the post-read metadata check.
+        fs::write(&path, original).unwrap();
+        opened
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(12_345))
+            .unwrap();
+        assert_eq!(opened.metadata().unwrap().len(), committed.len());
+        assert_eq!(
+            ensure_published_snapshot(&opened, &path, &committed, original.len() as u64)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn random_offset_probes_reject_corruption_near_middle() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let corrupted = dir.path().join("corrupted");
+        let source_bytes = vec![0x5a; 3 * 65_536 + 19];
+        let digest: [u8; 32] = Sha256::digest(&source_bytes).into();
+        let mut changed = source_bytes.clone();
+        let maximum_offset = (source_bytes.len() - 4096) as u64;
+        changed[(maximum_offset / 2 + 17) as usize] ^= 0xff;
+        fs::write(&original, &source_bytes).unwrap();
+        fs::write(&corrupted, &changed).unwrap();
+        let original = File::open(&original).unwrap();
+        let corrupted = File::open(&corrupted).unwrap();
+        assert_eq!(
+            verify_random_offset_windows(&original, &corrupted, changed.len() as u64, digest)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
 
     #[test]
     fn publication_guard_rejects_replaced_path_and_symlink() {
@@ -517,6 +1048,29 @@ mod tests {
     }
 
     #[test]
+    fn verified_sha256_covers_each_byte_once_with_asymmetric_read_buffers() {
+        use sha2::{Digest, Sha256};
+
+        // Read buffers with incompatible capacities exercise partial consume
+        // boundaries. A byte-for-byte comparison alone cannot prove the
+        // digest used for staged and post-publication readback is accurate.
+        let bytes = generated_bytes();
+        let expected: [u8; 32] = Sha256::digest(&bytes).into();
+        for (source_capacity, compressed_capacity) in
+            [(1, 4096), (7, 65_536), (8192, 3), (1024, 1024)]
+        {
+            let source = BufReader::with_capacity(source_capacity, Cursor::new(bytes.as_slice()));
+            let staged =
+                BufReader::with_capacity(compressed_capacity, Cursor::new(bytes.as_slice()));
+            assert_eq!(
+                super::ensure_identical_files_with_sha256(source, staged).unwrap(),
+                expected,
+                "digest differed at buffer capacities {source_capacity}/{compressed_capacity}"
+            );
+        }
+    }
+
+    #[test]
     fn staged_restore_verification_rejects_corruption_and_length_changes() {
         let expected = generated_bytes();
         let mut corrupted = expected.clone();
@@ -538,5 +1092,68 @@ mod tests {
                 error_kind
             );
         }
+    }
+
+    #[test]
+    fn restoration_space_preflight_rejects_overcommit_without_overflow() {
+        // Exact fit succeeds, but even a one-byte deficit must refuse.
+        assert!(require_restore_capacity(8192, 2, 4096).is_ok());
+        let err = require_restore_capacity(8193, 2, 4096).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::StorageFull);
+        assert!(err.to_string().contains("need 8193 bytes"));
+        assert!(require_restore_capacity(1, 0, 4096).is_err());
+        assert!(require_restore_capacity(0, 0, 4096).is_ok());
+
+        // Multiply in u128, allowing realistic large logical files and free
+        // block counts without an overflowing u64 intermediate.
+        assert!(require_restore_capacity(u64::MAX, u64::MAX, 4096).is_ok());
+        assert!(require_restore_capacity(u64::MAX, 1, 4096).is_err());
+    }
+
+    #[derive(Default)]
+    struct RecordingTask(Mutex<Vec<String>>);
+
+    impl Task for RecordingTask {
+        fn increment(&self, _amount: u64) {}
+
+        fn error(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+
+    #[test]
+    fn writer_failures_are_reported_but_expected_ratio_skips_are_not() {
+        let progress = RecordingTask::default();
+        let file = Path::new("generated-file");
+
+        record_write_result(&progress, file, &Ok(()));
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::other(BelowMinimumRatio(0.95))),
+        );
+        assert!(progress.0.lock().unwrap().is_empty());
+
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "restored file verification failed",
+            )),
+        );
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "temporary file publication denied",
+            )),
+        );
+        let errors = progress.0.lock().unwrap();
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("generated-file"));
+        assert!(errors[0].contains("restored file verification failed"));
+        assert!(errors[1].contains("temporary file publication denied"));
     }
 }
