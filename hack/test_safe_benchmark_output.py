@@ -190,6 +190,30 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_post_publication_hardlink_preserves_independent_alias(self):
+        # A same-UID process may link the published inode before a failing
+        # durability barrier. Cleanup must not truncate the other pathname.
+        alias = self.root / "independent-alias.csv"
+        real_fsync = os.fsync
+        injected = False
+
+        def link_then_fail(fd):
+            nonlocal injected
+            if not injected and self.output.exists():
+                injected = True
+                os.link(self.output, alias)
+                raise OSError("injected directory sync failure")
+            return real_fsync(fd)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fsync", side_effect=link_then_fail):
+                with self.assertRaisesRegex(OSError, "directory sync failure"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(injected)
+        with alias.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), self.rows)
+        self.assertEqual(self.input.read_text(), "source evidence")
+
     def test_failed_atomic_replace_cleans_temporary_without_publishing(self):
         # A rename refusal must not leave a plausible upload artifact or
         # abandon a partially completed temporary CSV.
