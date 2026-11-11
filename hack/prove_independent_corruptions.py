@@ -104,6 +104,8 @@ def check_corruptions(archive, original, decoder, *, codec,
                 verify_with_budget(path)
             except (InvalidArchive, OSError) as exc:
                 message = str(exc)
+                if "negative proof suite exceeded total time budget" in message:
+                    raise
                 if "timed out" in message or "time budget" in message:
                     raise InvalidArchive(
                         f"{name} decoder timeout cannot qualify as corruption rejection"
