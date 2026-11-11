@@ -123,3 +123,14 @@ promptly. Four durable Apple-generated differential vectors are now committed
 under `tests/fixtures/codec-crossdecode/` and replayed with the pinned C11
 decoder on Linux before the native macOS proof job is allocated. The independent
 source/evidence review and PR approval gates remain in force.
+
+## Private decoder executable snapshot
+
+The verifier copies the selected independently built C11 executable into a
+private mode-0700 temporary directory, limits the executable to 32 MiB, records
+its SHA-256, and invokes only the mode-0500 copy for every decoded chunk.
+It rechecks both original and copied binaries after verification and removes
+the private copy on success or failure. This prevents a temporary replacement
+of the caller-selected executable pathname from changing which implementation
+is run between the initial provenance check and chunk execution. A passing
+proof still requires review of the pinned C11 source and the native CI output.
