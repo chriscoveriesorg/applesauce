@@ -12,6 +12,12 @@ use std::sync::{Arc, Mutex};
 // file replacement can change the containing directory's timestamps.
 type ResetFailures = Arc<Mutex<Vec<(PathBuf, String)>>>;
 
+// Inspect the selected pathname itself: following a symlink here would
+// incorrectly treat a link to a regular file as a direct file root.
+fn is_direct_regular_file(path: &Path) -> io::Result<bool> {
+    path.symlink_metadata().map(|metadata| metadata.is_file())
+}
+
 fn checked_resetter(
     directory: &Path,
     setup: io::Result<times::Resetter>,
@@ -108,8 +114,8 @@ impl<'a, P: Progress + Send + Sync> Walker<'a, P> {
             // callback, so it cannot inherit the directory resetter installed
             // for files found inside directory roots. Capture its parent here
             // before queueing any writer, and fail closed on capture errors.
-            let direct_file = match path.symlink_metadata() {
-                Ok(metadata) => metadata.file_type().is_file(),
+            let direct_file = match is_direct_regular_file(path) {
+                Ok(is_regular) => is_regular,
                 Err(error) => {
                     self.progress
                         .error(path, &format!("unable to inspect selected root: {error}"));
@@ -186,10 +192,28 @@ impl<'a, P: Progress + Send + Sync> Walker<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use super::checked_resetter;
+    use super::{checked_resetter, is_direct_regular_file};
     use std::io;
+    use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::sync::Mutex;
+
+    #[test]
+    fn explicit_root_classification_never_follows_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let regular = dir.path().join("regular.txt");
+        std::fs::write(&regular, b"generated fixture").unwrap();
+        let link = dir.path().join("link-to-regular.txt");
+        symlink(&regular, &link).unwrap();
+        let dangling = dir.path().join("dangling-link");
+        symlink(dir.path().join("absent"), &dangling).unwrap();
+
+        assert!(is_direct_regular_file(&regular).unwrap());
+        assert!(!is_direct_regular_file(dir.path()).unwrap());
+        assert!(!is_direct_regular_file(&link).unwrap());
+        assert!(!is_direct_regular_file(&dangling).unwrap());
+        assert!(is_direct_regular_file(&dir.path().join("missing")).is_err());
+    }
 
     #[test]
     fn failed_parent_timestamp_capture_is_a_visible_error_and_has_no_resetter() {
