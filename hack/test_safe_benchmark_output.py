@@ -297,6 +297,30 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
 
+    def test_exclusive_publish_refuses_concurrent_hardlink_to_source(self):
+        # A same-UID writer can hardlink protected source evidence into the
+        # destination after preflight. The exclusive link must fail without
+        # deleting the competing entry or changing either inode's bytes.
+        real_link = os.link
+        injected = False
+
+        def install_hardlink_before_publish(src, dst, *args, **kwargs):
+            nonlocal injected
+            if dst == self.output.name and kwargs.get("dst_dir_fd") is not None:
+                injected = True
+                real_link(self.input, self.output)
+            return real_link(src, dst, *args, **kwargs)
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.link", side_effect=install_hardlink_before_publish):
+                with self.assertRaises(FileExistsError):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(injected)
+        self.assertTrue(os.path.samefile(self.output, self.input))
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "source evidence")
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+
     def test_failed_exclusive_link_cleans_temporary_without_publishing(self):
         real_link = os.link
         attempted = False
