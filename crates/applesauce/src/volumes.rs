@@ -45,8 +45,7 @@ impl StagingDirectory {
     }
 
     fn on_volume(parent: &Path, errors: times::ResetFailureLog) -> io::Result<Self> {
-        let parent_resetter =
-            times::Resetter::capture_with_failure_log(parent, Arc::clone(&errors))?;
+        let parent_resetter = times::Resetter::capture_with_failure_log(parent, Arc::clone(&errors))?;
         // Even a failed scratch creation may have modified the parent.
         parent_resetter.activate();
         let temp_dir = TempDir::with_prefix_in(TEMPDIR_PREFIX, parent)?;
@@ -207,10 +206,8 @@ impl Volumes {
                 };
                 let compression_support = vol_with_file_supports_compression(path)?;
                 let volume_info = if compression_support {
-                    let temp_dir = StagingDirectory::on_volume(
-                        tempdir_parent,
-                        self.timestamp_errors(),
-                    )?;
+                    let temp_dir =
+                        StagingDirectory::on_volume(tempdir_parent, self.timestamp_errors())?;
                     self.tmp_dirs.insert(temp_dir.path().into());
                     VolumeInfo::SupportsCompression {
                         temp_dir: Some(temp_dir),
@@ -312,8 +309,40 @@ mod staging_parent_tests {
         assert_eq!(fs::metadata(&parent).unwrap().modified().unwrap(), expected);
         let errors = errors.lock().unwrap();
         assert_eq!(errors.len(), 2);
-        assert!(errors.iter().any(|(_, message)| message.contains("unable to remove staging directory")));
-        assert!(errors.iter().any(|(_, message)| message.contains("parent directory changed")));
+        assert!(errors
+            .iter()
+            .any(|(_, message)| message.contains("unable to remove staging directory")));
+        assert!(errors
+            .iter()
+            .any(|(_, message)| message.contains("parent directory changed")));
+    }
+
+
+    #[test]
+    fn volume_finish_waits_for_scratch_cleanup_and_timestamp_restore() {
+        use super::{StagingDirectory, VolumeInfo, Volumes};
+        use std::fs;
+        use std::time::{Duration, SystemTime};
+
+        let root = tempfile::tempdir().unwrap();
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_690_200_000);
+        fs::File::open(root.path()).unwrap().set_modified(old).unwrap();
+        let expected = fs::metadata(root.path()).unwrap().modified().unwrap();
+        let mut volumes = Volumes::new();
+        let errors = volumes.timestamp_errors();
+        let scratch = StagingDirectory::on_volume(root.path(), errors.clone()).unwrap();
+        let scratch_path = scratch.path().to_path_buf();
+        volumes.infos.insert(
+            u64::MAX,
+            VolumeInfo::SupportsCompression {
+                temp_dir: Some(scratch),
+            },
+        );
+        assert!(scratch_path.exists());
+        volumes.finish();
+        assert!(!scratch_path.exists());
+        assert_eq!(fs::metadata(root.path()).unwrap().modified().unwrap(), expected);
+        assert!(errors.lock().unwrap().is_empty());
     }
 
     #[test]
