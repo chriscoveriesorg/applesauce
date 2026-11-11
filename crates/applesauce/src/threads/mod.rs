@@ -59,13 +59,14 @@ impl OperationContext {
         volumes: Volumes,
         verify: bool,
     ) -> Self {
+        let directory_timestamp_errors = volumes.timestamp_errors();
         Self {
             mode,
             stats: Stats::default(),
             finished_stats,
             volumes,
             verify,
-            directory_timestamp_errors: Arc::new(Mutex::new(Vec::new())),
+            directory_timestamp_errors,
         }
     }
 
@@ -76,6 +77,11 @@ impl OperationContext {
 
 impl Drop for OperationContext {
     fn drop(&mut self) {
+        // Last file context has completed its parent reset before releasing
+        // the operation Arc. Remove all on-volume scratch directories, then
+        // restore their parent timestamps and record cleanup failures before
+        // waking the caller to drain the shared error ledger.
+        self.volumes.finish();
         let stats = mem::take(&mut self.stats);
         let _ = self.finished_stats.send(stats);
     }
