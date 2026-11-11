@@ -225,13 +225,13 @@ class IndependentMeshProofTests(unittest.TestCase):
         # With RLIMIT_FSIZE == clear_len this once returned success:
         # the decoder swallowed EFBIG after writing the exact good prefix.
         self.decoder.write_text(
-            "#!/usr/bin/env python3\\n"
-            "import os,signal,sys\\n"
-            "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\\n"
-            "payload = sys.stdin.buffer.read()\\n"
-            "os.write(1, payload)\\n"
-            "try: os.write(1, b'X')\\n"
-            "except OSError: pass\\n",
+            "#!/usr/bin/env python3\n"
+            "import os,signal,sys\n"
+            "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+            "payload = sys.stdin.buffer.read()\n"
+            "os.write(1, payload)\n"
+            "try: os.write(1, b'X')\n"
+            "except OSError: pass\n",
             encoding="utf-8",
         )
         with self.assertRaisesRegex(InvalidArchive, "incorrect bytes/length"):
