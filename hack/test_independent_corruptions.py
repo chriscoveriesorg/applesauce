@@ -7,6 +7,7 @@ closed. The macOS workflows use pinned independent C11 decoders instead.
 import hashlib
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import struct
 import tempfile
 import unittest
@@ -178,6 +179,120 @@ class NegativeProofTests(unittest.TestCase):
                     check_corruptions(
                         self.archive, self.original, self.decoder, codec="lzmesh"
                     )
+
+
+    def test_rejects_invalid_negative_suite_budget(self):
+        self.make_fixture("lzmesh")
+        for invalid in (0, -1, float("nan"), 3601):
+            with self.subTest(value=invalid):
+                with self.assertRaisesRegex(InvalidArchive, "negative suite time budget"):
+                    check_corruptions(
+                        self.archive, self.original, self.decoder,
+                        codec="lzmesh", total_timeout_seconds=invalid,
+                    )
+
+    def test_decoder_timeout_never_qualifies_as_corruption_rejection(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+
+        calls = 0
+
+        def timeout_on_corruption(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_verify(*args, **kwargs)
+            raise InvalidArchive("independent decoder timed out on chunk 0")
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=timeout_on_corruption):
+            with self.assertRaisesRegex(
+                InvalidArchive, "decoder timeout cannot qualify"
+            ):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 2)
+
+    def test_negative_suite_passes_only_remaining_decoder_budget(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+
+        now = [100.0]
+        seen = []
+
+        def paced_verify(*args, **kwargs):
+            seen.append(kwargs["total_timeout_seconds"])
+            result = real_verify(*args, **kwargs)
+            if len(seen) == 1:
+                now[0] = 115.0
+            return result
+
+        clock = SimpleNamespace(monotonic=lambda: now[0])
+        with mock.patch("prove_independent_corruptions.time", clock):
+            with mock.patch("prove_independent_corruptions.verify",
+                            side_effect=paced_verify):
+                result = check_corruptions(
+                    self.archive, self.original, self.decoder,
+                    codec="lzmesh", total_timeout_seconds=20,
+                )
+        self.assertEqual(result["case_count"], 5)
+        self.assertEqual(result["suite_timeout_seconds"], 20)
+        self.assertEqual(len(seen), 6)
+        self.assertEqual(seen[0], 20)
+        self.assertTrue(all(value == 5 for value in seen[1:]))
+
+    def test_deadline_exhaustion_during_last_negative_check_fails_suite(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+
+        now = [100.0]
+        calls = 0
+
+        def expire_on_last_check(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            try:
+                return real_verify(*args, **kwargs)
+            finally:
+                if calls == 6:
+                    now[0] = 300.0
+
+        clock = SimpleNamespace(monotonic=lambda: now[0])
+        with mock.patch("prove_independent_corruptions.time", clock):
+            with mock.patch("prove_independent_corruptions.verify",
+                            side_effect=expire_on_last_check):
+                with self.assertRaisesRegex(
+                    InvalidArchive, "negative proof suite exceeded total time budget"
+                ):
+                    check_corruptions(
+                        self.archive, self.original, self.decoder,
+                        codec="lzmesh", total_timeout_seconds=180,
+                    )
+        self.assertEqual(calls, 6)
+
+    def test_parser_corruption_must_fail_its_intended_gate(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+
+        calls = 0
+
+        def fail_wrong_gate(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 4:  # Baseline, two payload flips, index digest.
+                raise InvalidArchive("unrelated failure")
+            return real_verify(*args, **kwargs)
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=fail_wrong_gate):
+            with self.assertRaisesRegex(
+                AssertionError, "index_digest failed outside expected parser gate"
+            ):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 4)
 
 
 if __name__ == "__main__":
