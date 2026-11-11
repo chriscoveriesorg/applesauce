@@ -332,7 +332,7 @@ class NegativeProofTests(unittest.TestCase):
             finally:
                 if calls == 6:
                     with self.decoder.open("a", encoding="utf-8") as stream:
-                        stream.write("\\n# decoder changed after baseline\\n")
+                        stream.write("\n# decoder changed after baseline\n")
 
         with mock.patch("prove_independent_corruptions.verify",
                         side_effect=change_decoder_on_final_case):
