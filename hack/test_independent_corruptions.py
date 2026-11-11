@@ -473,6 +473,53 @@ class NegativeProofTests(unittest.TestCase):
                 )
         self.assertEqual(calls, 6)
 
+    def test_archive_rewrite_after_negative_cases_invalidates_proof(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+        calls = 0
+
+        def tamper_after_last_case(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            try:
+                return real_verify(*args, **kwargs)
+            finally:
+                if calls == 6:
+                    with self.archive.open("ab") as stream:
+                        stream.write(b"late archive tampering")
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=tamper_after_last_case):
+            with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 6)
+
+    def test_archive_replacement_after_negative_cases_invalidates_proof(self):
+        self.make_fixture("lzmesh")
+        replacement = self.root / "replacement-late.ascf"
+        replacement.write_bytes(self.archive.read_bytes())
+        from prove_independent_corruptions import verify as real_verify
+        calls = 0
+
+        def replace_after_last_case(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            try:
+                return real_verify(*args, **kwargs)
+            finally:
+                if calls == 6:
+                    os.replace(replacement, self.archive)
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=replace_after_last_case):
+            with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 6)
+
     def test_original_rewrite_after_negative_cases_invalidates_proof(self):
         self.make_fixture("lzmesh")
         from prove_independent_corruptions import verify as real_verify
