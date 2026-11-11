@@ -80,17 +80,19 @@ def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds
     # test tool accepts filenames and a strict --cap argument. Keep both
     # decoders isolated from the real source file and bound their outputs.
     with tempfile.TemporaryDirectory(prefix="ascf-independent-") as directory:
+        # Give the external decoder a regular, private input file instead of
+        # a pipe. On timeout, an escaped grandchild holding a pipe descriptor
+        # open can otherwise make communicate() block forever after killpg().
+        # A regular file has no pipe writer/reader lifetime to await.
+        input_path = Path(directory) / "payload.bin"
+        input_path.write_bytes(payload)
         if codec == "lzraven":
-            input_path = Path(directory) / "payload.rav"
             output_path = Path(directory) / "decoded.bin"
-            input_path.write_bytes(payload)
             command = [
                 str(decoder), "--cap", str(clear_len), str(input_path), str(output_path)
             ]
-            stdin_payload = None
         else:
             command = [str(decoder), "dec", "e05"]
-            stdin_payload = payload
 
         # The pinned Mesh port_cli otherwise allocates the decoded size
         # advertised by *untrusted compressed framing*. Its DECODE_SIZE
@@ -110,13 +112,14 @@ def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds
         if codec == "lzmesh":
             decoder_env["DECODE_SIZE"] = str(clear_len)
 
-        with tempfile.TemporaryFile() as output:
-            # Run each external decoder in its own process group. subprocess.run()
-            # kills only the direct child on timeout, leaving any forked helpers
-            # behind on CI. A session boundary lets us reap the whole group.
+        with open_regular(input_path) as input_file, tempfile.TemporaryFile() as output:
+            # Run each external decoder in its own process group and kill any
+            # same-group descendants before releasing its temporary input.
+            # wait() observes only the direct child. It cannot hang waiting
+            # for an escaped descendant to close an inherited stdin pipe.
             process = subprocess.Popen(
                 command,
-                stdin=subprocess.PIPE if stdin_payload is not None else subprocess.DEVNULL,
+                stdin=input_file if codec == "lzmesh" else subprocess.DEVNULL,
                 stdout=output if codec == "lzmesh" else subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env=decoder_env,
@@ -126,23 +129,18 @@ def decode_bounded(decoder, payload, clear_len, index, codec, *, timeout_seconds
             )
             timeout_error = None
             try:
-                process.communicate(input=stdin_payload, timeout=timeout_seconds)
+                process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired as exc:
                 timeout_error = exc
             finally:
-                # Also clean up descendants when their parent exits successfully
-                # or fails. This is best-effort process-group cleanup, not an
-                # isolation boundary against a malicious self-daemonizing tool.
+                # Best-effort process-group cleanup. A malicious self-daemonized
+                # descendant can escape the group, but cannot hold our proof
+                # process open through a pipe because no pipe is passed.
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                if timeout_error is not None:
-                    # Python explicitly requires a second communicate() after
-                    # TimeoutExpired to finish cleaning up its pipe state.
-                    process.communicate()
-                else:
-                    process.wait()
+                process.wait()
             if timeout_error is not None:
                 raise InvalidArchive(
                     f"independent decoder timed out on chunk {index}"
