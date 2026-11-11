@@ -356,6 +356,19 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(), "source evidence")
 
+    def test_predictable_temporary_name_collision_preserves_existing_evidence(self):
+        # Even if a staging filename is guessed or reused, O_EXCL must
+        # reject it before opening the file for writing or publishing.
+        occupied = self.evidence / (".comparison.csv." + "ab" * 16 + ".tmp")
+        occupied.write_text("independent temporary evidence", encoding="utf-8")
+        with patch("safe_benchmark_output.secrets.token_hex", return_value="ab" * 16):
+            with SafeCsvOutput(self.output, (self.input,)) as publisher:
+                with self.assertRaises(FileExistsError):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertEqual(occupied.read_text(encoding="utf-8"), "independent temporary evidence")
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_temporary_file_sync_failure_never_publishes(self):
         # A failed file durability barrier must not publish an unverified
         # CSV, even if its rows have already been written successfully.
