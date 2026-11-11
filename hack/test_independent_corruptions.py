@@ -295,5 +295,77 @@ class NegativeProofTests(unittest.TestCase):
         self.assertEqual(calls, 4)
 
 
+    def test_payload_case_rejects_unrelated_decoder_provenance_failure(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+
+        calls = 0
+
+        def unrelated_failure(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_verify(*args, **kwargs)
+            raise InvalidArchive("independent decoder binary changed during proof")
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=unrelated_failure):
+            with self.assertRaisesRegex(
+                AssertionError, "payload_one_third failed outside decoder result gate"
+            ):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 2)
+
+    def test_decoder_rewrite_after_negative_cases_invalidates_proof(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+
+        calls = 0
+
+        def change_decoder_on_final_case(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            try:
+                return real_verify(*args, **kwargs)
+            finally:
+                if calls == 6:
+                    with self.decoder.open("a", encoding="utf-8") as stream:
+                        stream.write("\\n# decoder changed after baseline\\n")
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=change_decoder_on_final_case):
+            with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 6)
+
+    def test_original_rewrite_after_negative_cases_invalidates_proof(self):
+        self.make_fixture("lzmesh")
+        from prove_independent_corruptions import verify as real_verify
+
+        calls = 0
+
+        def change_original_on_final_case(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            try:
+                return real_verify(*args, **kwargs)
+            finally:
+                if calls == 6:
+                    with self.original.open("ab") as stream:
+                        stream.write(b"unexpected mutation")
+
+        with mock.patch("prove_independent_corruptions.verify",
+                        side_effect=change_original_on_final_case):
+            with self.assertRaisesRegex(InvalidArchive, "proof input changed"):
+                check_corruptions(
+                    self.archive, self.original, self.decoder, codec="lzmesh"
+                )
+        self.assertEqual(calls, 6)
+
+
 if __name__ == "__main__":
     unittest.main()
