@@ -17,10 +17,12 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 MAGIC = b"ASCF0001"
 CODECS = {"lzmesh": 0xE05, "lzraven": 0xD05}
 MAX_LOGICAL = 64 * 1024 * 1024
+DEFAULT_TOTAL_DECODE_TIMEOUT_SECONDS = 120.0
 
 
 class InvalidArchive(ValueError):
@@ -166,7 +168,8 @@ def read_exact(stream, size):
     return data
 
 
-def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_LOGICAL):
+def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_LOGICAL,
+           total_timeout_seconds=DEFAULT_TOTAL_DECODE_TIMEOUT_SECONDS):
     """Verify strict ASCF geometry, independent decode and original-byte hashes."""
     if codec not in CODECS:
         raise InvalidArchive(f"unsupported independent codec: {codec}")
@@ -183,6 +186,8 @@ def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_
     require_unchanged(decoder, decoder_snapshot)
     if max_logical_bytes <= 0:
         raise InvalidArchive("maximum logical fixture size must be positive")
+    if not 0 < total_timeout_seconds <= 3600:
+        raise InvalidArchive("total decoder time budget must be between 0 and 3600 seconds")
 
     with open_regular(archive) as reader, open_regular(original) as source:
         archive_snapshot = identity(os.fstat(reader.fileno()))
@@ -237,6 +242,9 @@ def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_
         if next_offset != file_size or remaining:
             raise InvalidArchive("ASCF payload has trailing, overlapping or missing data")
 
+        # A per-chunk timeout alone can permit 1024 chunks * 30 seconds of
+        # stalled decoder work. Bound the entire proof using a monotonic clock.
+        deadline = time.monotonic() + total_timeout_seconds
         original_hash = hashlib.sha256()
         independent_hash = hashlib.sha256()
         for index, (offset, stored_len, clear_len, digest) in enumerate(entries):
@@ -246,7 +254,13 @@ def verify(archive, original, decoder, *, codec="lzmesh", max_logical_bytes=MAX_
             original_hash.update(clear)
             if hashlib.sha256(clear).digest() != digest:
                 raise InvalidArchive(f"original chunk {index} differs from ASCF chunk digest")
-            decoded = decode_bounded(decoder, payload, clear_len, index, requested_codec)
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise InvalidArchive("independent decoder exceeded total time budget")
+            decoded = decode_bounded(
+                decoder, payload, clear_len, index, requested_codec,
+                timeout_seconds=min(30, remaining_seconds),
+            )
             if len(decoded) != clear_len or decoded != clear:
                 raise InvalidArchive(f"independent decoder returned incorrect bytes/length at chunk {index}")
             if hashlib.sha256(decoded).digest() != digest:
@@ -289,12 +303,15 @@ def main(argv=None):
     parser.add_argument("--decoder", required=True, type=Path)
     parser.add_argument("--codec", choices=sorted(CODECS), default="lzmesh")
     parser.add_argument("--max-logical-bytes", type=int, default=MAX_LOGICAL)
+    parser.add_argument("--total-timeout-seconds", type=float,
+                        default=DEFAULT_TOTAL_DECODE_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
     try:
         report = verify(
             args.archive, args.original, args.decoder,
             codec=args.codec,
             max_logical_bytes=args.max_logical_bytes,
+            total_timeout_seconds=args.total_timeout_seconds,
         )
     except (OSError, InvalidArchive) as exc:
         print(f"independent ASCF proof failed: {exc}", file=sys.stderr)
