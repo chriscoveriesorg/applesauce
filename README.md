@@ -193,7 +193,9 @@ executable extensions (including compiled AppleScript and bytecode), regular
 files with executable permission bits, Mach-O/fat binaries, ELF/PE images
 and shebang scripts detected from a four-byte header. Code-hosting Resources
 subtrees such as `Frameworks`, `PlugIns`, `XPCServices` and `Helpers` are
-pruned even when their contents lack bundle extensions. Excluded
+pruned even when their contents lack bundle extensions. The bundles audit also
+prunes enclosing signed containers (for example, a framework or plugin that
+contains a nested `.app`) before enumerating their descendants. Excluded
 code/signature directories are recorded as skipped subtree roots without
 opening or enumerating their descendants, including unreadable directories.
 Parents leading to eligible Resources or Caches remain traversable. Skipped
