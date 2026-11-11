@@ -71,6 +71,11 @@ fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
             let Some(app_index) = parts.iter().position(|part| ascii_suffix(part, b".app")) else {
                 return Some("outside_app_bundle");
             };
+            // A nested app inside an unrelated signed framework or plugin
+            // cannot be treated as an independent resource audit target.
+            if parts[..app_index].iter().any(|part| code_container(part)) {
+                return Some("bundle_nested_code_or_signature");
+            }
             if parts.get(app_index + 1).copied() != Some(OsStr::new("Contents"))
                 || parts.get(app_index + 2).copied() != Some(OsStr::new("Resources"))
                 || parts.len() <= app_index + 3
@@ -201,7 +206,14 @@ fn profile_directory_exclusion(profile: Profile, path: &Path) -> Option<&'static
             .any(|part| code_container(part))
             .then_some("cache_contains_code_bundle"),
         Profile::Bundles => {
-            let app_index = parts.iter().position(|part| ascii_suffix(part, b".app"))?;
+            let app_index = parts.iter().position(|part| ascii_suffix(part, b".app"));
+            // Stop at the outermost signed container, including when it
+            // contains a nested .app. Do this before opening its descendants.
+            let prefix_end = app_index.unwrap_or(parts.len());
+            if parts[..prefix_end].iter().any(|part| code_container(part)) {
+                return Some("bundle_nested_code_or_signature");
+            }
+            let app_index = app_index?;
             let within_app = &parts[app_index + 1..];
             if within_app.is_empty() {
                 return None;
@@ -1433,6 +1445,57 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn bundle_audit_prunes_enclosing_signed_containers_without_enumeration() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let apps = temp.path().join("Applications");
+        let framework = apps.join("Outer.framework");
+        let hidden = framework.join("Versions/A/Helper.app/Contents/Resources/data.bin");
+        let visible = apps.join("Visible.app/Contents/Resources/data.strings");
+        fs::create_dir_all(hidden.parent().unwrap()).unwrap();
+        fs::create_dir_all(visible.parent().unwrap()).unwrap();
+        fs::write(&hidden, b"nested signed code data").unwrap();
+        fs::write(&visible, b"ordinary resource data").unwrap();
+
+        assert_eq!(
+            profile_exclusion(Profile::Bundles, &hidden),
+            Some("bundle_nested_code_or_signature")
+        );
+        assert_eq!(
+            profile_directory_exclusion(Profile::Bundles, &framework),
+            Some("bundle_nested_code_or_signature")
+        );
+        assert_eq!(
+            profile_directory_exclusion(Profile::Bundles, hidden.parent().unwrap()),
+            Some("bundle_nested_code_or_signature")
+        );
+
+        // The enclosing framework must be classified using its directory
+        // entry alone: unreadable descendants must never be enumerated.
+        fs::set_permissions(&framework, fs::Permissions::from_mode(0o000)).unwrap();
+        let audit = analyze_with_profile(&[apps], Kind::Zlib, 0.95, 5, Some(Profile::Bundles));
+        fs::set_permissions(&framework, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(audit.complete, "excluded framework must not fail the audit");
+        let excluded = audit
+            .paths
+            .iter()
+            .find(|entry| entry.path.display == framework.to_string_lossy())
+            .unwrap();
+        assert_eq!(excluded.entry_type, "directory");
+        assert_eq!(excluded.reason, "bundle_nested_code_or_signature");
+        assert_eq!(excluded.raw_compressed_bytes, None);
+        assert!(!audit
+            .paths
+            .iter()
+            .any(|entry| entry.path.display == hidden.to_string_lossy()));
+        assert!(audit
+            .paths
+            .iter()
+            .any(|entry| entry.path.display == visible.to_string_lossy()));
     }
 
     #[test]
