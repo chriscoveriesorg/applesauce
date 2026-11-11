@@ -96,8 +96,13 @@ An exhausted shared budget fails even if the final case was otherwise rejected.
 
 The independent decoder's output file limit permits one extra sentinel byte,
 so an executable that ignores `SIGXFSZ` cannot qualify by silently discarding
-attempted excess output. After all negative cases, archive identity and its
-complete SHA-256 are rechecked alongside the original plaintext and decoder.
+attempted excess output. The suite snapshots the original plaintext (64 MiB cap)
+and independent executable (32 MiB cap) **once** into private files. Both the
+clean baseline and every mutated archive use those same pinned inputs, closing
+the transient decoder-substitution gap between proof invocations. Snapshot and
+verification work share the suite's monotonic deadline. After all negative
+cases, archive identity and complete SHA-256 are rechecked along with the
+original caller-supplied plaintext and executable identities and hashes.
 
 The macOS proof workflow runs nine cases on each generated content
 family at the 131,103-byte three-chunk boundary (18 negative cases per codec).
