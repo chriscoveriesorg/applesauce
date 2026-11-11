@@ -50,7 +50,11 @@ The concatenated bytes must match the archive's whole-file SHA-256.
 Final-component symlinks are rejected, including substitutions pointing
 to the same open inode. Source archive, original and executable identity changes fail verification;
 the executable is hashed before and after proof. Decoder operations time out
-after 30 seconds each, and total fixture size is bounded to 64 MiB by default.
+after 30 seconds each. An additional 120-second monotonic deadline caps the
+entire fixture's decoder invocations, preventing a many-chunk archive from
+multiplying per-chunk timeouts indefinitely. A reviewer may adjust this with
+`--total-timeout-seconds` up to 3600 seconds. Total fixture size is bounded
+to 64 MiB by default.
 Each decoder runs in a new POSIX session; the harness kills its process group
 on successful exit, error or timeout, to reap normal forked helpers. This
 is best-effort lifecycle cleanup rather than a sandbox against code that
