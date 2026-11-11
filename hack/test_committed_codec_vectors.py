@@ -1,8 +1,15 @@
 """Portable integrity checks for committed genuine Apple-generated ASCF vectors."""
 
+import os
+from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
-from prove_committed_vectors import FIXTURES, VECTORS, plaintext, run, validate_vector
+from prove_committed_vectors import (
+    FIXTURES, VECTORS, load_committed_vector, plaintext, run, validate_vector,
+)
+from verify_independent_lzmesh import InvalidArchive
 
 
 class CommittedVectorTests(unittest.TestCase):
@@ -32,6 +39,38 @@ class CommittedVectorTests(unittest.TestCase):
     def test_decoder_requires_explicit_codec(self):
         with self.assertRaisesRegex(ValueError, "requires --codec"):
             run(decoder="/does-not-exist")
+
+    def test_fixture_loader_rejects_oversized_local_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selected = Path(tmp) / "oversize.ascf"
+            selected.write_bytes(b"A" * 128)
+            with mock.patch("prove_committed_vectors.MAX_COMMITTED_ARCHIVE_BYTES", 64):
+                with self.assertRaisesRegex(ValueError, "exceeds bounded fixture size"):
+                    load_committed_vector(selected)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFOs")
+    def test_fixture_loader_rejects_fifo_without_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selected = Path(tmp) / "untrusted.fifo"
+            os.mkfifo(selected)
+            with self.assertRaisesRegex(InvalidArchive, "regular file"):
+                load_committed_vector(selected)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires POSIX symlinks")
+    def test_fixture_loader_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "original.ascf"
+            original.write_bytes(b"ASCF0001")
+            selected = Path(tmp) / "link.ascf"
+            selected.symlink_to(original)
+            with self.assertRaises((InvalidArchive, OSError)):
+                load_committed_vector(selected)
+
+    def test_fixture_loader_preserves_exact_vector_bytes(self):
+        codec, size = next(iter(VECTORS))
+        selected = FIXTURES / f"{codec}-records-{size}.ascf"
+        self.assertEqual(load_committed_vector(selected), selected.read_bytes())
+
 
 
 if __name__ == "__main__":
