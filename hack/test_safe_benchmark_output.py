@@ -117,7 +117,7 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(protected_output.read_text(), "never overwrite")
         # A failed publication must not leave a plausible CSV in the
         # displaced directory, even though the protected path is untouched.
-        self.assertFalse((moved / self.output.name).exists())
+        self.assertEqual((moved / self.output.name).stat().st_size, 0)
         self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
 
     def test_missing_directory_after_publication_cleans_anchored_csv(self):
@@ -126,7 +126,7 @@ class SafeOutputTests(unittest.TestCase):
             self.evidence.rename(moved)
             with self.assertRaises(FileNotFoundError):
                 publisher.write_rows(self.rows, ("codec", "value"))
-        self.assertFalse((moved / self.output.name).exists())
+        self.assertEqual((moved / self.output.name).stat().st_size, 0)
         self.assertEqual(list(moved.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
@@ -154,11 +154,9 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
-    @unittest.expectedFailure
     def test_same_uid_replacement_between_cleanup_stat_and_unlink_survives(self):
-        # Known race: stat and unlink are separate pathname operations.
-        # This expected failure must become a passing test before merge;
-        # it does NOT establish safety while marked expectedFailure.
+        # A concurrent pathname substitution must survive failed-publication
+        # invalidation, which operates on an already-open inode.
         replacement = self.root / "independent.csv"
         replacement.write_text("independent evidence", encoding="utf-8")
         real_fsync = os.fsync
