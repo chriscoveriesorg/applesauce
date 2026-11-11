@@ -109,7 +109,13 @@ class SafeCsvOutput:
             0o600, dir_fd=self.directory,
         )
         try:
-            with os.fdopen(fd, "w", newline="", encoding="utf-8") as stream:
+            try:
+                stream = os.fdopen(fd, "w", newline="", encoding="utf-8")
+            except BaseException:
+                # fdopen may fail before taking ownership of the raw fd.
+                os.close(fd)
+                raise
+            with stream:
                 writer = csv.DictWriter(stream, fieldnames=fields)
                 writer.writeheader()
                 writer.writerows(rows)
