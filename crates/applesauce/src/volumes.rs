@@ -45,7 +45,8 @@ impl StagingDirectory {
     }
 
     fn on_volume(parent: &Path, errors: times::ResetFailureLog) -> io::Result<Self> {
-        let parent_resetter = times::Resetter::capture_with_failure_log(parent, Arc::clone(&errors))?;
+        let parent_resetter =
+            times::Resetter::capture_with_failure_log(parent, Arc::clone(&errors))?;
         // Even a failed scratch creation may have modified the parent.
         parent_resetter.activate();
         let temp_dir = TempDir::with_prefix_in(TEMPDIR_PREFIX, parent)?;
@@ -264,7 +265,6 @@ mod staging_parent_tests {
     use super::staging_parent_for_file;
     use std::path::Path;
 
-
     #[test]
     fn external_volume_scratch_restores_parent_after_cleanup() {
         use super::StagingDirectory;
@@ -316,7 +316,6 @@ mod staging_parent_tests {
             .iter()
             .any(|(_, message)| message.contains("parent directory changed")));
     }
-
 
     #[test]
     fn volume_finish_waits_for_scratch_cleanup_and_timestamp_restore() {
