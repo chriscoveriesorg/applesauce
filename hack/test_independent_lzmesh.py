@@ -50,6 +50,45 @@ class IndependentMeshProofTests(unittest.TestCase):
         self.assertEqual(report["codec_id"], "0xE05")
         self.assertEqual(report["original_sha256"], hashlib.sha256(self.plaintext).hexdigest())
 
+    def test_decoder_execution_uses_private_authenticated_copy(self):
+        observed = []
+
+        def inspect_private(executable, payload, *_args, **_kwargs):
+            executable = Path(executable)
+            observed.append(executable)
+            self.assertNotEqual(executable, self.decoder)
+            self.assertNotEqual(executable.parent, self.decoder.parent)
+            self.assertEqual(executable.read_bytes(), self.decoder.read_bytes())
+            self.assertEqual(executable.stat().st_mode & 0o222, 0)
+            return payload
+
+        with mock.patch("verify_independent_lzmesh.decode_bounded",
+                        side_effect=inspect_private):
+            report = verify(self.archive, self.original, self.decoder)
+        self.assertEqual(report["chunk_count"], 1)
+        self.assertEqual(len(observed), 1)
+        self.assertFalse(observed[0].exists(), "private decoder was not cleaned up")
+
+    def test_private_decoder_tampering_invalidates_proof(self):
+        def corrupt_private(executable, payload, *_args, **_kwargs):
+            executable = Path(executable)
+            executable.chmod(0o700)
+            executable.write_bytes(executable.read_bytes() + b"\n# tampered\n")
+            return payload
+
+        with mock.patch("verify_independent_lzmesh.decode_bounded",
+                        side_effect=corrupt_private):
+            with self.assertRaisesRegex(InvalidArchive, "decoder"):
+                verify(self.archive, self.original, self.decoder)
+
+    def test_oversized_decoder_is_rejected_before_execution(self):
+        with self.decoder.open("r+b") as stream:
+            stream.truncate(32 * 1024 * 1024 + 1)
+        with mock.patch("verify_independent_lzmesh.decode_bounded") as run_decoder:
+            with self.assertRaisesRegex(InvalidArchive, "executable size bounds"):
+                verify(self.archive, self.original, self.decoder)
+            run_decoder.assert_not_called()
+
     def test_rejects_corrupted_payload(self):
         data = bytearray(self.archive.read_bytes())
         data[-1] ^= 0x80
