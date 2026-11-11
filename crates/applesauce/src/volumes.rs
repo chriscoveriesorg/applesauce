@@ -331,6 +331,7 @@ mod staging_parent_tests {
     fn volume_finish_waits_for_scratch_cleanup_and_timestamp_restore() {
         use super::{StagingDirectory, VolumeInfo, Volumes};
         use std::fs;
+        use std::sync::Arc;
         use std::time::{Duration, SystemTime};
 
         let root = tempfile::tempdir().unwrap();
