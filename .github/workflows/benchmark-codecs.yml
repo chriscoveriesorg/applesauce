@@ -123,8 +123,8 @@ jobs:
             | tee "$BENCH_RESULTS/all-codecs-ranking.md" >> "$GITHUB_STEP_SUMMARY"
           printf '\nRaw Criterion estimates and samples are available in the downloadable artifact.\n' \
             >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain raw evidence even on failure
-        if: always()
+      - name: Retain fully qualified benchmark evidence
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: applesauce-criterion-${{ github.event_name == 'issue_comment' && 'standard' || inputs.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -132,4 +132,22 @@ jobs:
             target/applesauce-bench/**
             target/criterion/**
           retention-days: 90
+          if-no-files-found: warn
+      # An exporter or fsync may fail after a CSV pathname becomes visible.
+      # Keep raw diagnostics for investigation while refusing to upload any
+      # derived CSV whose validation/durability may have failed.
+      - name: Retain unqualified raw diagnostics after failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: applesauce-criterion-unqualified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/criterion/**
+            target/applesauce-bench/manifest.csv
+            target/applesauce-bench/environment.txt
+            target/applesauce-bench/config.txt
+            target/applesauce-bench/criterion.log
+            target/applesauce-bench/resource-usage.json
+            target/applesauce-bench/matrix-check.txt
+          retention-days: 30
           if-no-files-found: warn
