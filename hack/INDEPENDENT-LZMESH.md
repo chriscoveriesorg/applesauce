@@ -93,6 +93,12 @@ changes compressed payload bytes at two positions, flips the first chunk
 digest, truncates the last byte and appends a byte. All five changes must be
 rejected. Payload-only changes must reach the independent decoder, preventing
 a parser-only failure from being mistaken for codec conformance testing.
+The digest, truncation and trailing-data variants must fail at their expected
+parser gates. A timed-out decoder does **not** count as a successful negative
+case. All six checks share a **180-second decoder budget** instead of receiving
+six independent 120-second budgets; an exhausted budget fails the suite,
+including during the last damaged case. Reviewers can increase the shared cap
+with `--total-timeout-seconds` (maximum 3600) for slow diagnostic hosts.
 
 The macOS proof workflow runs those five cases on both generated content
 families at the 131,103-byte multi-chunk boundary (10 negative cases per codec).
