@@ -234,7 +234,31 @@ and no directory is traversed unless that no-follow descriptor open succeeds.
 ```console
 applesauce compress --dry-run -c lzfse PATH...
 applesauce compress --dry-run --json -c zlib PATH...
+applesauce compress --dry-run --profile caches --json ~/Library/Caches
+applesauce compress --dry-run --profile bundles --json /Applications/Example.app
 ```
+
+`--profile caches` and `--profile bundles` are **read-only audits**. They require
+`--dry-run`, and the mutating compressor rejects them. The caches classifier
+considers regular files beneath a `Library/Caches` directory pair and skips
+nested signed code containers, including Spotlight importers, preference
+panes, screensavers, Automator actions, services and audio plugins. The bundles
+classifier considers only `Contents/Resources` within a `.app`; it excludes
+executable extensions (including compiled AppleScript and bytecode), regular
+files with executable permission bits, Mach-O/fat binaries, ELF/PE images
+and shebang scripts detected from a four-byte header. Code-hosting Resources
+subtrees such as `Frameworks`, `PlugIns`, `XPCServices` and `Helpers` are
+pruned even when their contents lack bundle extensions. The bundles audit also
+prunes enclosing signed containers (for example, a framework or plugin that
+contains a nested `.app`) before enumerating their descendants. Excluded
+code/signature directories are recorded as skipped subtree roots without
+opening or enumerating their descendants, including unreadable directories.
+Parents leading to eligible Resources or Caches remain traversable. Skipped
+files are never encoded. Candidate bundle resources are **not certified safe to compress**:
+the entire sealed resource set may affect an app's code signature. Real bundle
+writes remain outside this feature pending disposable-copy `codesign --verify`
+and launch acceptance. Both profiles refuse parent-directory traversal,
+and all path opens keep the existing no-follow and identity protections.
 
 With `--dry-run`, `--json` emits the projection schema below; without it,
 `--json` emits the actual-storage report described later. `--chrome-tracing` is rejected before
@@ -249,19 +273,27 @@ The JSON contract has `schema_version: 1`. Byte counts are integer bytes:
 
 The top-level keys are `schema_version`, `complete`, `codec`,
 `minimum_compression_ratio`, `full_encoding`, `paths`, `directories`, `totals`,
-and `allocation_estimate_limitations`. `full_encoding` is always `true`;
+and `allocation_estimate_limitations`. For an explicit policy audit only,
+`profile` is added with the value `caches` or `bundles`. The unprofiled
+schema and output remain unchanged. `full_encoding` is always `true` for
+eligible paths (excluded paths are skipped before encoding);
 `codec` is the selected lowercase encoder name, including on skipped paths.
 Each directory has `path`, `totals`, and nullable `error` fields.
 
-- `paths[]` contains regular files plus skipped/error non-regular inputs.
+- `paths[]` contains regular files plus skipped/error non-regular inputs and
+  skipped directory subtree roots in read-only profile audits.
   `path.display` is for people; `path.bytes_hex` is the authoritative,
   lossless lowercase encoding of Unix pathname bytes, including non-UTF-8
-  names. `entry_type` is `file`, `symlink`, `other`, or `unknown`.
+  names. `entry_type` is `file`, `directory` (excluded subtrees only),
+  `symlink`, `other`, or `unknown`.
 - `codec`, `would_compress`, and stable `reason` describe the decision.
   Reasons are `compress`, `below_minimum_ratio`, `already_compressed`,
   `empty_file`, `too_large`, `filesystem_unsupported`,
   `required_compression_xattr`, `hard_link`, `symlink`,
-  `not_regular_file`, or `error`.
+  `not_regular_file`, or `error`. Read-only profile exclusions also use
+  `profile_parent_traversal`, `outside_library_caches`,
+  `cache_contains_code_bundle`, `outside_app_bundle`, `bundle_non_resource`,
+  `bundle_nested_code_or_signature`, and `bundle_executable_resource`.
 - `logical_size_bytes` is `st_size`; `current_allocation_bytes` is exactly
   `st_blocks * 512`. `allocation_block_bytes` is the real allocation unit from
   `fstatfs().f_bsize`, not the preferred-I/O `st_blksize`.

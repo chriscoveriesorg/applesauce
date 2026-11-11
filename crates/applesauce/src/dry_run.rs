@@ -9,17 +9,262 @@ use applesauce_core::{decmpfs, round_to_block_size, BLOCK_SIZE};
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::ffi::{CStr, OsString};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::macos::fs::MetadataExt as MacMetadataExt;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
 const SCHEMA_VERSION: u32 = 1;
+
+/// Read-only candidate classifiers. These profiles do not permit native writes.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum Profile {
+    Caches,
+    Bundles,
+}
+
+impl Profile {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Caches => "caches",
+            Self::Bundles => "bundles",
+        }
+    }
+}
+
+/// Decide from path components, never substring matches. No-follow descriptor
+/// traversal still checks identity; refuse parent traversal in profile mode.
+fn profile_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Some("profile_parent_traversal");
+    }
+    let parts: Vec<&OsStr> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    match profile {
+        Profile::Caches => {
+            if parts.iter().any(|part| code_container(part)) {
+                return Some("cache_contains_code_bundle");
+            }
+            if parts
+                .windows(2)
+                .any(|pair| pair[0] == OsStr::new("Library") && pair[1] == OsStr::new("Caches"))
+            {
+                None
+            } else {
+                Some("outside_library_caches")
+            }
+        }
+        Profile::Bundles => {
+            let Some(app_index) = parts.iter().position(|part| ascii_suffix(part, b".app")) else {
+                return Some("outside_app_bundle");
+            };
+            // A nested app inside an unrelated signed framework or plugin
+            // cannot be treated as an independent resource audit target.
+            if parts[..app_index].iter().any(|part| code_container(part)) {
+                return Some("bundle_nested_code_or_signature");
+            }
+            if parts.get(app_index + 1).copied() != Some(OsStr::new("Contents"))
+                || parts.get(app_index + 2).copied() != Some(OsStr::new("Resources"))
+                || parts.len() <= app_index + 3
+            {
+                return Some("bundle_non_resource");
+            }
+            let resources = &parts[app_index + 3..];
+            if resources
+                .iter()
+                .any(|part| sensitive_bundle_component(part))
+            {
+                return Some("bundle_nested_code_or_signature");
+            }
+            // A candidate resource still needs codesign and launch tests
+            // on a disposable app before any write is ever authorized.
+            // Compiled AppleScript and bytecode need no Unix executable bit,
+            // Mach-O header or shebang to be executable by a host application.
+            const EXECUTABLE_SUFFIXES: [&[u8]; 16] = [
+                b".dylib",
+                b".so",
+                b".a",
+                b".o",
+                b".sh",
+                b".command",
+                b".metallib",
+                b".exe",
+                b".scpt",
+                b".applescript",
+                b".py",
+                b".rb",
+                b".pl",
+                b".wasm",
+                b".jar",
+                b".class",
+            ];
+            if resources.last().is_some_and(|file| {
+                EXECUTABLE_SUFFIXES
+                    .iter()
+                    .any(|suffix| ascii_suffix(file, suffix))
+            }) {
+                return Some("bundle_executable_resource");
+            }
+            None
+        }
+    }
+}
+
+fn code_container(name: &OsStr) -> bool {
+    // Code-hosting bundles are not limited to .app/.framework. Spotlight,
+    // screensavers, preference panes, Automator actions and audio plugins all
+    // carry executable content and can be signed, including inside caches.
+    const CODE_SUFFIXES: [&[u8]; 21] = [
+        b".app",
+        b".framework",
+        b".appex",
+        b".xpc",
+        b".bundle",
+        b".plugin",
+        b".qlgenerator",
+        b".kext",
+        b".component",
+        b".mdimporter",
+        b".prefpane",
+        b".saver",
+        b".service",
+        b".workflow",
+        b".action",
+        b".scptd",
+        b".vst",
+        b".vst3",
+        b".aaxplugin",
+        b".audiounit",
+        b".xcframework",
+    ];
+    CODE_SUFFIXES
+        .iter()
+        .any(|suffix| ascii_suffix(name, suffix))
+}
+
+/// Inside Contents/Resources, code may live in a conventional container
+/// directory with no bundle suffix. Prune that entire subtree before opening
+/// its descendants. Compare ASCII case-insensitively for case-sensitive APFS.
+fn sensitive_bundle_component(name: &OsStr) -> bool {
+    if code_container(name) {
+        return true;
+    }
+    const RESERVED: [&[u8]; 10] = [
+        b"_CodeSignature",
+        b"_MASReceipt",
+        b"MacOS",
+        b"Frameworks",
+        b"SharedFrameworks",
+        b"PlugIns",
+        b"XPCServices",
+        b"Helpers",
+        b"LoginItems",
+        b"CodeResources",
+    ];
+    RESERVED
+        .iter()
+        .any(|reserved| name.as_bytes().eq_ignore_ascii_case(reserved))
+}
+
+/// A case-insensitive suffix test for ASCII code extensions on macOS volumes.
+/// Compare raw OsStr bytes without converting a non-UTF-8 filename to a string.
+fn ascii_suffix(name: &OsStr, suffix: &[u8]) -> bool {
+    let bytes = name.as_bytes();
+    bytes
+        .get(bytes.len().saturating_sub(suffix.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
+/// Prune only a subtree that cannot contain any eligible profile file.
+/// Parents of Library/Caches and .app/Contents/Resources must remain open
+/// so a broad audit root can discover eligible descendants. Excluded code
+/// containers are recorded without opening or enumerating their children.
+fn profile_directory_exclusion(profile: Profile, path: &Path) -> Option<&'static str> {
+    let parts: Vec<&OsStr> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    match profile {
+        Profile::Caches => parts
+            .iter()
+            .any(|part| code_container(part))
+            .then_some("cache_contains_code_bundle"),
+        Profile::Bundles => {
+            let app_index = parts.iter().position(|part| ascii_suffix(part, b".app"));
+            // Stop at the outermost signed container, including when it
+            // contains a nested .app. Do this before opening its descendants.
+            let prefix_end = app_index.unwrap_or(parts.len());
+            if parts[..prefix_end].iter().any(|part| code_container(part)) {
+                return Some("bundle_nested_code_or_signature");
+            }
+            let app_index = app_index?;
+            let within_app = &parts[app_index + 1..];
+            if within_app.is_empty() {
+                return None;
+            }
+            if within_app[0] != OsStr::new("Contents") {
+                return Some("bundle_non_resource");
+            }
+            if within_app.len() == 1 {
+                return None;
+            }
+            if within_app[1] != OsStr::new("Resources") {
+                return Some("bundle_non_resource");
+            }
+            (within_app.len() > 2
+                && within_app[2..]
+                    .iter()
+                    .any(|part| sensitive_bundle_component(part)))
+            .then_some("bundle_nested_code_or_signature")
+        }
+    }
+}
+
+/// Detect executable payloads which lack a recognisable filename extension or
+/// executable permission bits. Read just four bytes from the already-opened
+/// descriptor without changing its cursor; no decoder or writer is invoked.
+fn executable_magic(file: &File) -> io::Result<bool> {
+    const MACHO: [[u8; 4]; 8] = [
+        [0xfe, 0xed, 0xfa, 0xce],
+        [0xce, 0xfa, 0xed, 0xfe],
+        [0xfe, 0xed, 0xfa, 0xcf],
+        [0xcf, 0xfa, 0xed, 0xfe],
+        [0xca, 0xfe, 0xba, 0xbe],
+        [0xbe, 0xba, 0xfe, 0xca],
+        [0xca, 0xfe, 0xba, 0xbf],
+        [0xbf, 0xba, 0xfe, 0xca],
+    ];
+    let mut header = [0u8; 4];
+    let mut n = 0;
+    while n < header.len() {
+        let read = file.read_at(&mut header[n..], n as u64)?;
+        if read == 0 {
+            break;
+        }
+        n += read;
+    }
+    let bytes = &header[..n];
+    Ok(bytes.starts_with(b"#!")
+        || bytes.starts_with(b"MZ")
+        || bytes.starts_with(&[0x7f, b'E', b'L', b'F'])
+        || (n == 4 && MACHO.contains(&header)))
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EncodedPath {
@@ -106,6 +351,9 @@ pub struct Report {
     pub complete: bool,
     pub codec: String,
     pub minimum_compression_ratio: f64,
+    /// Included only in explicit opt-in read-only policy audits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<&'static str>,
     pub full_encoding: bool,
     pub paths: Vec<PathReport>,
     pub directories: Vec<DirectoryReport>,
@@ -186,10 +434,22 @@ pub fn analyze(
     minimum_compression_ratio: f64,
     level: u32,
 ) -> Report {
+    analyze_with_profile(paths, kind, minimum_compression_ratio, level, None)
+}
+
+/// Read-only candidate inspection. The mutating compressor does not accept a profile.
+pub fn analyze_with_profile(
+    paths: &[PathBuf],
+    kind: Kind,
+    minimum_compression_ratio: f64,
+    level: u32,
+    profile: Option<Profile>,
+) -> Report {
     let mut analyzer = Analyzer {
         kind,
         minimum_compression_ratio,
         level,
+        profile,
         paths: Vec::new(),
         directories: Vec::new(),
         visited_directories: HashSet::new(),
@@ -206,6 +466,7 @@ pub fn analyze(
         complete: totals.complete,
         codec: codec_name(kind).to_owned(),
         minimum_compression_ratio,
+        profile: profile.map(Profile::name),
         full_encoding: true,
         paths: analyzer.paths,
         directories: analyzer.directories,
@@ -222,6 +483,7 @@ struct Analyzer {
     kind: Kind,
     minimum_compression_ratio: f64,
     level: u32,
+    profile: Option<Profile>,
     paths: Vec<PathReport>,
     directories: Vec<DirectoryReport>,
     visited_directories: HashSet<(u64, u64)>,
@@ -230,6 +492,23 @@ struct Analyzer {
 
 impl Analyzer {
     fn visit(&mut self, path: &Path, root: bool) -> Accumulator {
+        // Refuse a profile root with lexical parent traversal before any
+        // metadata lookup or directory enumeration outside its audit scope.
+        if root
+            && self.profile.is_some()
+            && path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return self.push_error(
+                path,
+                "unknown",
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "profile audit root cannot contain parent traversal",
+                ),
+            );
+        }
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) => return self.push_error(path, "unknown", error),
@@ -262,6 +541,27 @@ impl Analyzer {
     }
 
     fn visit_directory(&mut self, path: &Path, metadata: &Metadata) -> Accumulator {
+        if let Some(reason) = self
+            .profile
+            .and_then(|profile| profile_directory_exclusion(profile, path))
+        {
+            // Record the excluded subtree at its root. Traversing it can
+            // expose signed code, hang on large plugins, or fail on a private
+            // signature directory unrelated to eligible resources.
+            self.paths.push(skipped(
+                path,
+                "directory",
+                self.kind,
+                reason,
+                Some(metadata),
+            ));
+            self.directories.push(DirectoryReport {
+                path: EncodedPath::new(path),
+                totals: Accumulator::empty().totals(),
+                error: None,
+            });
+            return Accumulator::empty();
+        }
         let directory = match open_directory(path, metadata) {
             Ok(directory) => directory,
             Err(error) => {
@@ -315,6 +615,29 @@ impl Analyzer {
     }
 
     fn visit_file(&mut self, path: &Path, scanned: &Metadata) -> Accumulator {
+        // A policy exclusion needs only the no-follow stat from visit(). Do not
+        // open excluded code/signature files: they may be deliberately unreadable.
+        // Extensionless Mach-O binaries and scripts may live in Resources.
+        // Their executable mode is available from the no-follow stat, so we
+        // can exclude them before opening even an unreadable file.
+        let exclusion = self.profile.and_then(|profile| {
+            profile_exclusion(profile, path).or_else(|| {
+                (profile == Profile::Bundles && scanned.mode() & 0o111 != 0)
+                    .then_some("bundle_executable_resource")
+            })
+        });
+        if let Some(reason) = exclusion {
+            // Preserve the existing hard-link accounting without opening the file.
+            let reason = if scanned.nlink() > 1 {
+                "hard_link"
+            } else {
+                reason
+            };
+            let report = skipped(path, "file", self.kind, reason, Some(scanned));
+            let result = accumulate_report(&report);
+            self.paths.push(report);
+            return result;
+        }
         let file = match open_regular_file(path, scanned) {
             Ok(file) => file,
             Err(error) => return self.push_error(path, "file", error),
@@ -323,6 +646,24 @@ impl Analyzer {
             Ok(opened) => opened,
             Err(error) => return self.push_error(path, "file", error),
         };
+        if self.profile == Some(Profile::Bundles) {
+            match executable_magic(&file) {
+                Ok(true) => {
+                    let report = skipped(
+                        path,
+                        "file",
+                        self.kind,
+                        "bundle_executable_resource",
+                        Some(&opened),
+                    );
+                    let result = accumulate_report(&report);
+                    self.paths.push(report);
+                    return result;
+                }
+                Ok(false) => {}
+                Err(error) => return self.push_error(path, "file", error),
+            }
+        }
         if opened.nlink() > 1 {
             self.paths
                 .push(skipped(path, "file", self.kind, "hard_link", Some(&opened)));
@@ -940,6 +1281,373 @@ fn codec_name(kind: Kind) -> &'static str {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn audit_profiles_reject_code_and_outside_roots() {
+        let cases: &[(Profile, &str, Option<&str>)] = &[
+            (Profile::Caches, "/Users/a/Library/Caches/data.log", None),
+            (
+                Profile::Caches,
+                "/Users/a/Library/Caches/Foo.app/Contents/Resources/a.json",
+                Some("cache_contains_code_bundle"),
+            ),
+            (
+                Profile::Caches,
+                "/Users/a/Caches/data.log",
+                Some("outside_library_caches"),
+            ),
+            (
+                Profile::Caches,
+                "/Users/a/Library/Caches/../MacOS/app",
+                Some("profile_parent_traversal"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/icon.icns",
+                None,
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/MacOS/Foo",
+                Some("bundle_non_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/_CodeSignature/CodeResources",
+                Some("bundle_non_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/Nested.bundle/file",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/_codesignature/CodeResources",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/helper.dylib",
+                Some("bundle_executable_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/Helper.DYLIB",
+                Some("bundle_executable_resource"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/Nested.PLUGIN/file",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.APP/Contents/Resources/Nested.Framework/data",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/../MacOS/Foo",
+                Some("profile_parent_traversal"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/Foo.app/Contents/Resources/icon.app",
+                Some("bundle_nested_code_or_signature"),
+            ),
+            (
+                Profile::Bundles,
+                "/Applications/data.json",
+                Some("outside_app_bundle"),
+            ),
+        ];
+        for &(profile, path, expected) in cases {
+            assert_eq!(
+                profile_exclusion(profile, Path::new(path)),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_profiles_prune_additional_signed_bundle_types_and_code_directories() {
+        let cache_root = Path::new("/Users/a/Library/Caches");
+        for suffix in [
+            "Spotlight.MDIMPORTER",
+            "Display.PREFPANE",
+            "Idle.SAVER",
+            "Workflow.WORKFLOW",
+            "Action.ACTION",
+            "Service.SERVICE",
+            "Compiled.SCPTD",
+            "Synth.VST3",
+            "Processor.AAXPLUGIN",
+            "Universal.XCFRAMEWORK",
+        ] {
+            let path = cache_root.join(suffix);
+            assert_eq!(
+                profile_directory_exclusion(Profile::Caches, &path),
+                Some("cache_contains_code_bundle"),
+                "{suffix}"
+            );
+            assert_eq!(
+                profile_exclusion(Profile::Caches, &path.join("Contents/data")),
+                Some("cache_contains_code_bundle"),
+                "{suffix}"
+            );
+        }
+        let resources = Path::new("/Applications/Test.app/Contents/Resources");
+        for child in [
+            "MacOS/tool",
+            "FRAMEWORKS/helper",
+            "SharedFrameworks/helper",
+            "PlugIns/helper",
+            "XPCServices/agent",
+            "Helpers/tool",
+            "LoginItems/agent",
+            "assets/CodeResources",
+        ] {
+            let path = resources.join(child);
+            assert_eq!(
+                profile_exclusion(Profile::Bundles, &path),
+                Some("bundle_nested_code_or_signature"),
+                "{child}"
+            );
+            if !child.starts_with("assets/") {
+                let directory = path.parent().unwrap();
+                assert_eq!(
+                    profile_directory_exclusion(Profile::Bundles, directory),
+                    Some("bundle_nested_code_or_signature"),
+                    "{child}"
+                );
+            }
+        }
+        for executable in [
+            "helper.SCPT",
+            "config.APPLESCRIPT",
+            "module.WASM",
+            "tool.PY",
+            "helper.JAR",
+        ] {
+            let path = resources.join(executable);
+            assert_eq!(
+                profile_exclusion(Profile::Bundles, &path),
+                Some("bundle_executable_resource"),
+                "{executable}"
+            );
+        }
+        assert_eq!(
+            profile_exclusion(
+                Profile::Bundles,
+                &resources.join("data/localization.strings")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn bundle_audit_prunes_enclosing_signed_containers_without_enumeration() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let apps = temp.path().join("Applications");
+        let framework = apps.join("Outer.framework");
+        let hidden = framework.join("Versions/A/Helper.app/Contents/Resources/data.bin");
+        let visible = apps.join("Visible.app/Contents/Resources/data.strings");
+        fs::create_dir_all(hidden.parent().unwrap()).unwrap();
+        fs::create_dir_all(visible.parent().unwrap()).unwrap();
+        fs::write(&hidden, b"nested signed code data").unwrap();
+        fs::write(&visible, b"ordinary resource data").unwrap();
+
+        assert_eq!(
+            profile_exclusion(Profile::Bundles, &hidden),
+            Some("bundle_nested_code_or_signature")
+        );
+        assert_eq!(
+            profile_directory_exclusion(Profile::Bundles, &framework),
+            Some("bundle_nested_code_or_signature")
+        );
+        assert_eq!(
+            profile_directory_exclusion(Profile::Bundles, hidden.parent().unwrap()),
+            Some("bundle_nested_code_or_signature")
+        );
+
+        // The enclosing framework must be classified using its directory
+        // entry alone: unreadable descendants must never be enumerated.
+        fs::set_permissions(&framework, fs::Permissions::from_mode(0o000)).unwrap();
+        let audit = analyze_with_profile(&[apps], Kind::Zlib, 0.95, 5, Some(Profile::Bundles));
+        fs::set_permissions(&framework, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(audit.complete, "excluded framework must not fail the audit");
+        let excluded = audit
+            .paths
+            .iter()
+            .find(|entry| entry.path.display == framework.to_string_lossy())
+            .unwrap();
+        assert_eq!(excluded.entry_type, "directory");
+        assert_eq!(excluded.reason, "bundle_nested_code_or_signature");
+        assert_eq!(excluded.raw_compressed_bytes, None);
+        assert!(!audit
+            .paths
+            .iter()
+            .any(|entry| entry.path.display == hidden.to_string_lossy()));
+        assert!(audit
+            .paths
+            .iter()
+            .any(|entry| entry.path.display == visible.to_string_lossy()));
+    }
+
+    #[test]
+    fn profile_audit_refuses_parent_traversal_before_touching_root() {
+        let path = PathBuf::from("nonexistent-root/../outside");
+        for profile in [Profile::Caches, Profile::Bundles] {
+            let audit = analyze_with_profile(
+                std::slice::from_ref(&path),
+                Kind::Zlib,
+                0.95,
+                5,
+                Some(profile),
+            );
+            assert!(!audit.complete);
+            assert_eq!(audit.paths.len(), 1);
+            assert_eq!(audit.paths[0].reason, "error");
+            assert_eq!(audit.paths[0].error.as_ref().unwrap().kind, "invalid_input");
+        }
+    }
+
+    #[test]
+    fn bundle_audit_excludes_signed_code_before_encoding() {
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let app = temp.path().join("Fixture.app");
+        let executable = app.join("Contents/MacOS/Fixture");
+        let signature = app.join("Contents/_CodeSignature/CodeResources");
+        let resource = app.join("Contents/Resources/localization.strings");
+        let extensionless_executable = app.join("Contents/Resources/run-helper");
+        let hidden_macho = app.join("Contents/Resources/library-data");
+        let hidden_script = app.join("Contents/Resources/embedded-config");
+        let nested_signature = app.join("Contents/Resources/Assets/_CodeSignature");
+        let nested_signature_file = nested_signature.join("CodeResources");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(signature.parent().unwrap()).unwrap();
+        fs::create_dir_all(resource.parent().unwrap()).unwrap();
+        fs::write(&executable, b"test executable").unwrap();
+        fs::write(&signature, b"test signature").unwrap();
+        fs::write(&resource, b"test resource").unwrap();
+        fs::write(&extensionless_executable, b"test executable with no suffix").unwrap();
+        fs::write(&hidden_macho, [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]).unwrap();
+        fs::write(&hidden_script, b"#!/bin/sh\necho example").unwrap();
+        fs::create_dir_all(&nested_signature).unwrap();
+        fs::write(&nested_signature_file, b"nested signature").unwrap();
+        // Excluded sealed code may not be readable by the current user.
+        // The audit must skip it by pathname policy without ever opening it.
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::set_permissions(&signature, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::set_permissions(&extensionless_executable, fs::Permissions::from_mode(0o111)).unwrap();
+        let protected_directories = [
+            executable.parent().unwrap().to_owned(),
+            signature.parent().unwrap().to_owned(),
+            nested_signature.clone(),
+        ];
+        // Under the old walk, these inaccessible directories made a safe
+        // audit incomplete even though every descendant was excluded.
+        for directory in &protected_directories {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let audit = analyze_with_profile(&[app], Kind::Zlib, 0.95, 5, Some(Profile::Bundles));
+        assert_eq!(audit.profile, Some("bundles"));
+        assert!(audit.complete);
+        for (directory, reason) in [
+            (&protected_directories[0], "bundle_non_resource"),
+            (&protected_directories[1], "bundle_non_resource"),
+            (&protected_directories[2], "bundle_nested_code_or_signature"),
+        ] {
+            let entry = audit
+                .paths
+                .iter()
+                .find(|entry| entry.path.display == directory.to_string_lossy())
+                .unwrap();
+            assert_eq!(entry.entry_type, "directory");
+            assert_eq!(entry.reason, reason);
+            assert!(!entry.would_compress);
+            assert_eq!(entry.raw_compressed_bytes, None);
+        }
+        for protected in [&executable, &signature, &nested_signature_file] {
+            assert!(
+                !audit
+                    .paths
+                    .iter()
+                    .any(|entry| entry.path.display == protected.to_string_lossy()),
+                "excluded directory was traversed: {protected:?}"
+            );
+        }
+        let executable_entry = audit
+            .paths
+            .iter()
+            .find(|entry| entry.path.display == extensionless_executable.to_string_lossy())
+            .unwrap();
+        assert_eq!(executable_entry.reason, "bundle_executable_resource");
+        assert!(!executable_entry.would_compress);
+        assert_eq!(executable_entry.raw_compressed_bytes, None);
+        for magic_file in [hidden_macho, hidden_script] {
+            let entry = audit
+                .paths
+                .iter()
+                .find(|entry| entry.path.display == magic_file.to_string_lossy())
+                .unwrap();
+            assert_eq!(entry.reason, "bundle_executable_resource");
+            assert_eq!(entry.raw_compressed_bytes, None);
+        }
+        assert_eq!(audit.paths.len(), 7);
+        // Restore directory search permissions for tempfile cleanup.
+        for directory in &protected_directories {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    #[test]
+    fn cache_audit_prunes_unreadable_nested_code_containers() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let caches = temp.path().join("Library/Caches");
+        let code = caches.join("Plugin.FRAMEWORK");
+        let hidden = code.join("Contents/Resources/unreadable");
+        let ordinary = caches.join("data.txt");
+        fs::create_dir_all(hidden.parent().unwrap()).unwrap();
+        fs::write(&hidden, b"excluded signed content").unwrap();
+        fs::write(&ordinary, b"regular cache data").unwrap();
+        fs::set_permissions(&code, fs::Permissions::from_mode(0o000)).unwrap();
+        let audit = analyze_with_profile(&[caches], Kind::Zlib, 0.95, 5, Some(Profile::Caches));
+        assert!(audit.complete);
+        let excluded = audit
+            .paths
+            .iter()
+            .find(|entry| entry.path.display == code.to_string_lossy())
+            .unwrap();
+        assert_eq!(excluded.entry_type, "directory");
+        assert_eq!(excluded.reason, "cache_contains_code_bundle");
+        assert!(!audit
+            .paths
+            .iter()
+            .any(|entry| entry.path.display == hidden.to_string_lossy()));
+        assert!(audit
+            .paths
+            .iter()
+            .any(|entry| entry.path.display == ordinary.to_string_lossy()));
+        fs::set_permissions(&code, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn unprofiled_projection_keeps_its_existing_optional_fields_absent() {
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let input = temp.path().join("input");
+        fs::write(&input, b"fixture").unwrap();
+        let report = analyze(&[input], Kind::Zlib, 0.95, 5);
+        assert_eq!(report.profile, None);
+        assert_eq!(report.schema_version, 1);
+    }
 
     #[test]
     fn overlapping_roots_are_deduplicated_lexically() {
