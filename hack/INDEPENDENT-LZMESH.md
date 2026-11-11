@@ -108,9 +108,14 @@ with `--total-timeout-seconds` (maximum 3600) for slow diagnostic hosts.
 
 The proof runner permits one extra output byte within `RLIMIT_FSIZE` so an
 external decoder cannot mask attempted overproduction by ignoring `SIGXFSZ`.
-After the entire negative suite, it reopens the original Apple archive and
-rechecks inode identity and SHA-256 as well as verifying the original plaintext
-and decoder binary are unchanged.
+The negative suite also snapshots the reference plaintext (at most 64 MiB) and
+executable (at most 32 MiB) into private files **once**, before the successful
+baseline. Every corruption case uses those same snapshots, rather than reopening
+mutable input pathnames and accidentally treating a substituted decoder's errors
+as evidence. Snapshot time counts against the suite's monotonic deadline.
+After all negative cases, it reopens the original Apple archive and rechecks
+inode identity and SHA-256. It also verifies the caller's original plaintext
+and executable identities and complete hashes against the private snapshots.
 
 The macOS proof workflow runs nine cases on each generated content
 family at the 131,103-byte three-chunk boundary (18 negative cases per codec).
