@@ -109,7 +109,7 @@ class SafeOutputTests(unittest.TestCase):
         protected_output.write_text("never overwrite", encoding="utf-8")
         self.output.write_text("stale", encoding="utf-8")
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
-            self.assertFalse(self.output.exists())
+            self.assertEqual(self.output.stat().st_size, 0)
             self.evidence.rename(moved)
             self.evidence.symlink_to(protected, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "changed during publication"):
@@ -263,15 +263,15 @@ class SafeOutputTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "directory durability failure"):
                     publisher.write_rows(self.rows, ("codec", "value"))
         self.assertTrue(failed)
-        self.assertFalse(self.output.exists())
+        self.assertEqual(self.output.stat().st_size, 0)
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
-    def test_cleanup_unlink_failure_preserves_original_sync_error(self):
+    def test_cleanup_invalidation_failure_preserves_original_sync_error(self):
         # Cleanup is best-effort: a second filesystem failure must not hide
         # the publication durability error or affect original evidence.
         real_fsync = os.fsync
-        real_unlink = os.unlink
+        real_invalidation = os.invalidation
         triggered = False
         cleanup_attempted = False
 
@@ -282,16 +282,16 @@ class SafeOutputTests(unittest.TestCase):
                 raise OSError("injected publication sync failure")
             return real_fsync(fd)
 
-        def fail_cleanup_unlink(path, *args, **kwargs):
+        def fail_cleanup_invalidation(fd, size):
             nonlocal cleanup_attempted
-            if path == self.output.name and kwargs.get("dir_fd") is not None:
+            if size == 0:
                 cleanup_attempted = True
                 raise PermissionError("injected cleanup refusal")
-            return real_unlink(path, *args, **kwargs)
+            return real_invalidation(fd, size)
 
         with SafeCsvOutput(self.output, (self.input,)) as publisher:
             with patch("safe_benchmark_output.os.fsync", side_effect=fail_publication_sync):
-                with patch("safe_benchmark_output.os.unlink", side_effect=fail_cleanup_unlink):
+                with patch("safe_benchmark_output.os.ftruncate", side_effect=fail_cleanup_invalidation):
                     with self.assertRaisesRegex(OSError, "injected publication sync failure"):
                         publisher.write_rows(self.rows, ("codec", "value"))
         self.assertTrue(triggered)
