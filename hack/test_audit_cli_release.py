@@ -154,6 +154,49 @@ class AuditReleaseAssetsTests(unittest.TestCase):
             self.assertIn("refs/tags/applesauce-cli/v0.5.31", args)
             self.assertIn("chriscoveriesorg/applesauce/.github/workflows/applesauce-cli-release.yml", args)
 
+    def repack_arm_archive_as_gzip(self):
+        """Repackage the same generated valid Mach-O fixture as a gzip tar."""
+        original = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+        gz = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.gz"
+        with tarfile.open(original, "r:xz") as source, tarfile.open(gz, "w:gz") as output:
+            for member in source:
+                stream = source.extractfile(member) if member.isfile() else None
+                output.addfile(member, stream)
+        original.unlink()
+        return gz
+
+    def test_correct_gzip_archive_is_accepted(self):
+        gzip_asset = self.repack_arm_archive_as_gzip()
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(gzip_asset.name, result.stdout)
+        self.assertEqual(
+            sum(call[:2] == ["release", "verify-asset"] for call in self.calls()),
+            2,
+        )
+
+    def test_xz_bytes_disguised_as_gzip_are_rejected_before_provenance(self):
+        xz = self.downloads / "applesauce-cli-v0.5.31-aarch64-apple-darwin.tar.xz"
+        disguised = xz.with_name(xz.name.removesuffix(".tar.xz") + ".tar.gz")
+        xz.rename(disguised)
+        result = self.run_audit()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read tar archive", result.stderr)
+        self.assertFalse(any(call[:2] == ["release", "verify-asset"]
+                             for call in self.calls()))
+
+    def test_gzip_bytes_disguised_as_xz_are_rejected_before_provenance(self):
+        gzip_asset = self.repack_arm_archive_as_gzip()
+        disguised = gzip_asset.with_name(
+            gzip_asset.name.removesuffix(".tar.gz") + ".tar.xz"
+        )
+        gzip_asset.rename(disguised)
+        result = self.run_audit()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read tar archive", result.stderr)
+        self.assertFalse(any(call[:2] == ["release", "verify-asset"]
+                             for call in self.calls()))
+
     def test_remote_release_tag_requires_exact_direct_commit(self):
         # Release-asset signatures alone cannot detect a tag moved after the
         # original build. Reject a new commit, annotated tag, or wrong ref.
