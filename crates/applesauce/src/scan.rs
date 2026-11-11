@@ -97,6 +97,40 @@ impl<'a, P: Progress + Send + Sync> Walker<'a, P> {
         f: impl Fn(FileType, PathBuf, Option<Arc<times::Resetter>>) + Send + Sync,
     ) {
         for path in self.paths {
+            // A directly selected file never invokes jwalk's read-directory
+            // callback, so it cannot inherit the directory resetter installed
+            // for files found inside directory roots. Capture its parent here
+            // before queueing any writer, and fail closed on capture errors.
+            let direct_file = match path.symlink_metadata() {
+                Ok(metadata) => metadata.file_type().is_file(),
+                Err(error) => {
+                    self.progress
+                        .error(path, &format!("unable to inspect selected root: {error}"));
+                    continue;
+                }
+            };
+            let direct_parent_resetter = if direct_file {
+                // A bare relative name has an empty parent Path; open ".".
+                let parent = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                match times::Resetter::capture_with_failure_log(
+                    parent,
+                    Arc::clone(&context.directory_timestamp_errors),
+                ) {
+                    Ok(resetter) => Some(Arc::new(resetter)),
+                    Err(error) => {
+                        self.progress.error(
+                            path,
+                            &format!("unable to preserve parent directory timestamps: {error}"),
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let failures: ResetFailures = Arc::new(Mutex::new(Vec::new()));
             let walker = walk_dir_over(path, Arc::clone(context), Arc::clone(&failures));
             for entry in walker {
@@ -120,7 +154,14 @@ impl<'a, P: Progress + Send + Sync> Walker<'a, P> {
                 if metadata.is_dir() {
                     continue;
                 }
-                f(metadata.file_type(), path, entry.client_state.take())
+                f(
+                    metadata.file_type(),
+                    path,
+                    entry
+                        .client_state
+                        .take()
+                        .or_else(|| direct_parent_resetter.clone()),
+                )
             }
             // A callback failure can occur on another jwalk worker. Make the
             // operation report it even if every affected file was filtered.
