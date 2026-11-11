@@ -154,6 +154,47 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    @unittest.expectedFailure
+    def test_same_uid_replacement_between_cleanup_stat_and_unlink_survives(self):
+        # Known race: stat and unlink are separate pathname operations.
+        # This expected failure must become a passing test before merge;
+        # it does NOT establish safety while marked expectedFailure.
+        replacement = self.root / "independent.csv"
+        replacement.write_text("independent evidence", encoding="utf-8")
+        real_fsync = os.fsync
+        real_stat = os.stat
+        triggered = False
+        swapped = False
+
+        def fail_directory_sync(fd):
+            nonlocal triggered
+            if not triggered and self.output.exists():
+                triggered = True
+                raise OSError("injected directory sync failure")
+            return real_fsync(fd)
+
+        def swap_after_identity_check(path, *args, **kwargs):
+            nonlocal swapped
+            result = real_stat(path, *args, **kwargs)
+            if (
+                triggered and not swapped and path == self.output.name
+                and kwargs.get("dir_fd") is not None
+                and kwargs.get("follow_symlinks") is False
+            ):
+                swapped = True
+                os.replace(replacement, self.output)
+            return result
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fsync", side_effect=fail_directory_sync):
+                with patch("safe_benchmark_output.os.stat", side_effect=swap_after_identity_check):
+                    with self.assertRaisesRegex(OSError, "directory sync failure"):
+                        publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertTrue(triggered)
+        self.assertTrue(swapped)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "independent evidence")
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_failed_atomic_replace_cleans_temporary_without_publishing(self):
         # A rename refusal must not leave a plausible upload artifact or
         # abandon a partially completed temporary CSV.
