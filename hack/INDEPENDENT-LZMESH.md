@@ -51,7 +51,11 @@ Raven/Mesh write gate (#88) and FSKit physical acceptance (#86) remain closed.
    success, failure and timeout, including ordinary forked helpers. A process
    that deliberately creates a separate session can escape this cleanup;
    audit decoder sources and run them on disposable hosts. The tool bounds logical fixture size to 64 MiB
-   by default; larger tests require an explicit override.
+   by default; larger tests require an explicit override. A single decoder
+   invocation has a 30-second timeout, and **all chunk decoder invocations
+   combined have a 120-second monotonic deadline**. The optional
+   `--total-timeout-seconds` flag permits a reviewed override up to 3600
+   seconds; exhaustion fails the proof before launching another chunk.
 
 4. Have an independent reviewer inspect the pinned decoder, commands, evidence,
    differences from Apple's `compression_decode_buffer`, and failure cases.
