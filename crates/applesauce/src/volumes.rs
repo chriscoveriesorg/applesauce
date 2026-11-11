@@ -311,8 +311,9 @@ mod staging_parent_tests {
         drop(scratch);
         assert_eq!(fs::metadata(&parent).unwrap().modified().unwrap(), expected);
         let errors = errors.lock().unwrap();
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].1.contains("parent directory changed"));
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|(_, message)| message.contains("unable to remove staging directory")));
+        assert!(errors.iter().any(|(_, message)| message.contains("parent directory changed")));
     }
 
     #[test]
