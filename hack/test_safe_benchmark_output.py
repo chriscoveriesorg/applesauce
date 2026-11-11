@@ -399,6 +399,26 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_fdopen_failure_closes_staging_descriptor(self):
+        # fdopen can fail before adopting the raw descriptor. Ensure the
+        # staging inode and descriptor are both released on this path.
+        captured = []
+
+        def reject_fdopen(fd, *args, **kwargs):
+            captured.append(fd)
+            raise OSError("injected fdopen failure")
+
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with patch("safe_benchmark_output.os.fdopen", side_effect=reject_fdopen):
+                with self.assertRaisesRegex(OSError, "injected fdopen failure"):
+                    publisher.write_rows(self.rows, ("codec", "value"))
+        self.assertEqual(len(captured), 1)
+        with self.assertRaises(OSError):
+            os.fstat(captured[0])
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
     def test_temporary_file_sync_failure_never_publishes(self):
         # A failed file durability barrier must not publish an unverified
         # CSV, even if its rows have already been written successfully.
