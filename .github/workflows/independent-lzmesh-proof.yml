@@ -179,12 +179,12 @@ jobs:
           with open(sys.argv[1], encoding="utf-8") as stream:
               report = json.load(stream)
           assert report["status"] == "independent_corruptions_rejected"
-          assert report["case_count"] == 5
-          assert len(report["cases"]) == 5
-          print(report["codec"], "5/5 negative cases rejected")
+          assert report["case_count"] == 7
+          assert len(report["cases"]) == 7
+          print(report["codec"], "7/7 negative cases rejected")
           PY
           done
-          printf 'Two generated content families each rejected five corrupted archive variants through the independent decoder. Original ASCF vectors, plaintext and negative-case reports are attached.\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Two generated content families each rejected seven corrupted archive variants through the independent decoder. Original ASCF vectors, plaintext and negative-case reports are attached.\n' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload generated proof reports
         if: always()
