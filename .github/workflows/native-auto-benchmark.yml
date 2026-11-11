@@ -1,0 +1,56 @@
+# Disposable-file performance acceptance for native codec auto selection.
+# Runs only on the feature branch to avoid a perpetual macOS CI cost.
+name: Native auto APFS benchmark
+
+on:
+  push:
+    branches:
+      - feat/native-codec-auto-issue89-20261109
+    paths:
+      # Every Rust pipeline or dependency change can affect the selected
+      # codec, publication checks, reported allocation or measured timing.
+      # This workflow is still restricted to the feature branch.
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - hack/native-auto-evidence.py
+      - hack/test_native_auto_evidence.py
+      - .github/workflows/native-auto-benchmark.yml
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate benchmark evidence parser
+        run: python3 -m unittest -v hack/test_native_auto_evidence.py
+      - name: Verify source-swap preflight regressions on macOS
+        run: cargo test -p applesauce --lib native_auto_source_preflight -- --nocapture
+      - name: Exercise native auto CLI end-to-end on disposable APFS fixtures
+        run: cargo test -p applesauce-cli --test native_auto -- --nocapture
+      - name: Measure actual APFS allocation and wall time on disposable files
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p applesauce-cli --release --test native_auto native_auto_real_allocation_benchmark -- --ignored --nocapture 2>&1 | tee native-auto-benchmark.log
+      - name: Validate and summarize measured APFS evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 hack/native-auto-evidence.py native-auto-benchmark.log | tee native-auto-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Archive measured evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-auto-benchmark
+          path: |
+            native-auto-benchmark.log
+            native-auto-summary.md
+          retention-days: 7
+          if-no-files-found: error

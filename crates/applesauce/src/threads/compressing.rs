@@ -72,6 +72,9 @@ impl WorkHandler<WorkItem> for Handler {
                 debug_assert_eq!(kind, item.kind);
                 compressor.compress(&mut self.buf, &item.data, level)
             }
+            Mode::CompressAuto { level, .. } => {
+                compressor.compress(&mut self.buf, &item.data, level)
+            }
             Mode::DecompressManually => compressor.decompress(&mut self.buf, &item.data),
             Mode::DecompressByReading => {
                 panic!("decompressing by reading should not be using the compressor thread")

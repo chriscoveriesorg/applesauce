@@ -184,6 +184,38 @@ For example, to compress a file named `example.txt` using the ZLIB compression a
 applesauce compress -c ZLIB example.txt
 ```
 
+### Opt-in per-file native codec selection
+
+```console
+applesauce compress -c auto PATH...
+```
+
+`-c auto` selects a supported native `lzfse`, `lzvn`, or `zlib` codec separately
+for each eligible file. The default codec is unchanged. Selection is
+deterministic: it encodes at most **64 KiB total** per file from the same opened
+descriptor, using a whole-file window for small inputs, head/tail windows for
+medium inputs, or head/middle/tail windows for larger inputs. The codec whose
+sample has the fewest encoded bytes wins, with ties favouring LZFSE, then
+LZVN, then zlib. The source descriptor's read cursor is unchanged.
+
+The full file is encoded normally after selection. Every auto-selected
+file undergoes **mandatory whole-file verification** against the source's
+kernel-visible bytes before staged publication, including when invoked through
+the Rust library with `verify=false`. An explicit `--verify` is accepted but
+unnecessary with auto. The normal real compressed-size gate
+(`--minimum-compression-ratio`) continues to apply. This opt-in heuristic does
+not guarantee that a sample's
+winner is the smallest final file, particularly for heterogeneous sources.
+`lzbitmap` and Raven/Mesh never enter native auto selection. Selected codec,
+sample bytes and window count are logged for each file at INFO verbosity;
+`info` reports the resulting native codec.
+
+Full-encoding `--dry-run -c auto` is currently refused explicitly because the
+dry-run projection measures a single chosen codec and cannot yet present a
+per-file selection. Use `--dry-run -c lzfse`, `-c lzvn`, or `-c zlib`
+for a read-only projection instead. Compare generated corpus outcomes and
+elapsed time against fixed codecs before treating auto as a performance gain.
+
 ### Read-only compression projection
 
 `compress --dry-run PATH...` performs the same full 64 KiB block encoding and

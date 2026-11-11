@@ -1,11 +1,12 @@
 use crate::seq_queue::Slot;
 use crate::threads::{compressing, writer, BgWork, Context, Mode, WorkHandler};
 use crate::{rfork_storage, seq_queue, try_read_all};
+use applesauce_core::compressor::Kind;
 use applesauce_core::BLOCK_SIZE;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::Read;
 use std::num::NonZeroUsize;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::{io, thread};
@@ -51,10 +52,10 @@ fn read_chunk<R: Read>(reader: R, limit: usize) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-// Refuse path swaps to symlinks, FIFOs or other nonregular files between
-// scanning and reading. O_NONBLOCK prevents a substituted FIFO from hanging
-// before descriptor validation. O_NOFOLLOW prevents symlink traversal.
-// The writer repeats the same source-snapshot check before publication.
+// Revalidate the exact inode scanned by the walker before sampling or
+// queuing compression. No-follow and nonblocking flags stop a swapped symlink
+// or FIFO from being followed/opened while its type is still unknown.
+// The writer repeats the descriptor/path snapshot before publication.
 fn open_scanned_regular_file(path: &Path, scanned: &Metadata) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -62,6 +63,104 @@ fn open_scanned_regular_file(path: &Path, scanned: &Metadata) -> io::Result<File
         .open(path)?;
     writer::ensure_source_path_matches_open_file(&file, path, scanned)?;
     Ok(file)
+}
+
+/// At most 64 KiB of logical input is sampled, using independent head/tail
+/// windows or head/middle/tail windows for larger files. The source cursor is
+/// unchanged; the normal reader starts at byte zero after selection.
+fn sample_windows(file_size: u64) -> Vec<(u64, usize)> {
+    const BUDGET: usize = BLOCK_SIZE;
+    if file_size <= BUDGET as u64 {
+        return vec![(0, file_size as usize)];
+    }
+    if file_size < (BUDGET * 3) as u64 {
+        let half = BUDGET / 2;
+        return vec![(0, half), (file_size - half as u64, half)];
+    }
+    let side = BUDGET / 3;
+    let tail = BUDGET - side * 2;
+    vec![
+        (0, side),
+        (file_size / 2 - (side / 2) as u64, side),
+        (file_size - tail as u64, tail),
+    ]
+}
+
+fn read_sample(file: &File, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+    let mut data = vec![0; length];
+    let mut done = 0usize;
+    while done < data.len() {
+        let absolute = offset
+            .checked_add(done as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "sample offset overflow"))?;
+        let read = file.read_at(&mut data[done..], absolute)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source truncated while sampling",
+            ));
+        }
+        done += read;
+    }
+    Ok(data)
+}
+
+/// Deterministic ratio-first selection across stable native codecs, excluding
+/// experimental LZBitmap. An individual failed trial cannot silently win.
+fn select_native_codec(
+    file: &File,
+    file_size: u64,
+    level: u32,
+) -> io::Result<(Kind, usize, usize)> {
+    let geometry = sample_windows(file_size);
+    let windows: Vec<Vec<u8>> = geometry
+        .iter()
+        .map(|(start, length)| read_sample(file, *start, *length))
+        .collect::<io::Result<_>>()?;
+    let sampled_bytes = windows.iter().map(Vec::len).sum();
+    let mut best: Option<(Kind, usize)> = None;
+    // Ordered tie break: prefer the existing default on equal encoded bytes.
+    for kind in [Kind::Lzfse, Kind::Lzvn, Kind::Zlib] {
+        let Some(mut encoder) = kind.compressor() else {
+            continue;
+        };
+        let mut output = vec![0u8; BLOCK_SIZE + 1024];
+        let mut decoded = vec![0u8; BLOCK_SIZE];
+        let mut total = 0usize;
+        let mut valid = true;
+        for window in &windows {
+            match encoder.compress(&mut output, window, level) {
+                Ok(n) => match encoder.decompress(&mut decoded, &output[..n]) {
+                    Ok(decoded_size)
+                        if decoded_size == window.len()
+                            && decoded[..decoded_size] == window[..] =>
+                    {
+                        total += n;
+                    }
+                    _ => {
+                        tracing::debug!(codec = %kind, "native auto sample roundtrip failed");
+                        valid = false;
+                        break;
+                    }
+                },
+                Err(error) => {
+                    tracing::debug!(codec = %kind, %error, "native auto sample failed");
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if valid && best.is_none_or(|(_, previous)| total < previous) {
+            best = Some((kind, total));
+        }
+    }
+    best.map(|(kind, _)| (kind, sampled_bytes, windows.len()))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "no native codec could encode the sample",
+            )
+        })
 }
 
 impl Handler {
@@ -74,10 +173,14 @@ impl Handler {
         context: &Arc<Context>,
         file: &File,
         expected_len: u64,
+        selected_kind: Option<Kind>,
         tx: &seq_queue::Sender<writer::Chunk, io::Error>,
     ) -> io::Result<()> {
         match context.operation.mode {
-            Mode::Compress { kind, .. } => {
+            Mode::Compress { .. } | Mode::CompressAuto { .. } => {
+                let kind = selected_kind.ok_or_else(|| {
+                    io::Error::other("native compression requires a selected codec")
+                })?;
                 let compressor = self.compressor.clone();
                 self.with_file_chunks(file, expected_len, tx, |slot, data| {
                     let _enter = tracing::debug_span!("waiting to send to compressor").entered();
@@ -199,9 +302,34 @@ impl WorkHandler<WorkItem> for Handler {
                 return;
             }
         };
+        let file_size = context.orig_metadata.len();
+        let selected_kind = match context.operation.mode {
+            Mode::Compress { kind, .. } => Some(kind),
+            Mode::CompressAuto { level, .. } => {
+                match select_native_codec(&file, file_size, level) {
+                    Ok((kind, sampled_bytes, windows)) => {
+                        tracing::info!(
+                            codec = %kind,
+                            sampled_bytes,
+                            windows,
+                            "auto-selected native compression codec for {}",
+                            context.path.display()
+                        );
+                        Some(kind)
+                    }
+                    Err(error) => {
+                        context.progress.error(&format!(
+                            "Error selecting a codec for {}: {error}",
+                            context.path.display()
+                        ));
+                        return;
+                    }
+                }
+            }
+            Mode::DecompressManually | Mode::DecompressByReading => None,
+        };
         let file = Arc::new(file);
 
-        let file_size = context.orig_metadata.len();
         let (tx, rx) = seq_queue::bounded(
             thread::available_parallelism()
                 .map(NonZeroUsize::get)
@@ -214,12 +342,13 @@ impl WorkHandler<WorkItem> for Handler {
                 .send(writer::WorkItem {
                     context: Arc::clone(&context),
                     file: Arc::clone(&file),
+                    compression_kind: selected_kind,
                     blocks: rx,
                 })
                 .unwrap();
         }
 
-        let result = self.read_file_into(&context, &file, file_size, &tx);
+        let result = self.read_file_into(&context, &file, file_size, selected_kind, &tx);
         // ensure the file is dropped before tx is finished
         drop(file);
         if let Err(e) = &result {
@@ -240,6 +369,190 @@ mod tests {
     use std::io::{self, Cursor, Read};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{symlink, FileTypeExt};
+
+    #[test]
+    fn auto_sampling_has_fixed_budget_and_nonoverlapping_windows() {
+        use super::sample_windows;
+        for length in [
+            1,
+            63,
+            65_536,
+            65_537,
+            131_071,
+            131_072,
+            196_607,
+            196_608,
+            1_000_000,
+            u64::from(u32::MAX),
+        ] {
+            let geometry = sample_windows(length);
+            assert!(!geometry.is_empty());
+            assert!(geometry.len() <= 3);
+            assert_eq!(
+                geometry.iter().map(|(_, bytes)| bytes).sum::<usize>(),
+                length.min(65_536) as usize
+            );
+            let mut end = 0;
+            for (offset, bytes) in geometry {
+                assert!(offset >= end);
+                end = offset + bytes as u64;
+                assert!(end <= length);
+            }
+        }
+    }
+
+    #[test]
+    fn native_auto_selection_preserves_open_descriptor_cursor_and_roundtrips() {
+        use super::select_native_codec;
+        use applesauce_core::compressor::Kind;
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut input = tempfile::tempfile().unwrap();
+        let content: Vec<u8> = (0..(4 * BLOCK_SIZE + 17))
+            .map(|n| b"deterministic native codec test fixture"[n % 39])
+            .collect();
+        io::Write::write_all(&mut input, &content).unwrap();
+        input.seek(SeekFrom::Start(23)).unwrap();
+        let (selected, measured, windows) =
+            select_native_codec(&input, content.len() as u64, 5).unwrap();
+        assert!(matches!(selected, Kind::Zlib | Kind::Lzvn | Kind::Lzfse));
+        assert!(selected.supported());
+        assert_eq!(measured, BLOCK_SIZE);
+        assert_eq!(windows, 3);
+        let mut next = [0; 7];
+        input.read_exact(&mut next).unwrap();
+        assert_eq!(&next[..], &content[23..30]);
+    }
+
+    #[test]
+    fn native_auto_choice_matches_verified_sample_sizes_on_heterogeneous_files() {
+        use super::{read_sample, sample_windows, select_native_codec};
+        use applesauce_core::compressor::Kind;
+        use std::io::Write;
+
+        // Exercise a constant file, a mixed file whose middle differs from the
+        // edges, and deterministic high-entropy input. All files are disposable.
+        let constant = vec![b'Q'; 4 * BLOCK_SIZE + 17];
+        let mut mixed = vec![b'R'; 4 * BLOCK_SIZE + 17];
+        for byte in &mut mixed[BLOCK_SIZE..3 * BLOCK_SIZE] {
+            *byte = b'X';
+        }
+        let mut entropy = vec![0u8; 4 * BLOCK_SIZE + 17];
+        let mut state = 0x1234_5678_u32;
+        for byte in &mut entropy {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = (state >> 8) as u8;
+        }
+
+        for input in [constant, mixed, entropy] {
+            let mut source = tempfile::tempfile().unwrap();
+            source.write_all(&input).unwrap();
+            let mut best: Option<(Kind, usize)> = None;
+            for kind in [Kind::Lzfse, Kind::Lzvn, Kind::Zlib] {
+                let Some(mut encoder) = kind.compressor() else {
+                    continue;
+                };
+                let mut score = 0usize;
+                let mut valid = true;
+                for (offset, length) in sample_windows(input.len() as u64) {
+                    let window = read_sample(&source, offset, length).unwrap();
+                    let mut encoded = vec![0; BLOCK_SIZE + 1024];
+                    let mut decoded = vec![0; BLOCK_SIZE];
+                    let Ok(size) = encoder.compress(&mut encoded, &window, 5) else {
+                        valid = false;
+                        break;
+                    };
+                    let Ok(restored) = encoder.decompress(&mut decoded, &encoded[..size]) else {
+                        valid = false;
+                        break;
+                    };
+                    if restored != window.len() || decoded[..restored] != window[..] {
+                        valid = false;
+                        break;
+                    }
+                    score += size;
+                }
+                if valid && best.is_none_or(|(_, size)| score < size) {
+                    best = Some((kind, score));
+                }
+            }
+            let (selected, measured, windows) =
+                select_native_codec(&source, input.len() as u64, 5).unwrap();
+            assert_eq!(selected, best.expect("at least one stable codec").0);
+            assert_eq!(measured, BLOCK_SIZE);
+            assert_eq!(windows, 3);
+        }
+    }
+
+    #[test]
+    fn native_auto_refuses_truncated_source_during_sampling() {
+        use super::select_native_codec;
+        use std::io::{Seek, SeekFrom, Write};
+
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"short").unwrap();
+        source.seek(SeekFrom::Start(3)).unwrap();
+        let error = select_native_codec(&source, 200_000, 5).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(source.stream_position().unwrap(), 3);
+    }
+
+    #[test]
+    fn native_auto_source_preflight_rejects_swaps_before_sampling() {
+        use super::open_scanned_regular_file;
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selected-source");
+        let old = dir.path().join("old-source");
+        fs::write(&path, b"generated source bytes").unwrap();
+        let scanned = fs::symlink_metadata(&path).unwrap();
+        open_scanned_regular_file(&path, &scanned).unwrap();
+
+        // A same-length replacement with a different inode must not be read
+        // merely because its path and apparent length still match the scan.
+        fs::rename(&path, &old).unwrap();
+        fs::write(&path, b"generated source bytes").unwrap();
+        assert_eq!(
+            open_scanned_regular_file(&path, &scanned)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        // A pathname replaced by a link must not resolve to the old inode.
+        fs::remove_file(&path).unwrap();
+        symlink(&old, &path).unwrap();
+        assert!(open_scanned_regular_file(&path, &scanned).is_err());
+        assert_eq!(fs::read(&old).unwrap(), b"generated source bytes");
+    }
+
+    #[test]
+    fn native_auto_source_preflight_refuses_fifo_without_blocking() {
+        use super::open_scanned_regular_file;
+        use std::ffi::CString;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::FileTypeExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selected-source");
+        fs::write(&path, b"generated regular file").unwrap();
+        let scanned = fs::symlink_metadata(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c_path is a NUL-terminated path inside a disposable directory.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+
+        // O_NONBLOCK allows the descriptor check to reject a FIFO even when
+        // no writer exists. A normal blocking open would hang the worker.
+        assert!(open_scanned_regular_file(&path, &scanned).is_err());
+    }
 
     #[test]
     fn chunk_reader_preserves_generated_bytes_and_boundaries() {
