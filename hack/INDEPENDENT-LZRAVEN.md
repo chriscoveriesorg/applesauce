@@ -88,11 +88,16 @@ mutate the final chunk and its index digest. Fixtures with at least three chunks
 add middle-chunk payload and digest mutations, covering every chunk in the
 three-chunk proof fixtures. All nine changes must be rejected. Payload-only changes must reach the independent decoder, preventing
 a parser-only failure from being mistaken for codec conformance testing.
-The three parser-damage cases must fail at their specific parser gates.
+Every index-digest, truncated-payload and appended-payload case must fail at its intended parser gate.
 Decoder timeouts cannot count as successful corruption rejection. Baseline and
 all nine negative cases share one **180-second decoder budget**, with an optional
 `--total-timeout-seconds` override (maximum 3600) for reviewed diagnostic use.
 An exhausted shared budget fails even if the final case was otherwise rejected.
+
+The independent decoder's output file limit permits one extra sentinel byte,
+so an executable that ignores `SIGXFSZ` cannot qualify by silently discarding
+attempted excess output. After all negative cases, archive identity and its
+complete SHA-256 are rechecked alongside the original plaintext and decoder.
 
 The macOS proof workflow runs nine cases on each generated content
 family at the 131,103-byte three-chunk boundary (18 negative cases per codec).
