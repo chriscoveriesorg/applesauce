@@ -55,6 +55,57 @@ fn restoring_a_directory_preserves_parent_modification_time() {
 }
 
 #[test]
+fn explicitly_selected_file_preserves_parent_directory_timestamps() {
+    // A single-file root bypasses jwalk's directory callback. Both the
+    // initial compression and subsequent restoration must still preserve the
+    // containing directory's modification time, including for relative names.
+    for relative in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("direct-file.txt");
+        let source = vec![b'P'; 3 * 65_536 + 17];
+        fs::write(&file, &source).unwrap();
+        let selected = if relative {
+            std::path::Path::new("direct-file.txt")
+        } else {
+            file.as_path()
+        };
+
+        for decompress in [false, true] {
+            let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_690_000_000);
+            fs::File::open(temporary.path())
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+            let expected = fs::metadata(temporary.path()).unwrap().modified().unwrap();
+
+            let mut command = Command::new(env!("CARGO_BIN_EXE_applesauce"));
+            command.current_dir(temporary.path());
+            if decompress {
+                command.arg("decompress");
+            } else {
+                command.args(["compress", "--verify", "-c", "zlib"]);
+            }
+            let result = command.arg(selected).output().unwrap();
+            assert!(
+                result.status.success(),
+                "direct file operation failed (relative={relative}, decompress={decompress}): {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                fs::metadata(temporary.path()).unwrap().modified().unwrap(),
+                expected,
+                "direct file operation changed parent mtime (relative={relative}, decompress={decompress})"
+            );
+            assert_eq!(fs::read(&file).unwrap(), source);
+            assert_eq!(
+                applesauce::info::get(&file).unwrap().is_compressed,
+                !decompress
+            );
+        }
+    }
+}
+
+#[test]
 fn default_and_manual_decompression_verify_generated_native_files() {
     let dir = tempfile::tempdir().unwrap();
     let fixture: Vec<u8> = (0..(3 * 65_536 + 17))
