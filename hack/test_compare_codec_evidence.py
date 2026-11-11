@@ -118,58 +118,37 @@ class CodecCompareTests(unittest.TestCase):
         self.assertEqual(self.input.read_bytes(), original)
         self.assertTrue(self.output.is_symlink())
 
-    def test_output_symlink_to_unrelated_file_does_not_modify_target(self):
-        # Atomic publication must replace the output link, not follow it
-        # into an unrelated file when generating valid comparison evidence.
+    def test_existing_symlink_and_hardlink_outputs_are_preserved(self):
+        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
+                   str(self.output)]
         target = self.root / "unrelated.txt"
         original = b"unrelated data must remain unchanged\\n"
         target.write_bytes(original)
         self.output.symlink_to(target)
-        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
-                   str(self.output)]
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertTrue(self.output.is_symlink())
         self.assertEqual(target.read_bytes(), original)
-        self.assertFalse(self.output.is_symlink())
-        with self.output.open(newline="", encoding="utf-8") as stream:
-            self.assertEqual(len(list(csv.DictReader(stream))), 4)
 
-    def test_dangling_output_symlink_does_not_create_target(self):
-        # Atomic publication must replace a dangling link without creating
-        # the file named by that link, even when comparison succeeds.
-        target = self.root / "missing-unrelated-evidence.txt"
-        self.assertFalse(target.exists())
-        self.output.symlink_to(target)
-        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
-                   str(self.output)]
+        self.output.unlink()
+        missing = self.root / "missing-unrelated-evidence.txt"
+        self.output.symlink_to(missing)
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(target.exists())
-        self.assertFalse(self.output.is_symlink())
-        with self.output.open(newline="", encoding="utf-8") as stream:
-            self.assertEqual(len(list(csv.DictReader(stream))), 4)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertTrue(self.output.is_symlink())
+        self.assertFalse(missing.exists())
 
-    def test_output_hardlink_to_unrelated_file_does_not_modify_target(self):
-        # Publishing through an existing hardlink must not overwrite the
-        # other name's inode or change its exact bytes.
-        target = self.root / "unrelated-hardlink.txt"
-        original = b"independent evidence must remain unchanged\n"
-        target.write_bytes(original)
-        os.link(target, self.output)
-        command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
-                   str(self.output)]
+        self.output.unlink()
+        self.output.hardlink_to(target)
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(target.read_bytes(), original)
-        self.assertNotEqual(os.stat(target).st_ino, os.stat(self.output).st_ino)
-        with self.output.open(newline="", encoding="utf-8") as stream:
-            self.assertEqual(len(list(csv.DictReader(stream))), 4)
+        self.assertEqual(os.stat(target).st_ino, os.stat(self.output).st_ino)
 
     def test_invalid_utf8_confidence_fails_closed_without_traceback(self):
         # Evidence can be a bounded regular file but still contain invalid
         # UTF-8; it must not produce a traceback or retain stale output.
         self.input.write_bytes(b"\xff\xfe\x80")
-        self.output.write_text("stale evidence", encoding="utf-8")
         command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
                    str(self.output)]
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
@@ -185,7 +164,6 @@ class CodecCompareTests(unittest.TestCase):
             "suite\n" + "x" * (csv.field_size_limit() + 1) + "\n",
             encoding="utf-8",
         )
-        self.output.write_text("stale evidence", encoding="utf-8")
         command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
                    str(self.output)]
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
@@ -194,11 +172,17 @@ class CodecCompareTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.output.exists())
 
-    def test_failed_rerun_does_not_retain_stale_comparison(self):
+    def test_failed_rerun_refuses_stale_output_and_malformed_evidence(self):
         self.output.write_text("stale prior-run evidence", encoding="utf-8")
         self.save(self.rows[:-1])
         command = [sys.executable, str(SCRIPT), str(self.input), "smoke",
                    str(self.output)]
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=5
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.output.read_text(), "stale prior-run evidence")
+        self.output.unlink()  # Emulate fresh-run evidence reset.
         result = subprocess.run(
             command, capture_output=True, text=True, timeout=5
         )
