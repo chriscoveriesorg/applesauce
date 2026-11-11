@@ -170,7 +170,8 @@ impl Progress for ProgressBars {
             | SkipReason::ZfsFilesystem
             | SkipReason::HasRequiredXattr
             | SkipReason::FsNotSupported
-            | SkipReason::HardLink => Verbosity::Normal,
+            | SkipReason::HardLink
+            | SkipReason::DuplicateInput => Verbosity::Normal,
         };
         if self.verbosity >= required_verbosity {
             self.total_bar

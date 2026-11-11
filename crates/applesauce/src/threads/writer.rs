@@ -10,8 +10,89 @@ use std::os::macos::fs::MetadataExt;
 use std::os::unix::fs::MetadataExt as UnixMetadataExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::{cmp, io, ptr};
+use std::{cmp, fmt, io, ptr};
 use tempfile::NamedTempFile;
+
+/// Compression ratio rejection is an expected skip, not a failed filesystem write.
+/// Preserve its identity through io::Error so other writer failures remain visible.
+#[derive(Debug)]
+struct BelowMinimumRatio(f64);
+
+impl fmt::Display for BelowMinimumRatio {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "did not compress to at least {}% of original size",
+            self.0 * 100.0
+        )
+    }
+}
+
+impl std::error::Error for BelowMinimumRatio {}
+
+fn record_write_result(progress: &dyn crate::progress::Task, path: &Path, result: &io::Result<()>) {
+    match result {
+        Ok(()) => {}
+        Err(error)
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<BelowMinimumRatio>()) => {}
+        Err(error) => {
+            progress.error(&format!("Error writing {}: {error}", path.display()));
+        }
+    }
+}
+
+// A decmpfs resource-fork payload is compressed storage, not a user-visible
+// resource fork to copy to the restored file. Inline compression may coexist
+// with a legitimate resource fork, which must survive the restoration.
+fn remove_consumed_compression_metadata(
+    staged: &File,
+    compression_type: decmpfs::CompressionType,
+) -> io::Result<()> {
+    xattr::remove_if_present(staged, decmpfs::XATTR_NAME)?;
+    if matches!(
+        compression_type.compression_storage(),
+        Some((_, decmpfs::Storage::ResourceFork))
+    ) {
+        xattr::remove_if_present(staged, resource_fork::XATTR_NAME)?;
+    }
+    Ok(())
+}
+
+// Restoring an APFS-compressed source expands its logical bytes into a
+// temporary file on the same volume. Check available blocks before copying
+// payloads so a clearly impossible restore fails while the source is intact.
+// This is an advisory snapshot: other writers can consume space afterwards,
+// and write_all/sync_all must still propagate ENOSPC.
+fn require_restore_capacity(
+    logical_size: u64,
+    blocks_available: u64,
+    block_size: u64,
+) -> io::Result<()> {
+    let bytes_available = u128::from(blocks_available) * u128::from(block_size);
+    if u128::from(logical_size) > bytes_available {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            format!(
+                "insufficient free space for restoration: need {logical_size} bytes, have {bytes_available} bytes"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_restore_capacity(stage: &File, logical_size: u64) -> io::Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: stage is an open descriptor and stat points to writable storage
+    // for the complete statfs structure. Its contents are read only on success.
+    if unsafe { libc::fstatfs(stage.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstatfs succeeded and initialized the entire result structure.
+    let stat = unsafe { stat.assume_init() };
+    require_restore_capacity(logical_size, stat.f_bavail, u64::from(stat.f_bsize))
+}
 
 pub(super) type Sender = crossbeam_channel::Sender<WorkItem>;
 
@@ -78,9 +159,8 @@ impl Handler {
                 minimum_compression_ratio,
             ) {
                 context.progress.not_compressible_enough(&context.path);
-                return Err(io::Error::other(format!(
-                    "did not compress to at least {}% of original size",
-                    minimum_compression_ratio * 100.0
+                return Err(io::Error::other(BelowMinimumRatio(
+                    minimum_compression_ratio,
                 )));
             }
 
@@ -148,20 +228,24 @@ impl Handler {
             })?;
         }
 
-        let new_file = {
+        // A failed timestamp reset must leave the original uncompressed file
+        // intact, just like a failed content verification. Flush the fully
+        // prepared compressed staging inode before the atomic replacement.
+        // Restoration follows the same publication order below.
+        times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
+        tmp_file.as_file().sync_all()?;
+
+        {
             let _entered = tracing::debug_span!("rename tmp file").entered();
             ensure_source_path_matches_open_file(
                 &item.file,
                 &item.context.path,
                 &item.context.orig_metadata,
             )?;
-            tmp_file.persist(&item.context.path)?
-        };
+            tmp_file.persist(&item.context.path)?;
+        }
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
-        }
-        if let Err(e) = times::reset_times(&new_file, &item.context.orig_times) {
-            tracing::error!("Unable to reset times: {e}");
         }
         Ok(())
     }
@@ -169,20 +253,24 @@ impl Handler {
     fn write_uncompressed_file(&mut self, item: WorkItem) -> io::Result<()> {
         let mut tmp_file = tmp_file_for(&item)?;
         copy_xattrs(&item.file, tmp_file.as_file())?;
-        // COPYFILE_XATTR may preserve com.apple.decmpfs from the compressed
-        // source. A restored plain file must not publish stale compression
-        // metadata, even when the compressed flag is subsequently cleared.
-        // Operate only on the temporary destination; fail closed if removal
-        // is denied, and tolerate filesystems that did not copy the attribute.
-        xattr::remove_if_present(tmp_file.as_file(), decmpfs::XATTR_NAME)?;
-
         let decmpfs_data = xattr::read(
             item.file.as_ref(),
             decmpfs::XATTR_NAME,
             decmpfs::MAX_XATTR_SIZE,
         )?
         .ok_or_else(|| io::Error::other("file is not compressed"))?;
-        let expected_size = decmpfs::Value::from_data(&decmpfs_data)?.uncompressed_size;
+        let header = decmpfs::Value::from_data(&decmpfs_data)?;
+
+        // COPYFILE_XATTR can copy both the decmpfs descriptor and the
+        // compressed payload's resource fork. Neither belongs in a restored
+        // plain file. Preserve an unrelated resource fork for inline-xattr
+        // compression: only resource-fork-backed types consume that fork.
+        // Fail before publication when clearing either attribute is denied.
+        remove_consumed_compression_metadata(tmp_file.as_file(), header.compression_type)?;
+        let expected_size = header.uncompressed_size;
+        // Refuse a clearly over-capacity restore before writing staged bytes.
+        // The staged destination is on the same volume as the source.
+        preflight_restore_capacity(tmp_file.as_file(), expected_size)?;
         let mut written_size = 0u64;
 
         item.blocks.try_for_each(|chunk| {
@@ -231,17 +319,25 @@ impl Handler {
             item.context.orig_metadata.st_flags() & !libc::UF_COMPRESSED,
         )?;
 
+        // Restore the scanned timestamps on staging, before touching the
+        // original pathname. A denied metadata update must fail the restore
+        // while the original compressed inode is still intact. Resetting
+        // timestamps after persist could instead report success with a
+        // partially restored metadata state.
+        times::reset_times(tmp_file.as_file(), &item.context.orig_times)?;
+
+        // Commit only a fully written, verified and durable staging file,
+        // including its restored timestamps.
+        tmp_file.as_file().sync_all()?;
+
         ensure_source_path_matches_open_file(
             &item.file,
             &item.context.path,
             &item.context.orig_metadata,
         )?;
-        let new_file = tmp_file.persist(&item.context.path)?;
+        tmp_file.persist(&item.context.path)?;
         if let Some(resetter) = &item.context.parent_resetter {
             resetter.activate();
-        }
-        if let Err(e) = times::reset_times(&new_file, &item.context.orig_times) {
-            tracing::error!("Unable to reset times: {e}");
         }
         Ok(())
     }
@@ -259,6 +355,10 @@ impl WorkHandler<WorkItem> for Handler {
             }
         };
 
+        // Errors from verification, temporary-file publication, metadata and
+        // block decoding must reach CLI progress reporting. The ratio gate
+        // is a deliberate non-error skip.
+        record_write_result(context.progress.as_ref(), &context.path, &res);
         if res.is_ok() {
             context.report_new_stats();
             let compressing = context.operation.mode.is_compressing();
@@ -339,7 +439,7 @@ fn same_source_snapshot(expected: &Metadata, actual: &Metadata) -> bool {
         && UnixMetadataExt::ctime_nsec(expected) == UnixMetadataExt::ctime_nsec(actual)
 }
 
-fn ensure_source_path_matches_open_file(
+pub(super) fn ensure_source_path_matches_open_file(
     source: &File,
     path: &Path,
     scanned: &Metadata,
@@ -388,11 +488,47 @@ fn ensure_identical_files<R1: BufRead, R2: BufRead>(mut lhs: R1, mut rhs: R2) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_identical_files, ensure_source_path_matches_open_file};
+    use super::{
+        ensure_identical_files, ensure_source_path_matches_open_file, record_write_result,
+        require_restore_capacity, BelowMinimumRatio,
+    };
+    use crate::progress::Task;
     use std::fs::{self, File};
-    use std::io::{BufReader, Cursor, ErrorKind};
+    use std::io::{self, BufReader, Cursor, ErrorKind};
     use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn restore_metadata_cleanup_drops_only_consumed_resource_forks() {
+        use applesauce_core::compressor::Kind;
+        use applesauce_core::decmpfs::{self, CompressionType, Storage};
+        use resource_fork::{ResourceFork, XATTR_NAME};
+        use std::io::Write;
+
+        for storage in [Storage::ResourceFork, Storage::Xattr] {
+            let staged = tempfile::NamedTempFile::new().unwrap();
+            let file = staged.as_file();
+            ResourceFork::new(file)
+                .write_all(b"generated fork bytes")
+                .unwrap();
+            assert!(crate::xattr::is_present(file, XATTR_NAME).unwrap());
+
+            super::remove_consumed_compression_metadata(
+                file,
+                CompressionType::new(Kind::Zlib, storage),
+            )
+            .unwrap();
+
+            assert_eq!(
+                crate::xattr::is_present(file, XATTR_NAME).unwrap(),
+                storage == Storage::Xattr,
+                "inline compression must preserve an unrelated resource fork"
+            );
+            assert!(!crate::xattr::is_present(file, decmpfs::XATTR_NAME).unwrap());
+        }
+    }
 
     #[test]
     fn publication_guard_rejects_replaced_path_and_symlink() {
@@ -538,5 +674,68 @@ mod tests {
                 error_kind
             );
         }
+    }
+
+    #[test]
+    fn restoration_space_preflight_rejects_overcommit_without_overflow() {
+        // Exact fit succeeds, but even a one-byte deficit must refuse.
+        assert!(require_restore_capacity(8192, 2, 4096).is_ok());
+        let err = require_restore_capacity(8193, 2, 4096).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::StorageFull);
+        assert!(err.to_string().contains("need 8193 bytes"));
+        assert!(require_restore_capacity(1, 0, 4096).is_err());
+        assert!(require_restore_capacity(0, 0, 4096).is_ok());
+
+        // Multiply in u128, allowing realistic large logical files and free
+        // block counts without an overflowing u64 intermediate.
+        assert!(require_restore_capacity(u64::MAX, u64::MAX, 4096).is_ok());
+        assert!(require_restore_capacity(u64::MAX, 1, 4096).is_err());
+    }
+
+    #[derive(Default)]
+    struct RecordingTask(Mutex<Vec<String>>);
+
+    impl Task for RecordingTask {
+        fn increment(&self, _amount: u64) {}
+
+        fn error(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+
+    #[test]
+    fn writer_failures_are_reported_but_expected_ratio_skips_are_not() {
+        let progress = RecordingTask::default();
+        let file = Path::new("generated-file");
+
+        record_write_result(&progress, file, &Ok(()));
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::other(BelowMinimumRatio(0.95))),
+        );
+        assert!(progress.0.lock().unwrap().is_empty());
+
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "restored file verification failed",
+            )),
+        );
+        record_write_result(
+            &progress,
+            file,
+            &Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "temporary file publication denied",
+            )),
+        );
+        let errors = progress.0.lock().unwrap();
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("generated-file"));
+        assert!(errors[0].contains("restored file verification failed"));
+        assert!(errors[1].contains("temporary file publication denied"));
     }
 }

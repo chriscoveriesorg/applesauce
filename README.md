@@ -150,8 +150,11 @@ applesauce archive [create|verify|extract] ...
 
 The options are as follows:
 
-- `compress`: Compresses the specified file/directory using one of three compression algorithms (LZFSE, LZVN, or ZLIB).
-- `decompress`: Decompresses the specified file/directory.
+- `compress`: Compresses the specified file/directory using one of three compression algorithms (LZFSE, LZVN, or ZLIB). The compressed staging file is verified when requested, has the source timestamps restored and is synced before the atomic replacement; a timestamp or sync error leaves the original uncompressed file intact. Explicit symlink, FIFO, socket and device roots are rejected before walking; a selected directory symlink cannot redirect compression into a different tree.
+- `decompress`: Restores files through a temporary file and verifies every restored byte against the kernel-visible compressed source before replacing it. The original file is preserved if content verification, timestamp restoration or staging-file sync fails. Restored timestamps are set on the temporary file before atomic publication. Explicit symlink, hard-linked file and special-file roots are refused with an error, rather than silently skipped or followed. While walking a selected directory, compressed hard-linked files are reported as restoration errors and left unchanged; unrelated uncompressed hard links remain skipped. Overlapping compression and restoration roots are deduplicated by source inode before scheduling writers, preventing competing replacements. Verification is enabled by default, including with `--manual`. Before writing restored bytes, a same-volume free-space preflight refuses a restore larger than the available space. This is a point-in-time check: concurrent disk usage can still exhaust space during the write, which also fails safely without replacing the source. A successful restore clears the decmpfs attribute and, for resource-fork-backed compression, its consumed compressed resource fork; inline-xattr compression preserves unrelated resource-fork data.
+
+For recovery on a macOS release whose kernel cannot decode the source, `decompress --manual --no-verify PATH` explicitly disables the independent kernel comparison. This is an unsafe recovery option and always prints a warning on standard error; inspect and back up the source before using it. The decoder's block-length and format checks still apply. `--verify` remains accepted as an explicit affirmation of the default and conflicts with `--no-verify`.
+
 - `info`: Prints information about the specified compressed file/directory, including the compression ratio and
   compression algorithm used.
 
