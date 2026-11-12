@@ -36,11 +36,14 @@ class Source:
         if not hasattr(os, "O_NOFOLLOW"):
             raise EvidenceError("O_NOFOLLOW is required")
         self.fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        self.before = os.fstat(self.fd)
-        self.size = self.before.st_size
-        if not stat.S_ISREG(self.before.st_mode) or self.size > MAX_FILE:
+        try:
+            self.before = os.fstat(self.fd)
+            self.size = self.before.st_size
+            if not stat.S_ISREG(self.before.st_mode) or self.size > MAX_FILE:
+                raise EvidenceError("input must be a regular file of at most 1 GiB")
+        except BaseException:
             os.close(self.fd)
-            raise EvidenceError("input must be a regular file of at most 1 GiB")
+            raise
 
     def read(self, offset: int, size: int) -> bytes:
         if offset < 0 or size < 0 or size > MAX_READ or offset + size > self.size:
