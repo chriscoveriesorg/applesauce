@@ -124,7 +124,10 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
                 raise EvidenceError("evidence was truncated")
             chunks.append(chunk)
             remaining -= len(chunk)
-        after = os.fstat(fd)
+        try:
+            after = os.fstat(fd)
+        except OSError as error:
+            raise EvidenceError(f"cannot restat evidence file: {error.strerror}") from error
         try:
             named = os.stat(path, follow_symlinks=False)
         except OSError as error:
