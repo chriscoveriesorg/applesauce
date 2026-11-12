@@ -278,23 +278,29 @@ def require_report(output, path, codec, storage, expected_size):
 
 
 def require_restored_report(output, path, expected_size):
-    """Verify decompression removed the actual APFS compression attributes.
+    """Require one complete, typed actual-storage row with no compression left.
 
-    Kernel and mmap readback can both succeed even if decompression was a no-op.
+    Successful readback can conceal a no-op decompression. An unrelated or
+    malformed row cannot stand in for the requested resource.
     """
     report = json.loads(run(output, "info", "--json", path))
-    if not isinstance(report, dict) or report.get("complete") is not True:
+    if (
+        not isinstance(report, dict)
+        or report.get("schema_version") != 1
+        or report.get("report_kind") != "actual_storage"
+        or report.get("complete") is not True
+    ):
         raise AssertionError(f"incomplete restoration storage report: {report}")
-    if report.get("report_kind") != "actual_storage":
-        raise AssertionError(f"unexpected restoration report kind: {report}")
-    matches = [
-        row for row in report.get("paths", [])
-        if isinstance(row, dict) and isinstance(row.get("path"), dict)
-        and row["path"].get("display") == str(path)
-    ]
-    if len(matches) != 1:
-        raise AssertionError(f"wrong restoration storage row count: {matches}")
-    row = matches[0]
+    rows = report.get("paths")
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise AssertionError(f"wrong restoration storage row count: {rows}")
+    row = rows[0]
+    if (
+        not isinstance(row, dict)
+        or not isinstance(row.get("path"), dict)
+        or row["path"].get("display") != str(path)
+    ):
+        raise AssertionError(f"unexpected restoration storage row: {row}")
     if (
         row.get("entry_type") != "file"
         or row.get("error") is not None
@@ -302,9 +308,12 @@ def require_restored_report(output, path, expected_size):
         or row.get("codec") != "none"
         or row.get("storage") is not None
         or row.get("decmpfs_type") is not None
-        or row.get("decmpfs_xattr_bytes") != 0
-        or row.get("resource_fork_bytes") != 0
-        or row.get("logical_size_bytes") != expected_size
+        or type(row.get("decmpfs_xattr_bytes")) is not int
+        or row["decmpfs_xattr_bytes"] != 0
+        or type(row.get("resource_fork_bytes")) is not int
+        or row["resource_fork_bytes"] != 0
+        or type(row.get("logical_size_bytes")) is not int
+        or row["logical_size_bytes"] != expected_size
     ):
         raise AssertionError(f"restoration left compressed or invalid storage: {row}")
 
@@ -320,6 +329,29 @@ def require_bundle_audit(report, app, files):
     rows = report.get("paths")
     if not isinstance(rows, list):
         raise AssertionError("missing bundle audit path rows")
+
+    # A fixture with only two eligible Resources must never report another
+    # path as safe for compression. Validate every row, not just the expected
+    # examples, so an executable or a new nested bundle cannot hide elsewhere.
+    expected_resources = {str(path) for path in files}
+    app_name = str(app)
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), dict):
+            raise AssertionError(f"malformed bundle audit row: {row}")
+        name = row["path"].get("display")
+        if not isinstance(name, str) or (
+            name != app_name and not name.startswith(app_name + os.sep)
+        ):
+            raise AssertionError(f"bundle audit path escaped fixture: {name}")
+        if name in seen:
+            raise AssertionError(f"duplicate bundle audit path: {name}")
+        seen.add(name)
+        selected = row.get("would_compress")
+        if type(selected) is not bool:
+            raise AssertionError(f"untyped bundle audit eligibility: {row}")
+        if selected and name not in expected_resources:
+            raise AssertionError(f"unsafe extra bundle audit selection: {name}")
 
     def single(path):
         matches = [
