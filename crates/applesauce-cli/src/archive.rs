@@ -338,6 +338,8 @@ impl OutputDirectoryGuard {
             let opened = temporary.as_file().metadata()?;
             ensure_unchanged_staging_output(&temporary, &opened)?;
             let directory_fd = self.opened.as_raw_fd();
+            // SAFETY: directory_fd is an open directory descriptor; both CStrings
+            // are NUL-terminated names without interior NUL bytes.
             let linked = unsafe {
                 libc::linkat(
                     directory_fd,
@@ -356,6 +358,8 @@ impl OutputDirectoryGuard {
             // the descriptor, then recheck that the requested parent still
             // resolves to this directory.
             let mut published = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: directory_fd is valid, target_name is NUL-terminated,
+            // and published points to writable storage for a libc::stat.
             let stat_result = unsafe {
                 libc::fstatat(
                     directory_fd,
@@ -365,9 +369,10 @@ impl OutputDirectoryGuard {
                 )
             };
             let identity_ok = if stat_result == 0 {
+                // SAFETY: successful fstatat initialized the entire stat value.
                 let published = unsafe { published.assume_init() };
                 opened.dev() == published.st_dev as u64
-                    && opened.ino() == published.st_ino as u64
+                    && opened.ino() == published.st_ino
                     && opened.len() == published.st_size as u64
             } else {
                 false
@@ -377,6 +382,8 @@ impl OutputDirectoryGuard {
                 // Best-effort rollback is confined to the pinned directory.
                 // A malicious actor with write access to that directory can
                 // still race the final name, so don't claim a universal lock.
+                // SAFETY: directory_fd is still owned by this guard and
+                // target_name points to a NUL-terminated filename.
                 unsafe {
                     libc::unlinkat(directory_fd, target_name.as_ptr(), 0);
                 }
@@ -389,6 +396,8 @@ impl OutputDirectoryGuard {
             // Disable NamedTempFile's pathname-based Drop: its original parent
             // could have been renamed. Remove the private name via dirfd instead.
             let (_file, _staging_path) = temporary.keep().map_err(|error| error.error)?;
+            // SAFETY: directory_fd remains open and source_name is a valid
+            // NUL-terminated filename relative to the pinned directory.
             if unsafe { libc::unlinkat(directory_fd, source_name.as_ptr(), 0) } != 0 {
                 return Err(io::Error::last_os_error());
             }
