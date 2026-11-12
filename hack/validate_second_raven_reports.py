@@ -59,11 +59,9 @@ def require(condition, message):
 
 
 def digest_file(path):
-    checksum = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            checksum.update(chunk)
-    return checksum.hexdigest()
+    # Decoder, source and CLI identities must not follow symlinks or block on
+    # special files. Cap memory/disk consumption for supplied proof inputs.
+    return hash_retained_regular(Path(path), 128 * 1024 * 1024)
 
 
 def git_head(root):
@@ -73,12 +71,24 @@ def git_head(root):
 
 
 def read_report(root, relpath, report_digests):
-    # Only fixed, script-generated report names are accepted here.
-    path = root / relpath
-    require(path.is_file() and not path.is_symlink(), f"missing regular report: {relpath}")
-    raw = path.read_bytes()
-    require(len(raw) <= 512 * 1024, f"oversized evidence report: {relpath}")
-    obj = json.loads(raw)
+    # Exact generated paths, bounded reads from a pinned regular-file handle.
+    # JSON object keys must be unique at every nesting level: accepting
+    # duplicates makes a human-reviewed report ambiguous.
+    raw = read_bounded_regular(root / relpath, 512 * 1024,
+                               f"report: {relpath}")
+
+    def unique_pairs(pairs):
+        obj = {}
+        for key, value in pairs:
+            require(key not in obj, f"duplicate JSON key in {relpath}: {key}")
+            obj[key] = value
+        return obj
+
+    def reject_constant(value):
+        raise ValueError(f"non-finite JSON value in {relpath}: {value}")
+
+    obj = json.loads(raw, object_pairs_hook=unique_pairs,
+                     parse_constant=reject_constant)
     require(isinstance(obj, dict), f"report must be a JSON object: {relpath}")
     report_digests[str(relpath)] = hashlib.sha256(raw).hexdigest()
     return obj
@@ -114,6 +124,36 @@ MAX_FRESH_ARCHIVE_BYTES = 2 * 1024 * 1024
 def file_identity(info):
     return (info.st_dev, info.st_ino, info.st_size,
             info.st_mtime_ns, info.st_ctime_ns)
+
+
+def read_bounded_regular(path, max_bytes, label):
+    """Read only a stable, nonempty regular file via an opened descriptor.
+
+    O_NONBLOCK rejects FIFOs without waiting. Opening with O_NOFOLLOW
+    prevents substituting a symlink for an evidence report. A final pathname
+    identity check detects replacement of the opened file during reading.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"missing regular {label}") from exc
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and
+                0 < before.st_size <= max_bytes,
+                f"invalid or oversized regular {label}")
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            raw = stream.read(max_bytes + 1)
+        after = os.fstat(fd)
+        leaf = path.lstat()
+        require(len(raw) == before.st_size and
+                stat.S_ISREG(leaf.st_mode) and
+                file_identity(before) == file_identity(after) == file_identity(leaf),
+                f"regular {label} changed during read")
+        return raw
+    finally:
+        os.close(fd)
 
 
 def read_fresh_archive(reports, family, size):
