@@ -114,6 +114,11 @@ def source_index(report: dict, kind: str) -> dict[str, str | None]:
             if not isinstance(digest, str) or len(digest) != 64 or any(
                     ch not in "0123456789abcdef" for ch in digest):
                 raise EvidenceError(f"missing {kind} source SHA-256")
+        else:
+            # An unavailable source has no inspected bytes to attest. Reject a
+            # contradictory digest rather than silently dropping its claim.
+            if item.get("sha256") is not None:
+                raise EvidenceError(f"unavailable {kind} source has SHA-256")
         # Preserve failed attempts too: otherwise sources missing on one side
         # could be silently ignored while the successful subset appears pinned.
         result[name] = digest
