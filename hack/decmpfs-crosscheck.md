@@ -24,8 +24,13 @@ The crosscheck now requires every static registration table to reference a
 specific binary-observed callsite within the same source path, Mach-O image
 name and UUID. It compares complete callsite records, including instruction
 bytes and their digest, and rejects missing, conflicting or duplicate
-attributions. These matches support static provenance only; they do not show
-that a handler was registered or invoked by the running kernel.
+attributions. Each reported registration table is also decoded from its
+bounded 16-byte little-endian records: the checked SHA-256, row count, stride,
+type numbers, zero padding, raw registration pointers, pointer-resolution
+addresses and originating callsite window digest must agree. Altered report
+metadata cannot silently change the candidate type list. These are
+self-consistency checks against captured bytes, not independent proof that a
+handler was registered or invoked by the running kernel.
 
 All scan operations are read-only. This workflow never mounts a disk image,
 sets compression attributes, runs a synthetic kernel payload or changes a
