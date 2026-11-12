@@ -127,8 +127,10 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
         raw = b"".join(chunks)
         reject_excessive_json_nesting(raw)
         try:
+            # Decode strictly as UTF-8; json.loads(bytes) also accepts UTF-16/32,
+            # which the JSON evidence producers do not emit.
             document = json.loads(
-                raw, object_pairs_hook=unique_pairs,
+                raw.decode("utf-8"), object_pairs_hook=unique_pairs,
                 parse_int=bounded_json_integer,
                 parse_float=finite_json_float,
                 parse_constant=lambda value: (_ for _ in ()).throw(
