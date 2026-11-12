@@ -324,14 +324,18 @@ impl std::ops::Deref for PinnedTempFile {
     type Target = NamedTempFile;
 
     fn deref(&self) -> &Self::Target {
-        self.temporary.as_ref().expect("staging file already cleaned")
+        self.temporary
+            .as_ref()
+            .expect("staging file already cleaned")
     }
 }
 
 #[cfg(unix)]
 impl std::ops::DerefMut for PinnedTempFile {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.temporary.as_mut().expect("staging file already cleaned")
+        self.temporary
+            .as_mut()
+            .expect("staging file already cleaned")
     }
 }
 
@@ -502,7 +506,9 @@ impl OutputDirectoryGuard {
             // warning rather than a false "publication failed" result. Drop
             // also uses the pinned descriptor for early-return cleanup.
             if let Err(error) = temporary.cleanup() {
-                eprintln!("warning: verified archive published but staging cleanup failed: {error}");
+                eprintln!(
+                    "warning: verified archive published but staging cleanup failed: {error}"
+                );
             }
             Ok(())
         }
