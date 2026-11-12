@@ -157,10 +157,13 @@ def verified_registration_callsites(binary: dict, table: dict) -> tuple[int, int
                 raise EvidenceError("malformed binary registration callsites")
             # The probes both reuse decmpfs_binary_probe.callsites(). Equality
             # includes address, target, instruction window and byte digest.
-            index[identity] = {
+            signatures = [
                 json.dumps(call, sort_keys=True, separators=(",", ":"))
                 for call in calls
-            }
+            ]
+            if len(set(signatures)) != len(signatures):
+                raise EvidenceError("duplicate binary registration callsite")
+            index[identity] = set(signatures)
             observed += len(calls)
         by_source[source["path"]] = index
 
