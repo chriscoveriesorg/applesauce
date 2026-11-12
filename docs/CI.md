@@ -13,11 +13,17 @@ Live labels (2026-11-12):
 | runs-on | What it is for | Size |
 |---|---|---|
 | `[self-hosted, bosn]` | heavy Rust, full suites | 7 CPU, 7 GiB RAM, 20 GiB disk |
-| `[self-hosted, claw-small]` | light jobs: lint, docs, scripts | 2 CPU, 3 GiB RAM, 10 GiB disk |
+| `claw-small` | light jobs: lint, docs, scripts | 2 CPU, 3 GiB RAM, 10 GiB disk |
 
-`bosn` runners also carry `rust`, `X64`, `Linux`, `own-ci`, and on the claw box
-`claw`, `claw-rust`, `avx512`. Heavy Rust runs at most one job on claw and two
-on webclip at a time; plan for the queue, not for parallelism.
+The two are not written the same way, and the difference matters. The heavy set
+advertises `self-hosted` along with `bosn`, `rust`, `X64`, `Linux`, `own-ci` and,
+on the claw box, `claw`, `claw-rust`, `avx512`. The small set advertises exactly
+one label, `claw-small`, with no `self-hosted` — so a job asking for
+`[self-hosted, claw-small]` matches nothing and queues forever. Write
+`runs-on: claw-small` on its own.
+
+Heavy Rust runs at most one job on claw and two on webclip at a time; plan for
+the queue, not for parallelism.
 
 There is no macOS label. macOS jobs stay where they are until a Mac runner is
 accepted; do not invent a label for them.
@@ -44,13 +50,14 @@ Stale bases are refreshed first: a green on an old main is not a green.
 
 ## 3. Batches
 
-Batching exists for the `cifast` repository only, and it is not switched on.
-Until it is, every repo lands one PR at a time. When it is switched on, it
-collects up to 16 PRs behind a single integration run with a six-hour deadline;
-the run's checks, not each PR's own checks, are what make the batch green.
+Batching is live, and only for `cifast`. A cron on the CI host runs
+`devkit merge-ready --batch --go` every five minutes, and only the `cifast`
+merge profile batches: it collects up to 16 PRs behind a single integration run
+with a six-hour deadline, and that run's checks — not each PR's own checks —
+are what make the batch green.
 
-Nothing else in this repo needs to change for that, and no repo should assume a
-batch exists.
+Every other repository lands one PR at a time. Do not assume a batch exists
+anywhere else, and do not add one: ask first.
 
 ## 4. Evidence
 
