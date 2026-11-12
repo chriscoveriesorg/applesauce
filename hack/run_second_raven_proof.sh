@@ -106,7 +106,7 @@ echo 'PASS: second decoder restored two committed Apple LZRAVEN vectors'
 
 fresh_option=()
 if [[ -n "$cli" ]]; then
-  mkdir "$evidence/fresh" "$evidence/negative"
+  mkdir "$evidence/fresh" "$evidence/negative" "$evidence/fresh-archives"
   if [[ ! -x "$cli" || "$(uname -s)" != Darwin ]]; then
     echo 'fresh Apple-buffer proof requires executable Applesauce CLI on macOS' >&2
     exit 2
@@ -136,6 +136,9 @@ PY
     "$cli" archive create "$input" "$archive" \
       --codec lzraven --allow-expansion --chunk-bytes 65536
     "$cli" archive verify "$archive"
+    # Keep the actual Apple-buffer ASCF bytes so a reviewer can replay
+    # every positive digest and all nine independent corruption mutations.
+    cp "$archive" "$evidence/fresh-archives/$label.ascf"
     python3 "$repo_root/hack/verify_independent_lzmesh.py" \
       --archive "$archive" --original "$input" \
       --decoder "$work/raven-second" --codec lzraven > "$evidence/fresh/$label.json"
