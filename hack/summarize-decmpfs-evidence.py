@@ -133,6 +133,61 @@ def source_index(report: dict, kind: str) -> dict[str, str | None]:
     return result
 
 
+def canonical_u64_hex(value, what: str) -> int:
+    """Accept the canonical 64-bit VM-address spelling emitted by the probes."""
+    if not isinstance(value, str) or not 3 <= len(value) <= 18 or not value.startswith("0x"):
+        raise EvidenceError(f"invalid {what}")
+    try:
+        address = int(value[2:], 16)
+    except ValueError as error:
+        raise EvidenceError(f"invalid {what}") from error
+    if not 0 <= address < 1 << 64 or hex(address) != value:
+        raise EvidenceError(f"invalid {what}")
+    return address
+
+
+def checked_binary_callsite(call: dict) -> None:
+    """Decode a bounded ARM64 BL call from its reported source instruction bytes.
+
+    The two probes could contain the same corrupted callsite. Comparing their
+    JSON alone cannot detect forged instruction bytes or a forged branch target.
+    """
+    pc = canonical_u64_hex(call.get("call_address"), "binary callsite address")
+    target = canonical_u64_hex(call.get("target_address"), "binary callsite target")
+    origin = canonical_u64_hex(call.get("window_address"), "binary callsite window")
+    offset = call.get("file_offset")
+    if type(offset) is not int or not 0 <= offset < (1 << 48):
+        raise EvidenceError("invalid binary callsite file offset")
+    if not all(isinstance(call.get(key), str) and call[key]
+               for key in ("section", "target_symbol")):
+        raise EvidenceError("invalid binary callsite section/target symbol")
+    if call.get("type_constant_candidate") is not None:
+        unsigned(call["type_constant_candidate"], "binary callsite type", 255)
+    if call.get("registration_pointer_candidate") is not None:
+        canonical_u64_hex(call["registration_pointer_candidate"], "binary callsite pointer")
+    record = call.get("registration_record_candidate")
+    if record is not None and not isinstance(record, dict):
+        raise EvidenceError("invalid binary callsite registration record")
+    encoded = call.get("instruction_window_hex")
+    if (not isinstance(encoded, str) or not 8 <= len(encoded) <= 168
+            or len(encoded) % 8 or any(ch not in "0123456789abcdef" for ch in encoded)):
+        raise EvidenceError("invalid binary callsite instruction bytes")
+    raw = bytes.fromhex(encoded)
+    if call.get("window_sha256") != hashlib.sha256(raw).hexdigest():
+        raise EvidenceError("binary callsite instruction digest mismatch")
+    delta = pc - origin
+    if not 0 <= delta <= 64 or delta % 4 or delta + 4 > len(raw):
+        raise EvidenceError("invalid binary callsite instruction position")
+    word, = struct.unpack_from("<I", raw, delta)
+    if word & 0xFC000000 != 0x94000000:
+        raise EvidenceError("binary callsite instruction is not ARM64 BL")
+    immediate = word & 0x03FFFFFF
+    if immediate & (1 << 25):
+        immediate -= 1 << 26
+    if target != pc + (immediate << 2):
+        raise EvidenceError("binary callsite branch target disagrees with instruction")
+
+
 def verified_registration_callsites(binary: dict, table: dict) -> tuple[int, int]:
     """Require each table-probe callsite to occur in the pinned binary probe.
 
@@ -165,6 +220,8 @@ def verified_registration_callsites(binary: dict, table: dict) -> tuple[int, int
                 raise EvidenceError("malformed binary registration callsites")
             # The probes both reuse decmpfs_binary_probe.callsites(). Equality
             # includes address, target, instruction window and byte digest.
+            for call in calls:
+                checked_binary_callsite(call)
             signatures = [
                 json.dumps(call, sort_keys=True, separators=(",", ":"))
                 for call in calls
