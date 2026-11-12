@@ -246,13 +246,71 @@ fn unused_output(output: &Path) -> io::Result<()> {
     }
 }
 
-fn staging(output: &Path) -> io::Result<NamedTempFile> {
+/// Pin the directory in which the private staged file was created. A rename
+/// or symlink retarget of the parent while encoding/decoding runs must not
+/// redirect the final publication to a different directory. Directory mtime
+/// and ctime are deliberately excluded: creating the staged file changes them.
+struct OutputDirectoryGuard {
+    path: PathBuf,
+    opened: File,
+    original: fs::Metadata,
+}
+
+fn same_directory_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    if !left.is_dir() || !right.is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        left.dev() == right.dev() && left.ino() == right.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        // The CLI's archive publication protocol needs stable inode identity.
+        false
+    }
+}
+
+impl OutputDirectoryGuard {
+    fn open(path: &Path) -> io::Result<Self> {
+        let original = fs::metadata(path)?;
+        if !original.is_dir() {
+            return Err(invalid("archive output parent must be a directory"));
+        }
+        let opened = OpenOptions::new().read(true).open(path)?;
+        let guard = Self {
+            path: path.to_owned(),
+            opened,
+            original,
+        };
+        guard.ensure_unchanged()?;
+        Ok(guard)
+    }
+
+    fn ensure_unchanged(&self) -> io::Result<()> {
+        if !same_directory_identity(&self.original, &self.opened.metadata()?)
+            || !same_directory_identity(&self.original, &fs::metadata(&self.path)?)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive output parent changed during operation",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn staging(output: &Path) -> io::Result<(NamedTempFile, OutputDirectoryGuard)> {
     unused_output(output)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    NamedTempFile::new_in(parent)
+    let guard = OutputDirectoryGuard::open(parent)?;
+    let temporary = NamedTempFile::new_in(parent)?;
+    guard.ensure_unchanged()?;
+    Ok((temporary, guard))
 }
 
 fn hash_reader(source: &mut impl Read) -> io::Result<[u8; 32]> {
@@ -409,7 +467,7 @@ fn create(
             format!("{} buffer API is unavailable on this host", codec.name()),
         ));
     }
-    let mut temporary = staging(output)?;
+    let (mut temporary, output_parent) = staging(output)?;
     let stats = write_archive(
         &mut source,
         temporary.as_file_mut(),
@@ -457,6 +515,7 @@ fn create(
     // the earlier source hash check.
     ensure_unchanged_regular_input(source_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
+    output_parent.ensure_unchanged()?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -517,7 +576,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
     reader.verify_all()?;
     let logical_size = reader.logical_size();
     let digest = reader.logical_sha256();
-    let mut temporary = staging(output)?;
+    let (mut temporary, output_parent) = staging(output)?;
     let mut hash = Sha256::new();
     let mut offset = 0_u64;
     while offset < logical_size {
@@ -548,6 +607,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
     }
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
+    output_parent.ensure_unchanged()?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -571,7 +631,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
     if start > reader.logical_size() || end > reader.logical_size() {
         return Err(invalid("logical range exceeds archive size"));
     }
-    let mut temporary = staging(output)?;
+    let (mut temporary, output_parent) = staging(output)?;
     let mut digest = Sha256::new();
     let mut offset = start;
     while offset < end {
@@ -597,6 +657,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
     }
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
+    output_parent.ensure_unchanged()?;
     temporary
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
@@ -613,6 +674,57 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[cfg(unix)]
+    #[test]
+    fn output_parent_guard_accepts_new_siblings_but_rejects_directory_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("destination");
+        let moved = root.path().join("moved-destination");
+        fs::create_dir(&parent).unwrap();
+        let output = parent.join("restored.bin");
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"staged synthetic bytes").unwrap();
+        guard.ensure_unchanged().unwrap();
+
+        // Staging changes directory mtime/ctime; unrelated siblings do too.
+        // Neither should be mistaken for a destination replacement.
+        fs::write(parent.join("another-file"), b"other").unwrap();
+        guard.ensure_unchanged().unwrap();
+
+        fs::rename(&parent, &moved).unwrap();
+        fs::create_dir(&parent).unwrap();
+        assert_eq!(
+            guard.ensure_unchanged().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!output.exists());
+        assert!(moved.join("another-file").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_parent_guard_detects_retargeted_symlink_ancestor() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let alias = root.path().join("alias");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        symlink(&first, &alias).unwrap();
+        let output = alias.join("restore.bin");
+        let (_temporary, guard) = staging(&output).unwrap();
+        guard.ensure_unchanged().unwrap();
+
+        fs::remove_file(&alias).unwrap();
+        symlink(&second, &alias).unwrap();
+        assert_eq!(
+            guard.ensure_unchanged().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!output.exists());
+    }
 
     #[test]
     fn archive_cli_accepts_only_explicit_buffer_codecs() {
