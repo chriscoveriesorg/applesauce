@@ -49,6 +49,7 @@ def expected_clear(family, size):
 def expected_clear_sha256(family, size):
     return hashlib.sha256(expected_clear(family, size)).hexdigest()
 
+
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -107,8 +108,12 @@ def check_positive(row, *, size, decoder_digest, label, has_schema=True):
     return row
 
 
-
 MAX_FRESH_ARCHIVE_BYTES = 2 * 1024 * 1024
+
+
+def file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
 
 
 def read_fresh_archive(reports, family, size):
@@ -133,10 +138,8 @@ def read_fresh_archive(reports, family, size):
             raw = stream.read(MAX_FRESH_ARCHIVE_BYTES + 1)
         after = os.fstat(fd)
         leaf = path.lstat()
-        snapshot = lambda x: (x.st_dev, x.st_ino, x.st_size,
-                              x.st_mtime_ns, x.st_ctime_ns)
         require(len(raw) == before.st_size and
-                snapshot(before) == snapshot(after) == snapshot(leaf) and
+                file_identity(before) == file_identity(after) == file_identity(leaf) and
                 stat.S_ISREG(leaf.st_mode),
                 f"fresh archive changed during read: {path.name}")
         return raw
@@ -283,7 +286,8 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None):
             require(isinstance(cases, list) and len(cases) == len(NEGATIVE_CASES)
                     and all(isinstance(c, dict) for c in cases),
                     f"{label}: malformed cases")
-            require({c.get("case") for c in cases} == NEGATIVE_CASES,
+            require(all(isinstance(c.get("case"), str) for c in cases)
+                    and {c["case"] for c in cases} == NEGATIVE_CASES,
                     f"{label}: missing or duplicate corruption cases")
             expected_hashes = expected_negative_hashes(negative_fixture)
             for case in cases:
