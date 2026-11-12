@@ -629,6 +629,26 @@ class CrosscheckTest(unittest.TestCase):
                 path.write_text('{"unused":' + token + '}')
                 self.assertEqual(MODULE.read_evidence(path)[0]["unused"], expected)
 
+    def test_read_rejects_disappearing_path_during_revalidation(self):
+        # The descriptor may still be readable after its pathname disappears.
+        # The evidence reader must report a controlled fail-closed rejection.
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "evidence.json"
+            path.write_text('{"kind":"synthetic"}')
+            real_stat = os.stat
+
+            def disappearing_stat(candidate, *args, **kwargs):
+                if os.fspath(candidate) == os.fspath(path):
+                    raise FileNotFoundError(2, "No such file or directory", os.fspath(path))
+                return real_stat(candidate, *args, **kwargs)
+
+            with mock.patch.object(MODULE.os, "stat", side_effect=disappearing_stat):
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "cannot revalidate evidence file"):
+                    MODULE.read_evidence(path)
+
     def test_read_rejects_duplicate_json_fields_and_empty(self):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "evidence.json"
