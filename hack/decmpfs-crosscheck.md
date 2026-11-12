@@ -32,6 +32,12 @@ metadata cannot silently change the candidate type list. These are
 self-consistency checks against captured bytes, not independent proof that a
 handler was registered or invoked by the running kernel.
 
+The crosscheck also decodes each bounded ARM64 `BL` instruction window,
+recomputes its SHA-256 and resolves its signed branch displacement to the
+reported registration target. Canonical address and source-offset checks reject
+corrupted or forged callsites even when the binary and table reports agree.
+This is static consistency evidence, not proof that the branch executed.
+
 All scan operations are read-only. This workflow never mounts a disk image,
 sets compression attributes, runs a synthetic kernel payload or changes a
 writer gate. It records OS and script checksums. At least one kernelcache source must be inspected successfully. An unavailable
