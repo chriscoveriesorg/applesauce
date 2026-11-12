@@ -274,6 +274,7 @@ class CrosscheckTest(unittest.TestCase):
         reports = fixtures()
         reports[0]["inputs"][0]["status"] = "unavailable"
         reports[0]["inputs"][0].pop("sha256")
+        reports[0]["inputs"][0].pop("images")
         with self.assertRaisesRegex(MODULE.EvidenceError, "identical source"):
             summarize(*reports)
 
@@ -404,9 +405,10 @@ class CrosscheckTest(unittest.TestCase):
 
     def test_reject_all_unavailable_sources(self):
         reports = fixtures()
-        for report in reports[:2]:
+        for kind, report in enumerate(reports[:2]):
             report["inputs"][0]["status"] = "unavailable"
             report["inputs"][0].pop("sha256")
+            report["inputs"][0].pop("images" if kind == 0 else "tables")
         with self.assertRaisesRegex(MODULE.EvidenceError, "must inspect identical"):
             summarize(*reports)
 
@@ -550,6 +552,18 @@ class CrosscheckTest(unittest.TestCase):
             path = Path(scratch) / "nested.json"
             path.write_text("[" * 2000 + "0" + "]" * 2000)
             with self.assertRaisesRegex(MODULE.EvidenceError, "invalid JSON evidence"):
+                MODULE.read_evidence(path)
+            # Structural limits must ignore brackets inside JSON strings, even
+            # when the string contains backslashes and escaped quotes.
+            payload = {"quoted": "[" * 256 + '\\\"' + "}" * 256, "ordinary": [1, 2]}
+            path.write_text(json.dumps(payload))
+            self.assertEqual(MODULE.read_evidence(path)[0], payload)
+            # A root object plus 127 nested arrays is the accepted boundary.
+            path.write_text('{"value":' + "[" * 127 + "0" + "]" * 127 + "}")
+            self.assertEqual(MODULE.read_evidence(path)[0]["value"],
+                             json.loads("[" * 127 + "0" + "]" * 127))
+            path.write_text('{"value":' + "[" * 128 + "0" + "]" * 128 + "}")
+            with self.assertRaisesRegex(MODULE.EvidenceError, "excessive nesting"):
                 MODULE.read_evidence(path)
 
     def test_read_rejects_duplicate_json_fields_and_empty(self):
