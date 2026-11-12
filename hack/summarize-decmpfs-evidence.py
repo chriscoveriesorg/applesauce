@@ -125,6 +125,71 @@ def source_index(report: dict, kind: str) -> dict[str, str | None]:
     return result
 
 
+def verified_registration_callsites(binary: dict, table: dict) -> tuple[int, int]:
+    """Require each table-probe callsite to occur in the pinned binary probe.
+
+    Hash equality alone proves that two tools read the same kernelcache bytes,
+    not that their static registration observations agree. Match the complete
+    callsite record inside the same image name and UUID of the same input path.
+    """
+    by_source = {}
+    observed = 0
+    for source in binary["inputs"]:
+        if source["status"] != "inspected":
+            continue
+        images = source.get("images")
+        if not isinstance(images, list) or not 1 <= len(images) <= 256:
+            raise EvidenceError("missing or unbounded binary image evidence")
+        index = {}
+        for image in images:
+            if not isinstance(image, dict):
+                raise EvidenceError("malformed binary image evidence")
+            name, uuid = image.get("image"), image.get("uuid")
+            if not isinstance(name, str) or not name or (
+                    uuid is not None and not isinstance(uuid, str)):
+                raise EvidenceError("invalid binary image identity")
+            identity = (name, uuid)
+            if identity in index:
+                raise EvidenceError("duplicate binary image identity")
+            calls = image.get("registration_calls")
+            if not isinstance(calls, list) or len(calls) > 2048 or any(
+                    not isinstance(call, dict) for call in calls):
+                raise EvidenceError("malformed binary registration callsites")
+            # The probes both reuse decmpfs_binary_probe.callsites(). Equality
+            # includes address, target, instruction window and byte digest.
+            index[identity] = {
+                json.dumps(call, sort_keys=True, separators=(",", ":"))
+                for call in calls
+            }
+            observed += len(calls)
+        by_source[source["path"]] = index
+
+    matched = 0
+    for source in table["inputs"]:
+        if source["status"] != "inspected":
+            continue
+        images = by_source[source["path"]]
+        tables = source.get("tables")
+        if not isinstance(tables, list) or len(tables) > 128:
+            raise EvidenceError("malformed registration table evidence")
+        used = set()
+        for entry in tables:
+            if not isinstance(entry, dict) or not isinstance(entry.get("callsite"), dict):
+                raise EvidenceError("registration table missing binary callsite")
+            identity = (entry.get("image"), entry.get("uuid"))
+            calls = images.get(identity)
+            signature = json.dumps(
+                entry["callsite"], sort_keys=True, separators=(",", ":"))
+            if calls is None or signature not in calls:
+                raise EvidenceError("registration callsite disagrees with binary evidence")
+            key = (identity, signature)
+            if key in used:
+                raise EvidenceError("duplicate registration callsite attribution")
+            used.add(key)
+            matched += 1
+    return matched, observed
+
+
 def verified_catalogue_types(catalogue: dict) -> list[int]:
     """Cross-check type hints against the declarations actually captured."""
     source = catalogue.get("source")
@@ -208,6 +273,7 @@ def summarize(binary: dict, table: dict, catalogue: dict, inventory: dict,
     if not any(value is not None for value in binary_sources.values()) \
             or binary_sources != table_sources:
         raise EvidenceError("binary/table inputs must inspect identical source SHA-256s")
+    matched_calls, observed_calls = verified_registration_callsites(binary, table)
     catalogue_numbers = verified_catalogue_types(catalogue)
     observed = inventory.get("types")
     if not isinstance(observed, dict) or len(observed) > 255:
@@ -237,6 +303,8 @@ def summarize(binary: dict, table: dict, catalogue: dict, inventory: dict,
         "result": "inconclusive_kernel_codec_mapping",
         "source_document_sha256": dict(sorted(digests.items())),
         "matched_binary_sources": sum(x is not None for x in binary_sources.values()),
+        "matched_static_registration_callsites": matched_calls,
+        "observed_binary_registration_callsites": observed_calls,
         "unavailable_binary_sources": sorted(k for k, v in binary_sources.items() if v is None),
         "kernelcache_sha256": sorted({x for x in binary_sources.values() if x is not None}),
         "static_registration_type_candidates": static_types,

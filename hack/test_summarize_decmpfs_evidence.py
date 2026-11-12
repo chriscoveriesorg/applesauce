@@ -21,7 +21,14 @@ def fixtures():
         "schema_version": 1,
         "kind": "read-only-decmpfs-binary-evidence",
         "inputs": [{"path": "/kernelcache", "status": "inspected",
-                    "sha256": "a" * 64}],
+                    "sha256": "a" * 64,
+                    "images": [{"image": "AppleFSCompressionTypeZlib",
+                                "uuid": "generated-test-image",
+                                "registration_calls": [{
+                                    "call_address": "0x1000",
+                                    "target_address": "0x2000",
+                                    "window_sha256": "c" * 64,
+                                }]}]}],
         "kernel_decoder_proven": False,
         "codec_identity_proven": False,
         "native_raven_mesh_writes_permitted": False,
@@ -31,7 +38,14 @@ def fixtures():
         "kind": "read-only-decmpfs-registration-table-evidence",
         "inputs": [{"path": "/kernelcache", "status": "inspected",
                     "sha256": "a" * 64,
-                    "tables": [{"table": {
+                    "tables": [{"image": "AppleFSCompressionTypeZlib",
+                                "uuid": "generated-test-image",
+                                "callsite": {
+                                    "call_address": "0x1000",
+                                    "target_address": "0x2000",
+                                    "window_sha256": "c" * 64,
+                                },
+                                "table": {
                         "count": 2, "entries": [
                             {"type": 3, "pointer_resolution": {"status": "chain-verified"}},
                             {"type": 13, "pointer_resolution": {"status": "unresolved"}},
@@ -81,6 +95,8 @@ class CrosscheckTest(unittest.TestCase):
         self.assertEqual(result["observed_stored_type_counts"], {"8": 2, "9": 1})
         self.assertEqual(result["unresolved_static_registration_pointers"], 1)
         self.assertEqual(result["matched_binary_sources"], 1)
+        self.assertEqual(result["matched_static_registration_callsites"], 1)
+        self.assertEqual(result["observed_binary_registration_callsites"], 1)
         self.assertEqual(result["unavailable_binary_sources"], [])
         self.assertTrue(result["inventory_bounded"])
         self.assertEqual(result["result"], "inconclusive_kernel_codec_mapping")
@@ -88,6 +104,47 @@ class CrosscheckTest(unittest.TestCase):
                     "on_disk_framing_proven", "cold_remount_readback_proven",
                     "native_raven_mesh_writes_permitted"):
             self.assertIs(result[key], False)
+
+    def test_reject_registration_table_callsite_not_seen_in_binary(self):
+        reports = fixtures()
+        reports[1]["inputs"][0]["tables"][0]["callsite"]["window_sha256"] = "d" * 64
+        with self.assertRaisesRegex(MODULE.EvidenceError, "callsite disagrees"):
+            summarize(*reports)
+
+    def test_reject_registration_from_another_image_or_uuid(self):
+        for key, value in (("image", "OtherFSCompression"), ("uuid", "wrong-uuid")):
+            with self.subTest(key=key):
+                reports = fixtures()
+                reports[1]["inputs"][0]["tables"][0][key] = value
+                with self.assertRaisesRegex(MODULE.EvidenceError, "callsite disagrees"):
+                    summarize(*reports)
+
+    def test_reject_missing_binary_callsite_or_image_inventory(self):
+        reports = fixtures()
+        reports[0]["inputs"][0]["images"][0]["registration_calls"] = []
+        with self.assertRaisesRegex(MODULE.EvidenceError, "callsite disagrees"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[0]["inputs"][0].pop("images")
+        with self.assertRaisesRegex(MODULE.EvidenceError, "binary image evidence"):
+            summarize(*reports)
+
+    def test_reject_duplicate_registration_callsite_attribution(self):
+        reports = fixtures()
+        duplicate = copy.deepcopy(reports[1]["inputs"][0]["tables"][0])
+        duplicate["table"]["entries"] = [{"type": 12, "pointer_resolution": {"status": "unresolved"}}]
+        duplicate["table"]["count"] = 1
+        reports[1]["inputs"][0]["tables"].append(duplicate)
+        with self.assertRaisesRegex(MODULE.EvidenceError, "duplicate registration callsite"):
+            summarize(*reports)
+
+    def test_reject_malformed_binary_callsites(self):
+        for malformed in (None, ["not-a-callsite"], [{"target_address": "0x100"}] * 2049):
+            with self.subTest(malformed_type=type(malformed).__name__):
+                reports = fixtures()
+                reports[0]["inputs"][0]["images"][0]["registration_calls"] = malformed
+                with self.assertRaisesRegex(MODULE.EvidenceError, "malformed binary registration"):
+                    summarize(*reports)
 
     def test_reject_mismatched_source(self):
         reports = fixtures()

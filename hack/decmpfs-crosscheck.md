@@ -20,6 +20,13 @@ runs the portable negative controls, then collects these macOS system observatio
 - `crosscheck.json`: joined, source-hash-checked type sets and explicit failed
   kernel/identity/framing/cold-remount/native-write proof gates.
 
+The crosscheck now requires every static registration table to reference a
+specific binary-observed callsite within the same source path, Mach-O image
+name and UUID. It compares complete callsite records, including instruction
+bytes and their digest, and rejects missing, conflicting or duplicate
+attributions. These matches support static provenance only; they do not show
+that a handler was registered or invoked by the running kernel.
+
 All scan operations are read-only. This workflow never mounts a disk image,
 sets compression attributes, runs a synthetic kernel payload or changes a
 writer gate. It records OS and script checksums. At least one kernelcache source must be inspected successfully. An unavailable
