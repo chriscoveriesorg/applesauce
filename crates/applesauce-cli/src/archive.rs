@@ -949,8 +949,7 @@ mod tests {
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
-            let outcome = OutputDirectoryGuard::open_checked(&parent, original)
-                .map(|_| ());
+            let outcome = OutputDirectoryGuard::open_checked(&parent, original).map(|_| ());
             let _ = sender.send(outcome);
         });
         assert!(receiver
