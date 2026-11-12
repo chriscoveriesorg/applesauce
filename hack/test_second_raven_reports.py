@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import os
 import struct
 from pathlib import Path
 import tempfile
@@ -329,6 +330,71 @@ class QualificationEvidenceTests(unittest.TestCase):
         path.symlink_to(real)
         with self.assertRaisesRegex(ValueError, "missing regular report"):
             self.check()
+
+
+    def test_duplicate_top_level_json_key_rejected(self):
+        path = self.reports / "committed.json"
+        raw = path.read_text()
+        path.write_text(raw.replace('"schema_version": 1,',
+                                    '"schema_version": 1, "schema_version": 1,', 1))
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+            self.check(fresh=False)
+
+    def test_duplicate_nested_json_key_rejected(self):
+        path = self.reports / "fresh/records-65535.json"
+        raw = path.read_text()
+        key = '"decoder_sha256": '
+        self.assertEqual(raw.count(key), 1)
+        path.write_text(raw.replace(key, key + '"f" , "decoder_sha256": ', 1))
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+            self.check()
+
+    def test_nonfinite_json_value_rejected(self):
+        path = self.reports / "committed.json"
+        raw = path.read_text()
+        path.write_text(raw.replace('"schema_version": 1,',
+                                    '"schema_version": NaN,', 1))
+        with self.assertRaisesRegex(ValueError, "non-finite JSON value"):
+            self.check(fresh=False)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFO only")
+    def test_fifo_report_rejected_without_blocking(self):
+        path = self.reports / "committed.json"
+        path.unlink()
+        os.mkfifo(path)
+        with self.assertRaisesRegex(ValueError, "invalid or oversized regular report"):
+            self.check(fresh=False)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFO only")
+    def test_fifo_decoder_rejected_without_blocking(self):
+        self.decoder.unlink()
+        os.mkfifo(self.decoder)
+        with self.assertRaisesRegex(ValueError, "invalid retained evidence artifact"):
+            self.check(fresh=False)
+
+    def test_symlinked_decoder_rejected(self):
+        real = self.root / "decoder-real"
+        real.write_bytes(self.decoder.read_bytes())
+        self.decoder.unlink()
+        self.decoder.symlink_to(real)
+        with self.assertRaisesRegex(ValueError, "missing retained evidence artifact"):
+            self.check(fresh=False)
+
+    def test_symlinked_upstream_source_rejected(self):
+        source = self.upstream / "lzraven.c"
+        real = self.root / "source-real"
+        real.write_bytes(source.read_bytes())
+        source.unlink()
+        source.symlink_to(real)
+        with self.assertRaisesRegex(ValueError, "missing retained evidence artifact"):
+            self.check(fresh=False)
+
+    def test_oversized_json_report_rejected(self):
+        path = self.reports / "committed.json"
+        path.write_bytes(b" " * (512 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, "invalid or oversized regular report"):
+            self.check(fresh=False)
+
 
 
 if __name__ == "__main__":
