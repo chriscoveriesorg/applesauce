@@ -123,6 +123,11 @@ def source_index(report: dict, kind: str) -> dict[str, str | None]:
                     ch not in "0123456789abcdef" for ch in digest):
                 raise EvidenceError(f"missing {kind} source SHA-256")
         else:
+            # Unavailable sources cannot attest to image or table observations.
+            # Do not silently ignore contradictory payloads on a failed probe.
+            for field in ("images", "tables"):
+                if item.get(field) not in (None, []):
+                    raise EvidenceError(f"unavailable {kind} source has {field}")
             # An unavailable source has no inspected bytes to attest. Reject a
             # contradictory digest rather than silently dropping its claim.
             if item.get("sha256") is not None:
