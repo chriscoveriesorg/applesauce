@@ -44,6 +44,11 @@ def fixtures():
     catalogue = {
         "schema_version": 1,
         "kind": "read-only-decmpfs-catalogue-hints",
+        "source": {"component_log_sha256": None, "plists_scanned": 0},
+        "candidate_declarations": [
+            {"type": 3, "resource": "Type", "origin": "ioreg_text"},
+            {"type": 5, "resource": "providesType", "origin": "ioreg_text"},
+        ],
         "candidate_types": [3, 5],
         "kernel_decoder_proven": False,
         "codec_identity_proven": False,
@@ -76,6 +81,7 @@ class CrosscheckTest(unittest.TestCase):
         self.assertEqual(result["observed_stored_type_counts"], {"8": 2, "9": 1})
         self.assertEqual(result["unresolved_static_registration_pointers"], 1)
         self.assertEqual(result["matched_binary_sources"], 1)
+        self.assertEqual(result["unavailable_binary_sources"], [])
         self.assertTrue(result["inventory_bounded"])
         self.assertEqual(result["result"], "inconclusive_kernel_codec_mapping")
         for key in ("kernel_decoder_proven", "codec_identity_proven",
@@ -136,7 +142,7 @@ class CrosscheckTest(unittest.TestCase):
             summarize(*reports)
         reports = fixtures()
         reports[2]["candidate_types"] = [3, 3]
-        with self.assertRaisesRegex(MODULE.EvidenceError, "sorted and unique"):
+        with self.assertRaisesRegex(MODULE.EvidenceError, "differ from captured"):
             summarize(*reports)
 
     def test_reject_bad_inventory(self):
@@ -151,6 +157,80 @@ class CrosscheckTest(unittest.TestCase):
         reports = fixtures()
         reports[3]["file_limit_reached"] = "false"
         with self.assertRaisesRegex(MODULE.EvidenceError, "completion flags"):
+            summarize(*reports)
+
+
+    def test_reject_forged_catalogue_and_provenance(self):
+        reports = fixtures()
+        reports[2]["candidate_types"] = [3, 5, 13]
+        with self.assertRaisesRegex(MODULE.EvidenceError, "differ from captured"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[2]["candidate_declarations"].append(
+            {"type": 13, "resource": "unsupported", "origin": "ioreg_text"})
+        with self.assertRaisesRegex(MODULE.EvidenceError, "declaration resource"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[2]["candidate_declarations"][0]["type"] = True
+        with self.assertRaisesRegex(MODULE.EvidenceError, "declaration type"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[2]["candidate_declarations"][0]["origin"] = "iokit_personality"
+        with self.assertRaisesRegex(MODULE.EvidenceError, "plist SHA-256"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[2]["source"]["component_log_sha256"] = "not-a-digest"
+        with self.assertRaisesRegex(MODULE.EvidenceError, "component-log SHA-256"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[2]["source"]["plists_scanned"] = -1
+        with self.assertRaisesRegex(MODULE.EvidenceError, "plist count"):
+            summarize(*reports)
+
+    def test_missing_sources_are_explicit_and_matched(self):
+        reports = fixtures()
+        unavailable = {"path": "/secondary", "status": "unavailable",
+                       "error": "not found"}
+        for report in reports[:2]:
+            report["inputs"].append(copy.deepcopy(unavailable))
+        result = summarize(*reports)
+        self.assertEqual(result["matched_binary_sources"], 1)
+        self.assertEqual(result["unavailable_binary_sources"], ["/secondary"])
+        reports[0]["inputs"].pop()
+        with self.assertRaisesRegex(MODULE.EvidenceError, "identical source"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[0]["inputs"].append(copy.deepcopy(unavailable))
+        reports[0]["inputs"].append(copy.deepcopy(unavailable))
+        with self.assertRaisesRegex(MODULE.EvidenceError, "duplicate/empty"):
+            summarize(*reports)
+
+    def test_reject_all_unavailable_sources(self):
+        reports = fixtures()
+        for report in reports[:2]:
+            report["inputs"][0]["status"] = "unavailable"
+        with self.assertRaisesRegex(MODULE.EvidenceError, "must inspect identical"):
+            summarize(*reports)
+
+    def test_reject_positive_remount_claim(self):
+        reports = fixtures()
+        reports[3]["cold_remount_readback_proven"] = True
+        with self.assertRaisesRegex(MODULE.EvidenceError, "unreviewed positive"):
+            summarize(*reports)
+
+    def test_reject_malformed_registration_tables(self):
+        reports = fixtures()
+        reports[1]["inputs"][0]["tables"][0]["table"]["entries"][0] = "bad"
+        with self.assertRaisesRegex(MODULE.EvidenceError, "registration record"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[1]["inputs"][0]["tables"][0]["table"]["entries"][0][
+            "pointer_resolution"] = None
+        with self.assertRaisesRegex(MODULE.EvidenceError, "pointer resolution"):
+            summarize(*reports)
+        reports = fixtures()
+        reports[1]["inputs"][0]["tables"][0]["table"]["count"] = True
+        with self.assertRaisesRegex(MODULE.EvidenceError, "length mismatch"):
             summarize(*reports)
 
     def test_read_rejects_symlink_and_nonregular_file(self):
