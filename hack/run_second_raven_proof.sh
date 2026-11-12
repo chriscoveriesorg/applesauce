@@ -30,6 +30,19 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Attested evidence must come from a clean checkout. Refuse a missing or
+# pre-existing output destination before running expensive decoder tests.
+git -C "$repo_root" diff --quiet HEAD -- || {
+  echo 'Applesauce tracked source is dirty' >&2; exit 1;
+}
+if [[ -n "$evidence_target" ]]; then
+  if [[ -e "$evidence_target" || -L "$evidence_target" ]]; then
+    echo 'evidence destination already exists' >&2; exit 1
+  fi
+  [[ -d "$(dirname "$evidence_target")" ]] || {
+    echo 'evidence parent directory does not exist' >&2; exit 1;
+  }
+fi
 work="$(mktemp -d "${TMPDIR:-/tmp}/applesauce-raven-second.XXXXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 pinned_commit='6d97f1ab520821b4d326139fdf48b658f96ee5b9'
@@ -144,6 +157,9 @@ PY
 fi
 
 # Revalidate source cleanliness after compilation and qualification.
+git -C "$repo_root" diff --quiet HEAD -- || {
+  echo 'Applesauce tracked source changed during qualification' >&2; exit 1;
+}
 git -C "$upstream" diff --quiet HEAD -- || {
   echo 'upstream tracked source changed during qualification' >&2; exit 1;
 }
