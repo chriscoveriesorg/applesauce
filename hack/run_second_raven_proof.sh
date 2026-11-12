@@ -168,12 +168,32 @@ git -C "$upstream" diff --quiet HEAD -- || {
 }
 cli_option=()
 [[ -z "$cli" ]] || cli_option=(--cli "$cli")
+# Preserve the exact binary executed for the independent proof, all upstream
+# compilation inputs, and logs from each qualification test. Reviewers can
+# compare these snapshots with the manifest after the ephemeral runner exits.
+cp "$work/raven-second" "$evidence/second-raven-decoder"
+mkdir -m 700 "$evidence/retained-sources"
+for path in "${audit_files[@]}"; do
+  mkdir -p "$evidence/retained-sources/$(dirname "$path")"
+  cp "$upstream/$path" "$evidence/retained-sources/$path"
+done
+{
+  printf 'operating system: '
+  uname -srm
+  printf 'C compiler:\n'
+  cc --version
+  printf 'Python: '
+  python3 --version
+  printf 'Git: '
+  git --version
+} > "$evidence/toolchain.txt"
+
 # Require every expected report, exact positive counts and corruption cases.
 # Bind all proof records to the decoder binary and pinned source hashes.
 python3 "$repo_root/hack/validate_second_raven_reports.py" \
   --reports "$evidence" --decoder "$work/raven-second" \
   --upstream "$upstream" --repository "$repo_root" \
-  "${fresh_option[@]}" "${cli_option[@]}"
+  --bundle "${fresh_option[@]}" "${cli_option[@]}"
 
 if [[ -n "$evidence_target" ]]; then
   # The output parent must be trusted. A new directory avoids overwriting
