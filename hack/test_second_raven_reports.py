@@ -35,8 +35,18 @@ class QualificationEvidenceTests(unittest.TestCase):
         for path in ("lzraven.c", "lzraven.h", "lzbitmap.c", "lzbitmap.h",
                      "lzmesh.c", "lzmesh.h", "tests/test.c", "tests/vectors.h"):
             (self.upstream / path).write_text("test source")
+        # Qualification bundles must retain exact reviewable compiler inputs.
+        (self.reports / "retained-sources/tests").mkdir(parents=True)
+        for name in ("lzraven.c", "lzraven.h", "lzbitmap.c", "lzbitmap.h",
+                     "lzmesh.c", "lzmesh.h", "tests/test.c", "tests/vectors.h"):
+            target = self.reports / "retained-sources" / name
+            target.write_text((self.upstream / name).read_text())
+        for name in ("upstream-tests.log", "adapter-tests.log", "evidence-tests.log",
+                     "toolchain.txt"):
+            (self.reports / name).write_text("qualification command passed\n")
         self.decoder = self.root / "decoder"
         self.decoder.write_bytes(b"test decoder")
+        (self.reports / "second-raven-decoder").write_bytes(b"test decoder")
         self.decoder_sha = sha(b"test decoder")
         self.repo = self.root / "repo"
         self.repo.mkdir()
@@ -123,7 +133,7 @@ class QualificationEvidenceTests(unittest.TestCase):
         with patch("validate_second_raven_reports.git_head",
                    side_effect=["6d97f1ab520821b4d326139fdf48b658f96ee5b9", "a" * 40]):
             return validate(self.reports, self.decoder, self.upstream,
-                            self.repo, fresh=fresh,
+                            self.repo, fresh=fresh, bundle=True,
                             cli=self.cli if fresh else None)
 
     def test_complete_evidence_passes(self):
@@ -133,6 +143,38 @@ class QualificationEvidenceTests(unittest.TestCase):
         self.assertEqual(result["corruptions_rejected"], 18)
         self.assertEqual(len(result["report_sha256"]), 13)
         self.assertEqual(len(result["fresh_archive_sha256"]), 10)
+        self.assertEqual(len(result["retained_artifacts_sha256"]), 13)
+        self.assertEqual(result["retained_artifacts_sha256"]["second-raven-decoder"],
+                         self.decoder_sha)
+
+    def test_retained_decoder_mutation_rejected(self):
+        (self.reports / "second-raven-decoder").write_bytes(b"imposter decoder")
+        with self.assertRaisesRegex(ValueError, "retained artifact digest mismatch"):
+            self.check(fresh=False)
+
+    def test_retained_source_mutation_rejected(self):
+        (self.reports / "retained-sources/lzraven.c").write_text("altered source")
+        with self.assertRaisesRegex(ValueError, "retained artifact digest mismatch"):
+            self.check(fresh=False)
+
+    def test_missing_retained_test_log_rejected(self):
+        (self.reports / "evidence-tests.log").unlink()
+        with self.assertRaisesRegex(ValueError, "missing retained evidence artifact"):
+            self.check(fresh=False)
+
+    def test_symlinked_retained_log_rejected(self):
+        log = self.reports / "adapter-tests.log"
+        other = self.root / "untrusted.log"
+        other.write_bytes(log.read_bytes())
+        log.unlink()
+        log.symlink_to(other)
+        with self.assertRaisesRegex(ValueError, "missing retained evidence artifact"):
+            self.check(fresh=False)
+
+    def test_empty_retained_log_rejected(self):
+        (self.reports / "toolchain.txt").write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "invalid retained evidence artifact"):
+            self.check(fresh=False)
 
     def test_missing_archive_bytes_rejected(self):
         (self.reports / "fresh-archives/records-65537.ascf").unlink()
