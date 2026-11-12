@@ -229,7 +229,8 @@ def require_report(output, path, codec, storage, expected_size):
     report = json.loads(run(output, "info", "--json", path))
     if (
         not isinstance(report, dict)
-        or report.get("schema_version") != 1
+        or type(report.get("schema_version")) is not int
+        or report["schema_version"] != 1
         or report.get("report_kind") != "actual_storage"
         or report.get("complete") is not True
     ):
@@ -286,7 +287,8 @@ def require_restored_report(output, path, expected_size):
     report = json.loads(run(output, "info", "--json", path))
     if (
         not isinstance(report, dict)
-        or report.get("schema_version") != 1
+        or type(report.get("schema_version")) is not int
+        or report["schema_version"] != 1
         or report.get("report_kind") != "actual_storage"
         or report.get("complete") is not True
     ):
