@@ -70,7 +70,7 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
         raw = b"".join(chunks)
         try:
             document = json.loads(raw, object_pairs_hook=unique_pairs)
-        except (UnicodeError, json.JSONDecodeError) as error:
+        except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
             raise EvidenceError(f"invalid JSON evidence: {error}") from error
         if not isinstance(document, dict):
             raise EvidenceError("evidence root must be an object")
