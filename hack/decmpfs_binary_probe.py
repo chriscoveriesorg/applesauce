@@ -42,7 +42,11 @@ class Source:
             if not stat.S_ISREG(self.before.st_mode) or self.size > MAX_FILE:
                 raise EvidenceError("input must be a regular file of at most 1 GiB")
         except BaseException:
-            os.close(self.fd)
+            # Preserve the inspection failure if descriptor cleanup also fails.
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
             raise
 
     def read(self, offset: int, size: int) -> bytes:
