@@ -97,7 +97,12 @@ class SafeCsvOutput:
             self.opened_identity = (opened.st_dev, opened.st_ino)
             return self
         except BaseException:
-            os.close(fd)
+            # A secondary descriptor-close failure must not conceal the
+            # original directory identity or ownership rejection.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
             raise
 
     def write_rows(self, rows, fields):
