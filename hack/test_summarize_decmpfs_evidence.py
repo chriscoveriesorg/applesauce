@@ -163,6 +163,18 @@ class CrosscheckTest(unittest.TestCase):
                                     "duplicate binary registration callsite"):
             summarize(*reports)
 
+    def test_reject_conflicting_records_at_same_callsite_address(self):
+        reports = fixtures()
+        calls = reports[0]["inputs"][0]["images"][0]["registration_calls"]
+        duplicate = copy.deepcopy(calls[0])
+        # A different section label makes the JSON signatures distinct, but
+        # the pinned image still has only one instruction at this address.
+        duplicate["section"] = "__alternate_text"
+        calls.append(duplicate)
+        with self.assertRaisesRegex(MODULE.EvidenceError,
+                                    "duplicate binary registration callsite"):
+            summarize(*reports)
+
     def test_reject_malformed_binary_callsites(self):
         for malformed in (None, ["not-a-callsite"], [{"target_address": "0x100"}] * 2049):
             with self.subTest(malformed_type=type(malformed).__name__):
