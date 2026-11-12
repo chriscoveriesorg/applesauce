@@ -79,12 +79,23 @@ The requested evidence directory must not already exist, and its parent must
 be trusted. The resulting bundle includes logs of the upstream C tests,
 adapter regressions and evidence-validator regressions, JSON for the committed
 vectors, ten fresh cross-decodes and two nine-case corruption suites (when
-the macOS CLI is supplied), and `manifest.json`. The manifest records the
+the macOS CLI is supplied), and `manifest.json`. The ten actual Apple-generated ASCF archives are retained
+under `fresh-archives/`, alongside their JSON reports. The manifest records the
 Applesauce Git HEAD, exact upstream commit, source-file SHA-256 values,
 independent decoder binary SHA-256, optional Apple encoder CLI SHA-256, report
 hashes and case totals.
 
-`validate_second_raven_reports.py` also pins both committed archive hashes and their expected clear-content hashes, rather than accepting arbitrary digest strings. For a full run it independently reproduces the two deterministic input families and rejects replay of one family as the other. It requires the actual Apple encoder CLI binary, ten correctly sized positive results, eighteen distinct expected corruption rejections, consistent decoder hashes and negative-suite baselines tied to the corresponding positive fixtures. The manifest hashes all eight upstream C sources/headers used to build and run tests. A missing, forged, duplicated or mismatched report fails qualification.
+`validate_second_raven_reports.py` also pins both committed archive hashes and their expected clear-content hashes, rather than accepting arbitrary digest strings. For a full run it independently reproduces the two deterministic input families and rejects replay of one family as the other. It requires the actual Apple encoder CLI binary, ten correctly sized positive results, eighteen distinct expected corruption rejections, consistent decoder hashes and negative-suite baselines tied to the corresponding positive fixtures.
+
+For full Apple-buffer evidence, the validator now reopens each retained ASCF
+archive as a bounded regular file, verifies its exact SHA-256 against the
+positive report, validates the codec header, archive index, chunk lengths and
+clear-content digests, and reconstructs all nine byte mutations from each
+three-chunk archive. It matches their SHA-256s to the eighteen negative cases
+and checks that rejection reasons came from the expected decoder or parser
+gate. A copied or invented negative report cannot substitute arbitrary digest
+strings. The retained archive bytes make these checks independently replayable;
+only authorised macOS qualification proves their Apple encoder provenance. The manifest hashes all eight upstream C sources/headers used to build and run tests. A missing, forged, duplicated or mismatched report fails qualification.
 
 The manifest describes technical evidence that an independent reviewer
 can inspect. It does **not** prove source independence, binary provenance
