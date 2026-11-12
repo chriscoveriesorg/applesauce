@@ -228,7 +228,11 @@ def verified_registration_callsites(binary: dict, table: dict) -> tuple[int, int
                 json.dumps(call, sort_keys=True, separators=(",", ":"))
                 for call in calls
             ]
-            if len(set(signatures)) != len(signatures):
+            # One instruction address can represent only one callsite within
+            # a pinned image. Distinct windows or metadata must not make a
+            # duplicate physical callsite look like independent evidence.
+            addresses = [call["call_address"] for call in calls]
+            if len(set(signatures)) != len(signatures) or len(set(addresses)) != len(addresses):
                 raise EvidenceError("duplicate binary registration callsite")
             index[identity] = set(signatures)
             observed += len(calls)
