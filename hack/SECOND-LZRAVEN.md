@@ -79,12 +79,12 @@ The requested evidence directory must not already exist, and its parent must
 be trusted. The resulting bundle includes logs of the upstream C tests,
 adapter regressions and evidence-validator regressions, JSON for the committed
 vectors, ten fresh cross-decodes and two nine-case corruption suites (when
-the macOS CLI is supplied), and \`manifest.json\`. The manifest records the
+the macOS CLI is supplied), and `manifest.json`. The manifest records the
 Applesauce Git HEAD, exact upstream commit, source-file SHA-256 values,
 independent decoder binary SHA-256, optional Apple encoder CLI SHA-256, report
 hashes and case totals.
 
-\`validate_second_raven_reports.py\` checks that exactly two committed
+`validate_second_raven_reports.py` checks that exactly two committed
 Apple fixtures were independently decoded. For a full run it also requires
 ten correctly sized positive results, eighteen distinct expected corruption
 rejections, consistent decoder hashes and negative-suite baseline hashes
