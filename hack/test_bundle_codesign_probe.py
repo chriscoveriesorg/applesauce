@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -126,6 +127,55 @@ class SignedBundleProbeTests(unittest.TestCase):
                         probe.require_report(
                             "/tmp/applesauce", path, "zlib", "resource_fork"
                         )
+
+
+    def test_executable_consumes_both_signed_resources_via_mmap(self):
+        """The launch gate must detect same-length corruption in either resource."""
+        compiler = shutil.which("cc")
+        if compiler is None:
+            self.skipTest("C compiler is required for portable executable acceptance")
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            app = root / "Fixture.app" / "Contents"
+            binary = app / "MacOS" / "probe"
+            resources = app / "Resources"
+            binary.parent.mkdir(parents=True)
+            resources.mkdir()
+            small = resources / "small.txt"
+            large = resources / "events.jsonl"
+            small.write_bytes(b"A" * 2048)
+            large.write_bytes(b'{"key":"value"}\n' * 5000)
+            source = root / "probe.c"
+            source.write_text(
+                probe.resource_reader_source(small.read_bytes(), large.read_bytes())
+            )
+            subprocess.run(
+                [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
+                 "-o", str(binary), str(source)],
+                check=True, capture_output=True, text=True,
+            )
+            passed = subprocess.run(
+                [binary], capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertEqual(passed.stdout.strip(), "APPLESauce signed bundle fixture")
+            for path in (small, large):
+                with self.subTest(path=path.name):
+                    original = path.read_bytes()
+                    path.write_bytes(b"Z" + original[1:])
+                    failed = subprocess.run(
+                        [binary], capture_output=True, text=True, check=False,
+                    )
+                    self.assertNotEqual(failed.returncode, 0)
+                    self.assertIn("resource readback mismatch", failed.stderr)
+                    path.write_bytes(original)
+                    self.assertEqual(subprocess.run([binary]).returncode, 0)
+            large.unlink()
+            absent = subprocess.run(
+                [binary], capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(absent.returncode, 0)
+            self.assertIn("open resource", absent.stderr)
 
 
 if __name__ == "__main__":
