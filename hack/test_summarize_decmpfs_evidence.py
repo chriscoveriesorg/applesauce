@@ -580,6 +580,25 @@ class CrosscheckTest(unittest.TestCase):
             path.write_text('{"unused":1.25}')
             self.assertEqual(MODULE.read_evidence(path)[0], {"unused": 1.25})
 
+    def test_read_bounds_numeric_literals_and_float_overflow(self):
+        # Reject integers before runtime-specific int conversion limits fire,
+        # and JSON-valid exponents that overflow to non-finite Python floats.
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "numbers.json"
+            for token, message in (
+                ("9" * 5000, "oversized integer"),
+                ("-" + "9" * 5000, "oversized integer"),
+                ("1e999999", "non-finite float"),
+                ("-1e999999", "non-finite float"),
+            ):
+                with self.subTest(token=token[:20]):
+                    path.write_text('{"unused":' + token + '}')
+                    with self.assertRaisesRegex(MODULE.EvidenceError, message):
+                        MODULE.read_evidence(path)
+            for token, expected in (("123456", 123456), ("1.25e2", 125.0)):
+                path.write_text('{"unused":' + token + '}')
+                self.assertEqual(MODULE.read_evidence(path)[0]["unused"], expected)
+
     def test_read_rejects_duplicate_json_fields_and_empty(self):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "evidence.json"
