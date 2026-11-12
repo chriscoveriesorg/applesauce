@@ -97,6 +97,18 @@ gate. A copied or invented negative report cannot substitute arbitrary digest
 strings. The retained archive bytes make these checks independently replayable;
 only authorised macOS qualification proves their Apple encoder provenance. The manifest hashes all eight upstream C sources/headers used to build and run tests. A missing, forged, duplicated or mismatched report fails qualification.
 
+The proof bundle also includes `second-raven-decoder`, the exact built
+C executable, `retained-sources/` with all eight pinned C compilation and test
+inputs, and `toolchain.txt` with compiler, operating-system, Python and Git
+versions. The validator's `--bundle` gate checks these retained source and
+binary hashes against the files used for qualification. It also requires
+bounded regular-file test logs and records SHA-256 values for all thirteen
+retained artifacts in `manifest.json`. Any missing, altered, empty or
+symlinked retained artifact rejects the bundle before it is accepted.
+Reviewers can therefore inspect the precise executable and source snapshot
+after the ephemeral job has exited. They must still assess independent source
+lineage and test results; a self-consistent bundle cannot authenticate itself.
+
 The manifest describes technical evidence that an independent reviewer
 can inspect. It does **not** prove source independence, binary provenance
 beyond the recorded hashes, or a working native APFS handler. Native writes
