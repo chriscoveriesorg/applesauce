@@ -119,7 +119,10 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
             chunks.append(chunk)
             remaining -= len(chunk)
         after = os.fstat(fd)
-        named = os.stat(path, follow_symlinks=False)
+        try:
+            named = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise EvidenceError(f"cannot revalidate evidence file: {error.strerror}") from error
         fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
         if any(getattr(before, field) != getattr(item, field)
                for item in (after, named) for field in fields):
