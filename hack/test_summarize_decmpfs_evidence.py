@@ -205,6 +205,19 @@ class CrosscheckTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.EvidenceError, "duplicate/empty"):
             summarize(*reports)
 
+    def test_reject_unavailable_source_with_claimed_digest(self):
+        reports = fixtures()
+        unavailable = {"path": "/missing-kernelcache", "status": "unavailable",
+                       "sha256": "c" * 64}
+        for report in reports[:2]:
+            report["inputs"].append(copy.deepcopy(unavailable))
+        with self.assertRaisesRegex(MODULE.EvidenceError, "unavailable binary source has SHA-256"):
+            summarize(*reports)
+        # Even matching contradictory claims on both sides cannot be evidence.
+        reports[0]["inputs"][-1].pop("sha256")
+        with self.assertRaisesRegex(MODULE.EvidenceError, "unavailable table source has SHA-256"):
+            summarize(*reports)
+
     def test_reject_all_unavailable_sources(self):
         reports = fixtures()
         for report in reports[:2]:
