@@ -375,6 +375,50 @@ fn same_directory_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     }
 }
 
+// On failed publication, unlink only if the target still names the staged
+// inode. A competing writer can replace the target between linkat and the
+// post-publication identity check; unconditional unlink would delete that
+// unrelated replacement. This remains a best-effort guard in a directory
+// writable by an adversary because fstatat/unlinkat are separate operations.
+#[cfg(unix)]
+fn rollback_published_link_if_ours(
+    directory: &File,
+    name: &std::ffi::CStr,
+    expected: &fs::Metadata,
+) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut selected = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: directory stays open, name is NUL-terminated, and stat is writable.
+    let result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            selected.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(error)
+        };
+    }
+    // SAFETY: successful fstatat initialized selected.
+    let selected = unsafe { selected.assume_init() };
+    if selected.st_dev as u64 != expected.dev() || selected.st_ino != expected.ino() {
+        return Ok(false);
+    }
+    // SAFETY: directory and name are valid for unlinkat.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(true)
+}
+
 impl OutputDirectoryGuard {
     fn open(path: &Path) -> io::Result<Self> {
         let original = fs::metadata(path)?;
@@ -503,13 +547,13 @@ impl OutputDirectoryGuard {
             };
             let parent_ok = self.ensure_unchanged();
             if !identity_ok || parent_ok.is_err() {
-                // Best-effort rollback is confined to the pinned directory.
-                // A malicious actor with write access to that directory can
-                // still race the final name, so don't claim a universal lock.
-                // SAFETY: directory_fd is still owned by this guard and
-                // target_name points to a NUL-terminated filename.
-                unsafe {
-                    libc::unlinkat(directory_fd, target_name.as_ptr(), 0);
+                // Only remove our own published link. A competing writer may
+                // have replaced the final name after linkat; deleting that
+                // replacement would violate no-clobber publication.
+                if let Err(error) =
+                    rollback_published_link_if_ours(&self.opened, &target_name, &opened)
+                {
+                    eprintln!("warning: archive publication rollback failed: {error}");
                 }
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1074,6 +1118,60 @@ mod tests {
             io::ErrorKind::InvalidData
         );
         assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_rollback_preserves_replaced_target_and_symlink() {
+        use std::ffi::CString;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("target");
+        let protected = root.path().join("protected");
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"verified archive").unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+        let target_name = CString::new("target").unwrap();
+
+        fs::hard_link(temporary.path(), &output).unwrap();
+        fs::remove_file(&output).unwrap();
+        fs::write(&output, b"unrelated replacement").unwrap();
+        assert!(!rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap());
+        assert_eq!(fs::read(&output).unwrap(), b"unrelated replacement");
+
+        fs::write(&protected, b"protected contents").unwrap();
+        fs::remove_file(&output).unwrap();
+        symlink(&protected, &output).unwrap();
+        assert!(!rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap());
+        assert!(fs::symlink_metadata(&output).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&protected).unwrap(), b"protected contents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_rollback_removes_our_link_after_parent_rename() {
+        use std::ffi::CString;
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("selected");
+        let moved = root.path().join("moved");
+        fs::create_dir(&parent).unwrap();
+        let output = parent.join("target");
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"verified archive").unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+        fs::hard_link(temporary.path(), &output).unwrap();
+
+        fs::rename(&parent, &moved).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(&output, b"unrelated name in replacement parent").unwrap();
+
+        let target_name = CString::new("target").unwrap();
+        assert!(rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap());
+        assert!(!moved.join("target").exists());
+        assert_eq!(fs::read(&output).unwrap(), b"unrelated name in replacement parent");
+        assert!(!rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap());
     }
 
     #[cfg(unix)]
