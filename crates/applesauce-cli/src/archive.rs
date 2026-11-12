@@ -1137,18 +1137,17 @@ mod tests {
         fs::hard_link(temporary.path(), &output).unwrap();
         fs::remove_file(&output).unwrap();
         fs::write(&output, b"unrelated replacement").unwrap();
-        assert!(
-            !rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap()
-        );
+        assert!(!rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap());
         assert_eq!(fs::read(&output).unwrap(), b"unrelated replacement");
 
         fs::write(&protected, b"protected contents").unwrap();
         fs::remove_file(&output).unwrap();
         symlink(&protected, &output).unwrap();
-        assert!(
-            !rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap()
-        );
-        assert!(fs::symlink_metadata(&output).unwrap().file_type().is_symlink());
+        assert!(!rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap());
+        assert!(fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read(&protected).unwrap(), b"protected contents");
     }
 
@@ -1172,17 +1171,13 @@ mod tests {
         fs::write(&output, b"unrelated name in replacement parent").unwrap();
 
         let target_name = CString::new("target").unwrap();
-        assert!(rollback_published_link_if_ours(
-            &guard.opened,
-            &target_name,
-            &verified
-        )
-        .unwrap());
+        assert!(rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap());
         assert!(!moved.join("target").exists());
-        assert_eq!(fs::read(&output).unwrap(), b"unrelated name in replacement parent");
-        assert!(
-            !rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap()
+        assert_eq!(
+            fs::read(&output).unwrap(),
+            b"unrelated name in replacement parent"
         );
+        assert!(!rollback_published_link_if_ours(&guard.opened, &target_name, &verified).unwrap());
     }
 
     #[cfg(unix)]
