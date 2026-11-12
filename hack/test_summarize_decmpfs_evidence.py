@@ -499,8 +499,11 @@ class CrosscheckTest(unittest.TestCase):
             valid.write_text("{}")
             linked = root / "linked.json"
             linked.symlink_to(valid)
-            with self.assertRaises(OSError):
+            with self.assertRaisesRegex(MODULE.EvidenceError, "cannot open evidence file"):
                 MODULE.read_evidence(linked)
+            missing = root / "missing.json"
+            with self.assertRaisesRegex(MODULE.EvidenceError, "cannot open evidence file"):
+                MODULE.read_evidence(missing)
             if hasattr(os, "mkfifo"):
                 fifo = root / "fifo"
                 os.mkfifo(fifo)
