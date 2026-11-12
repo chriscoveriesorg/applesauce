@@ -122,6 +122,22 @@ class CrosscheckTest(unittest.TestCase):
                     "native_raven_mesh_writes_permitted"):
             self.assertIs(result[key], False)
 
+    def test_unavailable_source_rejects_claimed_observations(self):
+        for kind, field in ((0, "images"), (1, "tables")):
+            with self.subTest(kind=kind, field=field):
+                reports = fixtures()
+                source = reports[kind]["inputs"][0]
+                source["status"] = "unavailable"
+                source.pop("sha256")
+                # A matching unavailable peer must not make stale observations valid.
+                peer = reports[1 - kind]["inputs"][0]
+                peer["status"] = "unavailable"
+                peer.pop("sha256")
+                peer.pop("images" if kind == 1 else "tables")
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "unavailable .* source has " + field):
+                    summarize(*reports)
+
     def test_reject_registration_table_callsite_not_seen_in_binary(self):
         reports = fixtures()
         reports[1]["inputs"][0]["tables"][0]["callsite"]["window_sha256"] = "d" * 64
