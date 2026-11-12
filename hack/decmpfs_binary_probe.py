@@ -423,6 +423,7 @@ def main(argv=None) -> int:
             entry.update(evidence)
             entry["status"] = "inspected"
         except (OSError, EvidenceError, ContainerError) as error:
+            entry.pop("sha256", None)
             entry["status"] = "unavailable"
             entry["error"] = str(error)
         finally:
