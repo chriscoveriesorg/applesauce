@@ -333,7 +333,9 @@ def summarize(binary: dict, table: dict, catalogue: dict, inventory: dict,
         raise EvidenceError("invalid inventory type counts")
     stored = {}
     for key, value in observed.items():
-        if not key.isdecimal() or str(int(key)) != key or not isinstance(value, dict):
+        if (not isinstance(key, str) or not 1 <= len(key) <= 3 or
+                not key.isascii() or not key.isdecimal() or
+                str(int(key)) != key or not isinstance(value, dict)):
             raise EvidenceError("invalid inventory type key")
         number = unsigned(int(key), "stored type", 255)
         count = unsigned(value.get("count"), "stored type count")
