@@ -543,6 +543,15 @@ class CrosscheckTest(unittest.TestCase):
                     MODULE.read_evidence(path)
             self.assertEqual(len(closed), 1)
 
+    def test_read_rejects_excessively_nested_json(self):
+        # The bounded input size alone does not bound parser recursion depth.
+        # A hostile report must produce a controlled evidence rejection.
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "nested.json"
+            path.write_text("[" * 2000 + "0" + "]" * 2000)
+            with self.assertRaisesRegex(MODULE.EvidenceError, "invalid JSON evidence"):
+                MODULE.read_evidence(path)
+
     def test_read_rejects_duplicate_json_fields_and_empty(self):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "evidence.json"
