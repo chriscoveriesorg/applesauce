@@ -576,6 +576,18 @@ impl OutputDirectoryGuard {
                     "warning: verified archive published but staging cleanup failed: {error}"
                 );
             }
+            // Syncing the staged inode before linking does not make the
+            // destination directory entry durable. Sync the pinned parent
+            // after both linkat and stage unlinkat. A sync failure preserves
+            // the published file and reports partial success to the caller.
+            self.opened.sync_all().map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "verified archive published, but output-directory sync failed: {error}"
+                    ),
+                )
+            })?;
             Ok(())
         }
         #[cfg(not(unix))]
@@ -1252,6 +1264,27 @@ mod tests {
             .unwrap();
         assert_eq!(fs::read(&output).unwrap(), b"verified synthetic content");
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_publish_syncs_directory_entry_and_removes_stage() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("durable.ascf");
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"archive with a durable directory entry").unwrap();
+        temporary.as_file_mut().flush().unwrap();
+        temporary.as_file().sync_all().unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+        guard.publish_verified(temporary, &output, &verified).unwrap();
+
+        // Successful publication includes a parent-directory fsync and
+        // leaves only the verified destination in the selected directory.
+        assert_eq!(
+            fs::read(&output).unwrap(),
+            b"archive with a durable directory entry"
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
