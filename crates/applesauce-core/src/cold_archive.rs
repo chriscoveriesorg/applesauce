@@ -281,6 +281,12 @@ pub struct ArchiveReader<R> {
     encoded_storage: Vec<u8>,
     decoded_storage: Vec<u8>,
     read_staging: Vec<u8>,
+    // Last independently verified chunk. Cache reuse still re-reads and
+    // SHA-256-authenticates its compressed bytes on every new request.
+    // A changed payload is decoded again and checked against the index.
+    verified_encoded_chunk: Option<(usize, [u8; 32])>,
+    #[cfg(test)]
+    verified_cache_hits: usize,
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
@@ -351,6 +357,9 @@ impl<R: Read + Seek> ArchiveReader<R> {
             encoded_storage: Vec::new(),
             decoded_storage: Vec::new(),
             read_staging: Vec::new(),
+            verified_encoded_chunk: None,
+            #[cfg(test)]
+            verified_cache_hits: 0,
         })
     }
 
@@ -394,19 +403,28 @@ impl<R: Read + Seek> ArchiveReader<R> {
     // A decoded chunk is borrowed from reusable, bounded storage. It is never
     // returned until both Apple's guarded exact-length check and the stored
     // SHA-256 have passed. The next decode invalidates the borrowed slice.
-    fn decode_chunk(&mut self, index: usize) -> io::Result<&[u8]> {
+    // Read the current compressed payload even when a previously decoded
+    // chunk is cached. Metadata alone cannot detect all in-place edits.
+    fn load_encoded_chunk(&mut self, index: usize) -> io::Result<()> {
         let entry = &self.entries[index];
         let stored_len = entry.stored_len as usize;
-        let clear_len = entry.clear_len as usize;
         grow_buffer(&mut self.encoded_storage, stored_len)?;
         self.source.seek(SeekFrom::Start(entry.offset))?;
         self.source
             .read_exact(&mut self.encoded_storage[..stored_len])?;
+        Ok(())
+    }
+
+    // Decode only bytes already read into the bounded encoded buffer.
+    fn decode_loaded_chunk(&mut self, index: usize) -> io::Result<&[u8]> {
+        let entry = &self.entries[index];
+        let stored_len = entry.stored_len as usize;
+        let clear_len = entry.clear_len as usize;
         if self.decode_scratch.is_none() {
             self.decode_scratch = Some(self.codec.reusable_scratch()?);
         }
-        // Apple may return the destination capacity on truncated output.
-        // A one-byte overflow guard catches overlong decoded output.
+        // Apple's decoder can fill the destination on truncated output.
+        // One extra byte detects overlong output before exposing data.
         grow_buffer(&mut self.decoded_storage, clear_len + 1)?;
         let decoded_len = self
             .decode_scratch
@@ -427,6 +445,39 @@ impl<R: Read + Seek> ArchiveReader<R> {
         Ok(decoded)
     }
 
+    // The full-file publication gate always independently decodes every
+    // chunk, including one that a previous logical read had cached.
+    fn decode_chunk(&mut self, index: usize) -> io::Result<&[u8]> {
+        self.verified_encoded_chunk = None;
+        self.load_encoded_chunk(index)?;
+        self.decode_loaded_chunk(index)
+    }
+
+    // Finder and ordinary apps often issue several small reads within one
+    // ASCF chunk. Avoid decoding that chunk repeatedly while remaining
+    // fail-closed on source mutations: hash the newly read compressed bytes
+    // before reusing any previously authenticated plaintext. This cache
+    // retains at most one chunk and uses existing bounded buffers.
+    fn read_verified_chunk(&mut self, index: usize) -> io::Result<&[u8]> {
+        if let Err(error) = self.load_encoded_chunk(index) {
+            self.verified_encoded_chunk = None;
+            return Err(error);
+        }
+        let stored_len = self.entries[index].stored_len as usize;
+        let encoded_digest: [u8; 32] = Sha256::digest(&self.encoded_storage[..stored_len]).into();
+        if self.verified_encoded_chunk == Some((index, encoded_digest)) {
+            #[cfg(test)]
+            {
+                self.verified_cache_hits += 1;
+            }
+            return Ok(&self.decoded_storage[..self.entries[index].clear_len as usize]);
+        }
+        self.verified_encoded_chunk = None;
+        self.decode_loaded_chunk(index)?;
+        self.verified_encoded_chunk = Some((index, encoded_digest));
+        Ok(&self.decoded_storage[..self.entries[index].clear_len as usize])
+    }
+
     fn read_range_into(&mut self, offset: u64, destination: &mut [u8]) -> io::Result<()> {
         if destination.len() > MAX_READ_BYTES {
             return Err(bad_input("archive read exceeds 8 MiB per call"));
@@ -442,7 +493,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         while current < end {
             let index = (current / self.chunk_size as u64) as usize;
             let chunk_start = (index as u64) * self.chunk_size as u64;
-            let chunk = self.decode_chunk(index)?;
+            let chunk = self.read_verified_chunk(index)?;
             let within = (current - chunk_start) as usize;
             let n = ((end - current) as usize).min(chunk.len() - within);
             let dst = (current - offset) as usize;
@@ -486,6 +537,23 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 "read beyond archive EOF",
             ));
         }
+        if destination.is_empty() {
+            return Ok(());
+        }
+        // Most Finder and FSKit reads fit in one archive chunk. Decode and
+        // authenticate the complete chunk before copying the requested slice
+        // directly into caller memory. No intermediate 8 MiB read buffer is
+        // needed, and errors still leave the caller's bytes untouched.
+        let index = (offset / self.chunk_size as u64) as usize;
+        let within = (offset % self.chunk_size as u64) as usize;
+        if destination.len() <= self.entries[index].clear_len as usize - within {
+            let chunk = self.read_verified_chunk(index)?;
+            destination.copy_from_slice(&chunk[within..within + destination.len()]);
+            return Ok(());
+        }
+
+        // Cross-chunk reads retain the atomic staging contract: if any
+        // later chunk fails authentication, no partial prefix escapes.
         let mut staging = std::mem::take(&mut self.read_staging);
         let result = (|| {
             grow_buffer(&mut staging, destination.len())?;
@@ -497,12 +565,29 @@ impl<R: Read + Seek> ArchiveReader<R> {
         result
     }
 
-    /// Validate every logical chunk plus the whole-file digest. This is the
-    /// publication gate for a staged archive, independent of APFS allocation.
+    /// Validate every chunk and the whole-file SHA-256 before publication.
     pub fn verify_all(&mut self) -> io::Result<()> {
+        self.verify_all_cancellable(|| false)
+    }
+
+    /// FSKit unload can interrupt lengthy verification between chunks.
+    /// Check once before decoding and again before reporting success.
+    /// Successful calls retain the identical whole-file SHA-256 guarantee.
+    pub fn verify_all_cancellable(
+        &mut self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> io::Result<()> {
+        let interrupted =
+            || io::Error::new(io::ErrorKind::Interrupted, "ASCF verification cancelled");
         let mut hash = Sha256::new();
         for index in 0..self.entries.len() {
+            if cancelled() {
+                return Err(interrupted());
+            }
             hash.update(self.decode_chunk(index)?);
+        }
+        if cancelled() {
+            return Err(interrupted());
         }
         let digest: [u8; 32] = hash.finalize().into();
         if digest != self.logical_sha256 {
@@ -534,6 +619,21 @@ mod tests {
         result[80..112].copy_from_slice(&Sha256::digest(b"x"));
         result.extend_from_slice(data);
         result
+    }
+
+    #[test]
+    fn cancelled_full_verification_stops_before_untrusted_decode() {
+        let mut reader = ArchiveReader::open(Cursor::new(fake_archive())).unwrap();
+        let mut checks = 0;
+        let failure = reader
+            .verify_all_cancellable(|| {
+                checks += 1;
+                true
+            })
+            .unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(checks, 1, "cancellation must precede chunk decoding");
+        assert!(reader.verify_all().is_err());
     }
 
     #[test]
@@ -645,6 +745,54 @@ mod tests {
         assert_eq!(file_codec(0xE05).unwrap(), Codec::Lzmesh);
         for id in [3, 4, 11, 12, 13, 14, 15, 16, 0x702] {
             assert!(file_codec(id).is_err());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos27_cached_chunk_rechecks_compressed_bytes_after_in_place_edit() {
+        for codec in [Codec::Lzraven, Codec::Lzmesh] {
+            if !codec.is_supported() {
+                continue;
+            }
+            let clear = vec![0x5au8; MIN_CHUNK_BYTES + 13];
+            let mut output = Cursor::new(Vec::new());
+            write_archive(
+                clear.as_slice(),
+                &mut output,
+                clear.len() as u64,
+                codec,
+                MIN_CHUNK_BYTES,
+            )
+            .unwrap();
+            let mut reader = ArchiveReader::open(Cursor::new(output.into_inner())).unwrap();
+
+            let mut observed = [0u8; 48];
+            reader.read_exact_at(3, &mut observed).unwrap();
+            assert_eq!(observed, [0x5a; 48]);
+            assert!(reader.read_staging.is_empty());
+            assert_eq!(reader.verified_cache_hits, 0);
+            let cached = reader.verified_encoded_chunk.unwrap();
+            assert_eq!(cached.0, 0);
+
+            reader.read_exact_at(17, &mut observed).unwrap();
+            assert_eq!(observed, [0x5a; 48]);
+            assert!(reader.read_staging.is_empty());
+            assert_eq!(reader.verified_cache_hits, 1);
+            assert_eq!(reader.verified_encoded_chunk, Some(cached));
+
+            // An in-place payload mutation must invalidate the cache even
+            // when the next read touches the very same logical chunk.
+            let offset = reader.entries[0].offset as usize;
+            reader.source.get_mut()[offset] ^= 0xff;
+            let mut untouched = [0xa5u8; 48];
+            assert!(reader.read_exact_at(17, &mut untouched).is_err());
+            assert_eq!(untouched, [0xa5; 48]);
+            assert!(reader.verified_encoded_chunk.is_none());
+
+            // Full verification never substitutes a prior cached read for
+            // an independent decode and whole-file digest check.
+            assert!(reader.verify_all().is_err());
         }
     }
 

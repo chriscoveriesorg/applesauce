@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleExecutable</key>
+  <string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleName</key>
+  <string>$(PRODUCT_NAME)</string>
+  <key>CFBundlePackageType</key>
+  <string>XPC!</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key>
+  <string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>EXAppExtensionAttributes</key>
+  <dict>
+    <key>EXExtensionPointIdentifier</key>
+    <string>com.apple.fskit.fsmodule</string>
+    <key>FSShortName</key>
+    <string>ascf</string>
+    <!-- FSKit's mount/probe dispatcher requires an activate-option grammar,
+         even when this read-only module does not consume custom options.
+         Keep the standard FSKit template syntax for check/format commands;
+         neither operation is implemented by the module. -->
+    <key>FSActivateOptionSyntax</key>
+    <dict>
+      <key>shortOptions</key>
+      <string>g:m:o:u:</string>
+    </dict>
+    <key>FSCheckOptionSyntax</key>
+    <dict>
+      <key>shortOptions</key>
+      <string>nqy</string>
+    </dict>
+    <key>FSFormatOptionSyntax</key>
+    <dict>
+      <key>shortOptions</key>
+      <string>v</string>
+    </dict>
+    <key>FSSupportsServerURLs</key>
+    <false/>
+    <key>FSSupportsPathURLs</key>
+    <true/>
+    <key>FSSupportsBlockResources</key>
+    <false/>
+    <key>FSSupportsGenericURLResources</key>
+    <false/>
+    <key>FSRequiresSecurityScopedPathURLResources</key>
+    <true/>
+    <key>FSPersonalities</key>
+    <dict>
+      <key>ASCFReadOnly</key>
+      <dict>
+        <key>FSName</key>
+        <string>Applesauce ASCF read-only</string>
+        <key>FSfileObjectsAreCaseSensitive</key>
+        <true/>
+      </dict>
+    </dict>
+  </dict>
+</dict>
+</plist>
