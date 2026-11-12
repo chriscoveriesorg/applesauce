@@ -303,7 +303,12 @@ impl OutputDirectoryGuard {
     /// Atomically publish through the *opened directory*, not a pathname which
     /// can resolve to a different directory between validation and publication.
     /// linkat rejects existing files, including symlinks, without clobbering.
-    fn publish_verified(&self, temporary: NamedTempFile, output: &Path) -> io::Result<()> {
+    fn publish_verified(
+        &self,
+        temporary: NamedTempFile,
+        output: &Path,
+        verified: &fs::Metadata,
+    ) -> io::Result<()> {
         let selected_parent = output
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -333,10 +338,11 @@ impl OutputDirectoryGuard {
             let target_name = CString::new(target_name.as_bytes())
                 .map_err(|_| invalid("archive output filename contains NUL"))?;
 
-            // Verify the selected stage still names the open, verified inode.
-            // The caller also checks a content snapshot immediately before this.
+            // Reuse the caller's verified snapshot. Recapturing metadata here
+            // would trust an in-place rewrite between final hash verification
+            // and publication as though it were the original staged content.
+            ensure_unchanged_staging_output(&temporary, verified)?;
             let opened = temporary.as_file().metadata()?;
-            ensure_unchanged_staging_output(&temporary, &opened)?;
             let directory_fd = self.opened.as_raw_fd();
             // SAFETY: directory_fd is an open directory descriptor; both CStrings
             // are NUL-terminated names without interior NUL bytes.
@@ -628,7 +634,7 @@ fn create(
     // the earlier source hash check.
     ensure_unchanged_regular_input(source_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
-    output_parent.publish_verified(temporary, output)?;
+    output_parent.publish_verified(temporary, output, &verified_staging)?;
     println!(
         "{} archive: {} -> {} bytes ({:.1}% saved); original unchanged",
         codec.name(),
@@ -717,7 +723,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
     }
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
-    output_parent.publish_verified(temporary, output)?;
+    output_parent.publish_verified(temporary, output, &verified_staging)?;
     println!("Restored {} verified bytes into a new file", logical_size);
     Ok(())
 }
@@ -764,7 +770,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
     }
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
-    output_parent.publish_verified(temporary, output)?;
+    output_parent.publish_verified(temporary, output, &verified_staging)?;
     println!(
         "Restored verified logical range {}:{} into a new file; range SHA-256 {}",
         start,
@@ -839,7 +845,8 @@ mod tests {
         let output = parent.join("résumé restored.bin");
         let (mut temporary, guard) = staging(&output).unwrap();
         temporary.write_all(b"verified synthetic content").unwrap();
-        guard.publish_verified(temporary, &output).unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+        guard.publish_verified(temporary, &output, &verified).unwrap();
         assert_eq!(fs::read(&output).unwrap(), b"verified synthetic content");
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
     }
@@ -856,9 +863,10 @@ mod tests {
         let other_target = other.join("restored.bin");
         let (mut temporary, guard) = staging(&original_target).unwrap();
         temporary.write_all(b"verified bytes").unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
         assert_eq!(
             guard
-                .publish_verified(temporary, &other_target)
+                .publish_verified(temporary, &other_target, &verified)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
@@ -878,10 +886,11 @@ mod tests {
         fs::write(&protected, b"do not overwrite").unwrap();
         let (mut temporary, guard) = staging(&output).unwrap();
         temporary.write_all(b"verified bytes").unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
         symlink(&protected, &output).unwrap();
         assert_eq!(
             guard
-                .publish_verified(temporary, &output)
+                .publish_verified(temporary, &output, &verified)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::AlreadyExists
@@ -900,12 +909,42 @@ mod tests {
         let output = root.path().join("verified");
         let (mut temporary, guard) = staging(&output).unwrap();
         temporary.write_all(b"verified bytes").unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
         let moved = root.path().join("moved-stage");
         fs::rename(temporary.path(), &moved).unwrap();
         fs::write(temporary.path(), b"attacker bytes").unwrap();
         assert_eq!(
             guard
-                .publish_verified(temporary, &output)
+                .publish_verified(temporary, &output, &verified)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_publish_refuses_rewrite_since_verified_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("verified");
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"verified bytes").unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
+
+        // A competing writer retains the same inode and byte count after
+        // verification. A fresh snapshot taken inside publish would accept it.
+        fs::write(temporary.path(), b"tampered bytes").unwrap();
+        temporary
+            .as_file()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12_345),
+            )
+            .unwrap();
+        assert_eq!(verified.len(), temporary.as_file().metadata().unwrap().len());
+        assert_eq!(
+            guard
+                .publish_verified(temporary, &output, &verified)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidData
@@ -923,11 +962,12 @@ mod tests {
         let output = parent.join("restored.bin");
         let (mut temporary, guard) = staging(&output).unwrap();
         temporary.write_all(b"verified bytes").unwrap();
+        let verified = temporary.as_file().metadata().unwrap();
         fs::rename(&parent, &moved).unwrap();
         fs::create_dir(&parent).unwrap();
         assert_eq!(
             guard
-                .publish_verified(temporary, &output)
+                .publish_verified(temporary, &output, &verified)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidData
