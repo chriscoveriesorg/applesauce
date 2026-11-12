@@ -304,6 +304,13 @@ impl OutputDirectoryGuard {
     /// can resolve to a different directory between validation and publication.
     /// linkat rejects existing files, including symlinks, without clobbering.
     fn publish_verified(&self, temporary: NamedTempFile, output: &Path) -> io::Result<()> {
+        let selected_parent = output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if selected_parent != self.path {
+            return Err(invalid("archive output parent differs from pinned directory"));
+        }
         self.ensure_unchanged()?;
         #[cfg(unix)]
         {
@@ -824,6 +831,29 @@ mod tests {
         guard.publish_verified(temporary, &output).unwrap();
         assert_eq!(fs::read(&output).unwrap(), b"verified synthetic content");
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_publish_rejects_a_different_requested_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("original");
+        let other = root.path().join("other");
+        fs::create_dir(&original).unwrap();
+        fs::create_dir(&other).unwrap();
+        let original_target = original.join("restored.bin");
+        let other_target = other.join("restored.bin");
+        let (mut temporary, guard) = staging(&original_target).unwrap();
+        temporary.write_all(b"verified bytes").unwrap();
+        assert_eq!(
+            guard
+                .publish_verified(temporary, &other_target)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!original_target.exists());
+        assert!(!other_target.exists());
     }
 
     #[cfg(unix)]
