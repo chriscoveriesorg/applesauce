@@ -566,6 +566,20 @@ class CrosscheckTest(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.EvidenceError, "excessive nesting"):
                 MODULE.read_evidence(path)
 
+    def test_read_rejects_nonfinite_json_constants(self):
+        # Python accepts these nonstandard JSON tokens by default. Evidence
+        # must be strict JSON even when an unused field carries the token.
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "evidence.json"
+            for token in ("NaN", "Infinity", "-Infinity"):
+                with self.subTest(token=token):
+                    path.write_text('{"unused":' + token + '}')
+                    with self.assertRaisesRegex(MODULE.EvidenceError,
+                                                "non-finite"):
+                        MODULE.read_evidence(path)
+            path.write_text('{"unused":1.25}')
+            self.assertEqual(MODULE.read_evidence(path)[0], {"unused": 1.25})
+
     def test_read_rejects_duplicate_json_fields_and_empty(self):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "evidence.json"
