@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -42,6 +43,26 @@ def unique_pairs(pairs):
             raise EvidenceError(f"duplicate JSON field: {key}")
         result[key] = value
     return result
+
+
+MAX_JSON_INTEGER_DIGITS = 128
+
+
+def bounded_json_integer(token: str) -> int:
+    # Python's integer conversion limit varies by runtime configuration.
+    # Bound untrusted decimal literals before calling int().
+    digits = token.lstrip("-")
+    if len(digits) > MAX_JSON_INTEGER_DIGITS:
+        raise EvidenceError("invalid JSON evidence: oversized integer")
+    return int(token)
+
+
+def finite_json_float(token: str) -> float:
+    # Valid JSON numeric syntax can overflow Python's float to infinity.
+    value = float(token)
+    if not math.isfinite(value):
+        raise EvidenceError("invalid JSON evidence: non-finite float")
+    return value
 
 
 MAX_JSON_NESTING = 128
@@ -105,6 +126,8 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
         try:
             document = json.loads(
                 raw, object_pairs_hook=unique_pairs,
+                parse_int=bounded_json_integer,
+                parse_float=finite_json_float,
                 parse_constant=lambda value: (_ for _ in ()).throw(
                     EvidenceError(f"invalid JSON evidence: non-finite {value}")
                 ),
