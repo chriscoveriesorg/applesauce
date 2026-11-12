@@ -306,7 +306,7 @@ def check_negative_reason(name, reason):
             f"independent decoder returned wrong digest at chunk {chunk}",
         }
         abnormal_exit = re.fullmatch(
-            rf"independent decoder failed on chunk {chunk} \\(exit -?[1-9][0-9]*\\)",
+            rf"independent decoder failed on chunk {chunk} \(exit -?[1-9][0-9]*\)",
             reason,
         ) is not None
         require(reason in exact or abnormal_exit,
