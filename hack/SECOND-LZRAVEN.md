@@ -57,6 +57,46 @@ review of byte-level evidence before claiming acceptance. Keep any future CI
 changes with the CI maintainer under #123; do not introduce GitHub-hosted
 runner labels here or silently run builds on a host.
 
+## Offline qualification and reviewable evidence
+
+On an approved isolated runner, reuse a source mirror without a fresh GitHub
+clone. The checkout must be at exactly the pinned commit, with no tracked
+changes; the script refuses a wrong revision or dirty tracked source.
+
+    bash hack/run_second_raven_proof.sh \
+      --upstream-checkout /path/to/pinned/apple-compressions \
+      --evidence-dir /trusted/new-raven-proof-directory
+
+For a full fresh Apple-buffer run on an approved macOS 27 host, add the path
+to the matching checkout's executable:
+
+    bash hack/run_second_raven_proof.sh \
+      --upstream-checkout /path/to/pinned/apple-compressions \
+      --evidence-dir /trusted/new-macos-proof-directory \
+      "$PWD/target/debug/applesauce"
+
+The requested evidence directory must not already exist, and its parent must
+be trusted. The resulting bundle includes logs of the upstream C tests,
+adapter regressions and evidence-validator regressions, JSON for the committed
+vectors, ten fresh cross-decodes and two nine-case corruption suites (when
+the macOS CLI is supplied), and \`manifest.json\`. The manifest records the
+Applesauce Git HEAD, exact upstream commit, source-file SHA-256 values,
+independent decoder binary SHA-256, optional Apple encoder CLI SHA-256, report
+hashes and case totals.
+
+\`validate_second_raven_reports.py\` checks that exactly two committed
+Apple fixtures were independently decoded. For a full run it also requires
+ten correctly sized positive results, eighteen distinct expected corruption
+rejections, consistent decoder hashes and negative-suite baseline hashes
+that match the corresponding fresh positive fixtures. A missing, forged,
+duplicated or mismatched report fails qualification.
+
+The manifest describes technical evidence that an independent reviewer
+can inspect. It does **not** prove source independence, binary provenance
+beyond the recorded hashes, or a working native APFS handler. Native writes
+remain disabled and this PR stays draft until the independent review and
+owner acceptance gates are complete. No runner workflow is changed here.
+
 ## Local verification and limitations
 
 The adapter's synthetic identity stub is deliberately *not* a Raven decoder.
