@@ -232,6 +232,38 @@ def require_report(output, path, codec, storage):
 
 
 
+def require_restored_report(output, path, expected_size):
+    """Verify decompression removed the actual APFS compression attributes.
+
+    Kernel and mmap readback can both succeed even if decompression was a no-op.
+    """
+    report = json.loads(run(output, "info", "--json", path))
+    if not isinstance(report, dict) or report.get("complete") is not True:
+        raise AssertionError(f"incomplete restoration storage report: {report}")
+    if report.get("report_kind") != "actual_storage":
+        raise AssertionError(f"unexpected restoration report kind: {report}")
+    matches = [
+        row for row in report.get("paths", [])
+        if isinstance(row, dict) and isinstance(row.get("path"), dict)
+        and row["path"].get("display") == str(path)
+    ]
+    if len(matches) != 1:
+        raise AssertionError(f"wrong restoration storage row count: {matches}")
+    row = matches[0]
+    if (
+        row.get("entry_type") != "file"
+        or row.get("error") is not None
+        or row.get("source") != "none"
+        or row.get("codec") != "none"
+        or row.get("storage") is not None
+        or row.get("decmpfs_type") is not None
+        or row.get("decmpfs_xattr_bytes") != 0
+        or row.get("resource_fork_bytes") != 0
+        or row.get("logical_size_bytes") != expected_size
+    ):
+        raise AssertionError(f"restoration left compressed or invalid storage: {row}")
+
+
 def verify_readback(path, expected):
     """Compare complete kernel and mmap reads to the original content hash."""
     expected_sha256 = hashlib.sha256(expected).hexdigest()
@@ -287,6 +319,8 @@ def main():
         # Keep both generated resources compressed simultaneously. The
         # per-file success case alone cannot prove the mixed-storage state.
         expected_bytes = {path: path.read_bytes() for path in files}
+        for path in files:
+            require_restored_report(applesauce, path, len(expected_bytes[path]))
         compressed = []
         for path, storage in ((small, "inline_xattr"), (large, "resource_fork")):
             run(
@@ -307,6 +341,7 @@ def main():
         for path, _storage in reversed(tuple(compressed)):
             run(applesauce, "decompress", "--verify", path)
             verify_readback(path, expected_bytes[path])
+            require_restored_report(applesauce, path, len(expected_bytes[path]))
             compressed = [entry for entry in compressed if entry[0] != path]
             for active_path, active_storage in compressed:
                 verify_readback(active_path, expected_bytes[active_path])
@@ -315,6 +350,7 @@ def main():
             signature_and_execution(app, executable)
         for path in files:
             verify_readback(path, expected_bytes[path])
+            require_restored_report(applesauce, path, len(expected_bytes[path]))
 
         print(json.dumps({
             "schema_version": 1,
@@ -326,6 +362,7 @@ def main():
             "mmap_readback_verified": True,
             "both_storage_modes_active_together": True,
             "readback_after_each_transition": True,
+            "restored_storage_absent_after_each_transition": True,
             "sealed_paths_unchanged_during_writes": True,
             "strict_codesign_valid_after_each_step": True,
             "signed_executable_runs_after_each_step": True,
