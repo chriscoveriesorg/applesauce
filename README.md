@@ -109,6 +109,10 @@ The writer rereads and hashes the original, verifies every staged chunk and
 rechecks input path identity immediately before publishing to reject a replaced
 source (including same-sized inode swaps on macOS/Linux). Full and ranged
 restoration apply the same pathname check before publishing their new output.
+The output's parent directory is pinned by device/inode across staging and
+checked again before publication. A renamed destination directory or a
+retargeted symlink parent is rejected instead of publishing to an unintended
+directory. Directory timestamp changes from normal sibling files are allowed.
 A concurrent rename after the final check remains a normal filesystem race.
 Archives that cannot save space
 are refused unless you set `--allow-expansion`. Use `--chunk-bytes 1048576`
