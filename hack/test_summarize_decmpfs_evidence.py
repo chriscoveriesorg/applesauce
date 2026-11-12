@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Portable negative controls for the read-only decmpfs evidence crosscheck."""
 import copy
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -17,6 +19,8 @@ SPEC.loader.exec_module(MODULE)
 
 
 def fixtures():
+    raw_table = (struct.pack("<IIQ", 3, 0, 0x5000)
+                 + struct.pack("<IIQ", 13, 0, 0x6000))
     binary = {
         "schema_version": 1,
         "kind": "read-only-decmpfs-binary-evidence",
@@ -46,9 +50,18 @@ def fixtures():
                                     "window_sha256": "c" * 64,
                                 },
                                 "table": {
-                        "count": 2, "entries": [
-                            {"type": 3, "pointer_resolution": {"status": "chain-verified"}},
-                            {"type": 13, "pointer_resolution": {"status": "unresolved"}},
+                        "address": "0x3000", "file_offset": 0,
+                        "stride": 16, "count": 2,
+                        "bytes_hex": raw_table.hex(),
+                        "sha256": hashlib.sha256(raw_table).hexdigest(),
+                        "loop_window_sha256": "c" * 64,
+                        "entries": [
+                            {"type": 3, "raw_registration_pointer": "0x5000",
+                             "pointer_resolution": {"status": "chain-verified",
+                                                    "address": "0x3008"}},
+                            {"type": 13, "raw_registration_pointer": "0x6000",
+                             "pointer_resolution": {"status": "unresolved",
+                                                    "address": "0x3018"}},
                         ]}}]}],
         "kernel_decoder_proven": False,
         "codec_identity_proven": False,
@@ -312,6 +325,65 @@ class CrosscheckTest(unittest.TestCase):
         reports[1]["inputs"][0]["tables"][0]["table"]["count"] = True
         with self.assertRaisesRegex(MODULE.EvidenceError, "length mismatch"):
             summarize(*reports)
+
+    def test_reject_registration_table_byte_and_pointer_forgery(self):
+        for mutation, expected in (
+            ("missing-bytes", "raw bytes"),
+            ("wrong-stride", "stride"),
+            ("altered-bytes", "digest mismatch"),
+            ("missing-digest", "digest mismatch"),
+            ("forged-record-type", "differs from raw bytes"),
+            ("forged-record-pointer", "pointer differs"),
+            ("forged-resolution-address", "resolution address"),
+            ("changed-loop-window", "window digest"),
+            ("wrong-raw-type", "differs from raw bytes"),
+            ("nonzero-padding", "differs from raw bytes"),
+            ("wrong-raw-pointer", "pointer differs"),
+        ):
+            with self.subTest(mutation=mutation):
+                reports = fixtures()
+                entry = reports[1]["inputs"][0]["tables"][0]
+                rows = entry["table"]
+                if mutation == "missing-bytes":
+                    rows.pop("bytes_hex")
+                elif mutation == "wrong-stride":
+                    rows["stride"] = 8
+                elif mutation == "altered-bytes":
+                    rows["bytes_hex"] = "0" + rows["bytes_hex"][1:]
+                elif mutation == "missing-digest":
+                    rows.pop("sha256")
+                elif mutation == "forged-record-type":
+                    rows["entries"][0]["type"] = 7
+                elif mutation == "forged-record-pointer":
+                    rows["entries"][0]["raw_registration_pointer"] = "0x7000"
+                elif mutation == "forged-resolution-address":
+                    rows["entries"][0]["pointer_resolution"]["address"] = "0x3018"
+                elif mutation == "changed-loop-window":
+                    rows["loop_window_sha256"] = "d" * 64
+                else:
+                    raw = bytearray.fromhex(rows["bytes_hex"])
+                    if mutation == "wrong-raw-type":
+                        struct.pack_into("<I", raw, 0, 7)
+                    elif mutation == "nonzero-padding":
+                        struct.pack_into("<I", raw, 4, 1)
+                    else:
+                        struct.pack_into("<Q", raw, 8, 0x7000)
+                    rows["bytes_hex"] = raw.hex()
+                    rows["sha256"] = hashlib.sha256(raw).hexdigest()
+                with self.assertRaisesRegex(MODULE.EvidenceError, expected):
+                    summarize(*reports)
+
+    def test_reject_boolean_schema_version(self):
+        reports = fixtures()
+        reports[0]["schema_version"] = True
+        with self.assertRaisesRegex(MODULE.EvidenceError, "kind/schema"):
+            summarize(*reports)
+
+    def test_raw_table_accepts_valid_pointer_and_unresolved_entries(self):
+        reports = fixtures()
+        result = summarize(*reports)
+        self.assertEqual(result["static_registration_type_candidates"], [3, 13])
+        self.assertEqual(result["unresolved_static_registration_pointers"], 1)
 
     def test_read_rejects_symlink_and_nonregular_file(self):
         with tempfile.TemporaryDirectory() as scratch:
