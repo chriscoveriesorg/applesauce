@@ -839,11 +839,17 @@ mod tests {
         temporary.write_all(b"verified bytes").unwrap();
         symlink(&protected, &output).unwrap();
         assert_eq!(
-            guard.publish_verified(temporary, &output).unwrap_err().kind(),
+            guard
+                .publish_verified(temporary, &output)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(fs::read(&protected).unwrap(), b"do not overwrite");
-        assert!(fs::symlink_metadata(&output).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(unix)]
@@ -857,7 +863,10 @@ mod tests {
         fs::rename(temporary.path(), &moved).unwrap();
         fs::write(temporary.path(), b"attacker bytes").unwrap();
         assert_eq!(
-            guard.publish_verified(temporary, &output).unwrap_err().kind(),
+            guard
+                .publish_verified(temporary, &output)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::InvalidData
         );
         assert!(!output.exists());
@@ -876,7 +885,10 @@ mod tests {
         fs::rename(&parent, &moved).unwrap();
         fs::create_dir(&parent).unwrap();
         assert_eq!(
-            guard.publish_verified(temporary, &output).unwrap_err().kind(),
+            guard
+                .publish_verified(temporary, &output)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::InvalidData
         );
         assert!(!output.exists());
