@@ -114,6 +114,9 @@ publication uses an atomic, no-clobber hard link relative to the **opened
 directory descriptor** rather than resolving the parent pathname again.
 The published inode is checked against the verified staged descriptor; the
 private staging name is removed relative to the same directory descriptor.
+Staging uses cryptographically random names and `openat(O_EXCL)`. Its file
+lifetime and cleanup are managed by the pinned descriptor, including early
+error paths, without a pathname-based tempfile destructor.
 If publication fails after linking, rollback only unlinks a final name that
 still identifies the staged inode, preserving a replacement file or symlink.
 A replaced parent or retargeted symlink is rejected, while normal sibling
