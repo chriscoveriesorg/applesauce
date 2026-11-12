@@ -1,0 +1,78 @@
+name: Read-only decmpfs provenance
+
+# Evidence only. Does not set xattrs, mount an image, call a kernel decoder
+# with synthetic data or change any native writer capability.
+on:
+  push:
+    paths:
+      - 'hack/decmpfs_binary_probe.py'
+      - 'hack/decmpfs_table_probe.py'
+      - 'hack/decmpfs_catalogue_probe.py'
+      - 'hack/decmpfs_config_probe.py'
+      - 'hack/kernelcache_container.py'
+      - 'hack/native-type-probe.py'
+      - 'hack/summarize-decmpfs-evidence.py'
+      - 'hack/test_summarize_decmpfs_evidence.py'
+      - '.github/workflows/decmpfs-readonly-evidence.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: decmpfs-readonly-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  validate:
+    name: Portable evidence crosscheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compile and validate fail-closed join
+        run: |
+          set -euo pipefail
+          python3 -m py_compile hack/summarize-decmpfs-evidence.py hack/test_summarize_decmpfs_evidence.py
+          python3 -m unittest discover -s hack -p 'test_summarize_decmpfs_evidence.py' -v
+
+  observe:
+    name: System-file and static registration evidence (no writes)
+    needs: validate
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Record OS/tool provenance
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          sw_vers > evidence/sw_vers.txt
+          uname -a > evidence/uname.txt
+          shasum -a 256 hack/decmpfs_binary_probe.py hack/decmpfs_table_probe.py \
+            hack/decmpfs_catalogue_probe.py hack/native-type-probe.py \
+            hack/summarize-decmpfs-evidence.py > evidence/tool-sha256.txt
+      - name: Extract read-only binary, registration, catalogue and stored-header observations
+        run: |
+          set -euo pipefail
+          python3 hack/decmpfs_binary_probe.py --system > evidence/binary.json
+          python3 hack/decmpfs_table_probe.py --system > evidence/table.json
+          python3 hack/decmpfs_catalogue_probe.py --system > evidence/catalogue.json
+          python3 hack/native-type-probe.py --max-files 30000 --max-seconds 60 \
+            --output evidence/inventory.json
+      - name: Bind observations to identical kernelcache source hashes
+        run: |
+          set -euo pipefail
+          python3 hack/summarize-decmpfs-evidence.py \
+            evidence/binary.json evidence/table.json \
+            evidence/catalogue.json evidence/inventory.json \
+            > evidence/crosscheck.json
+          python3 -c 'import json; p=json.load(open("evidence/crosscheck.json")); assert p["native_raven_mesh_writes_permitted"] is False; print(json.dumps({k: p[k] for k in ("result", "matched_binary_sources", "static_registration_type_candidates", "catalogue_declared_type_hints", "observed_stored_type_counts", "unresolved_static_registration_pointers")}, sort_keys=True))' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Retain diagnostic evidence, including incomplete runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decmpfs-readonly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: warn
