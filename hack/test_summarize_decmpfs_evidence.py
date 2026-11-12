@@ -218,6 +218,24 @@ class CrosscheckTest(unittest.TestCase):
                 with self.assertRaises(MODULE.EvidenceError):
                     summarize(*reports)
 
+    def test_reject_unaligned_arm64_callsite_even_when_branch_matches(self):
+        # Moving the entire instruction window and branch by one byte keeps
+        # the encoded displacement and cross-probe signatures consistent, but
+        # cannot represent an aligned AArch64 instruction.
+        for field in ("call_address", "target_address", "window_address"):
+            with self.subTest(field=field):
+                reports = fixtures()
+                call = reports[0]["inputs"][0]["images"][0]["registration_calls"][0]
+                if field == "target_address":
+                    # A lone target shift also violates instruction alignment.
+                    call[field] = hex(int(call[field], 16) + 1)
+                else:
+                    for key in ("call_address", "target_address", "window_address"):
+                        call[key] = hex(int(call[key], 16) + 1)
+                reports[1]["inputs"][0]["tables"][0]["callsite"] = copy.deepcopy(call)
+                with self.assertRaisesRegex(MODULE.EvidenceError, "unaligned ARM64"):
+                    summarize(*reports)
+
     def test_reject_mismatched_source(self):
         reports = fixtures()
         reports[1]["inputs"][0]["sha256"] = "b" * 64
