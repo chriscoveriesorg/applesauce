@@ -1272,11 +1272,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("durable.ascf");
         let (mut temporary, guard) = staging(&output).unwrap();
-        temporary.write_all(b"archive with a durable directory entry").unwrap();
+        temporary
+            .write_all(b"archive with a durable directory entry")
+            .unwrap();
         temporary.as_file_mut().flush().unwrap();
         temporary.as_file().sync_all().unwrap();
         let verified = temporary.as_file().metadata().unwrap();
-        guard.publish_verified(temporary, &output, &verified).unwrap();
+        guard
+            .publish_verified(temporary, &output, &verified)
+            .unwrap();
 
         // Successful publication includes a parent-directory fsync and
         // leaves only the verified destination in the selected directory.
