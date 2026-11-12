@@ -708,5 +708,17 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual((moved / self.output.name).read_text(), "stale")
 
 
+    def test_invalid_csv_row_does_not_publish_partial_evidence(self):
+        # A malformed later row must not publish the valid header/first row.
+        # The staging file may contain partial bytes but is never an artifact.
+        malformed = [self.rows[0], {"codec": "lzmesh", "value": "456", "extra": "unexpected"}]
+        with SafeCsvOutput(self.output, (self.input,)) as publisher:
+            with self.assertRaises(ValueError):
+                publisher.write_rows(malformed, ("codec", "value"))
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
+        self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
+
+
 if __name__ == "__main__":
     unittest.main()
