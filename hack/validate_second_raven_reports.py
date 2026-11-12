@@ -147,6 +147,58 @@ def read_fresh_archive(reports, family, size):
         os.close(fd)
 
 
+def hash_retained_regular(path, max_bytes):
+    """Hash a bounded, unchanged regular-file snapshot without following symlinks."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"missing retained evidence artifact: {path.name}") from exc
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode)
+                and 0 < before.st_size <= max_bytes,
+                f"invalid retained evidence artifact: {path.name}")
+        checksum = hashlib.sha256()
+        length = 0
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                length += len(chunk)
+                require(length <= max_bytes, f"oversized retained artifact: {path.name}")
+                checksum.update(chunk)
+        after = os.fstat(fd)
+        leaf = path.lstat()
+        require(length == before.st_size
+                and stat.S_ISREG(leaf.st_mode)
+                and file_identity(before) == file_identity(after) == file_identity(leaf),
+                f"retained evidence artifact changed: {path.name}")
+        return checksum.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def check_retained_bundle(reports, decoder_digest, upstream_hashes):
+    """Bind reviewable binary, source snapshots and executed test logs to the manifest."""
+    source_dir = reports / "retained-sources"
+    require(source_dir.is_dir() and not source_dir.is_symlink(),
+            "missing regular retained source directory")
+    expected = {
+        "second-raven-decoder": (decoder_digest, 32 * 1024 * 1024),
+    }
+    for name, digest in upstream_hashes.items():
+        expected[f"retained-sources/{name}"] = (digest, 16 * 1024 * 1024)
+    for name in ("upstream-tests.log", "adapter-tests.log", "evidence-tests.log",
+                 "toolchain.txt"):
+        expected[name] = (None, 4 * 1024 * 1024)
+    hashes = {}
+    for name, (trusted_hash, max_bytes) in expected.items():
+        actual = hash_retained_regular(reports / name, max_bytes)
+        if trusted_hash is not None:
+            require(actual == trusted_hash, f"retained artifact digest mismatch: {name}")
+        hashes[name] = actual
+    return dict(sorted(hashes.items()))
+
+
 def check_archive(raw, family, size):
     """Validate actual ASCF header, index and clear-text digests, not claims."""
     label = f"{family}-{size}"
@@ -222,7 +274,7 @@ def check_negative_reason(name, reason):
         require(expected in reason, f"{name}: unexpected parser rejection")
 
 
-def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None):
+def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, bundle=False):
     reports = Path(reports)
     report_digests = {}
     decoder_digest = digest_file(decoder)
@@ -316,6 +368,8 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None):
     head = git_head(upstream)
     require(head == "6d97f1ab520821b4d326139fdf48b658f96ee5b9",
             "upstream source is not pinned to reviewed commit")
+    retained_hashes = (check_retained_bundle(reports, decoder_digest, upstream_hashes)
+                       if bundle else {})
     manifest = {
         "schema_version": 1,
         "status": "second_decoder_evidence_consistent_pending_independent_review",
@@ -329,6 +383,7 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None):
         "fresh_archive_sha256": dict(sorted(fresh_archive_hashes.items())),
         "corruptions_rejected": negative_count,
         "report_sha256": dict(sorted(report_digests.items())),
+        "retained_artifacts_sha256": retained_hashes,
         "apple_encoder_cli_sha256": digest_file(cli) if cli is not None else None,
     }
     return manifest
@@ -341,11 +396,13 @@ def main(argv=None):
     parser.add_argument("--upstream", type=Path, required=True)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--fresh", action="store_true")
+    parser.add_argument("--bundle", action="store_true")
     parser.add_argument("--cli", type=Path)
     args = parser.parse_args(argv)
     try:
         manifest = validate(args.reports, args.decoder, args.upstream,
-                            args.repository, fresh=args.fresh, cli=args.cli)
+                            args.repository, fresh=args.fresh, cli=args.cli,
+                            bundle=args.bundle)
     except (OSError, ValueError, json.JSONDecodeError,
             subprocess.CalledProcessError) as exc:
         print(f"second Raven qualification evidence rejected: {exc}", file=sys.stderr)
