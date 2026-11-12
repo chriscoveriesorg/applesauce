@@ -172,6 +172,50 @@ class SignedBundleProbeTests(unittest.TestCase):
                             "/tmp/applesauce", path, 4096
                         )
 
+    def test_signed_bundle_audit_prunes_executable_and_seal(self):
+        app = Path("/tmp/Fixture.app")
+        files = (
+            app / "Contents" / "Resources" / "small.txt",
+            app / "Contents" / "Resources" / "events.jsonl",
+        )
+        excluded = (
+            app / "Contents" / "Info.plist",
+            app / "Contents" / "MacOS",
+            app / "Contents" / "_CodeSignature",
+        )
+
+        def row(path, selected, reason):
+            return {
+                "path": {"display": str(path)},
+                "would_compress": selected, "reason": reason,
+            }
+
+        good = {
+            "complete": True, "profile": "bundles", "full_encoding": True,
+            "paths": [row(p, True, "compress") for p in files]
+            + [row(p, False, "bundle_non_resource") for p in excluded],
+        }
+        probe.require_bundle_audit(good, app, files)
+        invalid = [
+            {**good, "complete": False},
+            {**good, "profile": "caches"},
+            {**good, "full_encoding": False},
+            {**good, "paths": good["paths"][:-1]},
+            {**good, "paths": good["paths"] + [good["paths"][0]]},
+            {**good, "paths": good["paths"] + [
+                row(excluded[1] / "applesauce-probe", False, "bundle_non_resource")
+            ]},
+            {**good, "paths": good["paths"] + [
+                row(excluded[2] / "CodeResources", False, "bundle_non_resource")
+            ]},
+            {**good, "paths": good["paths"][:2]
+                + [row(excluded[0], True, "compress")] + good["paths"][3:]},
+        ]
+        for malformed in invalid:
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(AssertionError):
+                    probe.require_bundle_audit(malformed, app, files)
+
     def test_executable_consumes_both_signed_resources_via_mmap(self):
         """The launch gate must detect same-length corruption in either resource."""
         compiler = shutil.which("cc")
