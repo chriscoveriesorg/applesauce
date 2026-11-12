@@ -293,15 +293,23 @@ def expected_negative_hashes(raw):
 
 
 def check_negative_reason(name, reason):
+    """Accept only the rejection strings emitted by the bounded proof harness.
+
+    In particular an 'exit 0' prefix is not a decoder failure, and an
+    unrelated error containing a parser message is not a parser rejection.
+    """
     if name.startswith("payload_"):
         chunk = {"payload_middle_chunk": 1, "payload_final_chunk": 2}.get(name, 0)
-        allowed = (
-            f"independent decoder failed on chunk {chunk} (exit ",
+        exact = {
             f"independent decoder omitted chunk {chunk}",
             f"independent decoder returned incorrect bytes/length at chunk {chunk}",
             f"independent decoder returned wrong digest at chunk {chunk}",
-        )
-        require(reason.startswith(allowed),
+        }
+        abnormal_exit = re.fullmatch(
+            rf"independent decoder failed on chunk {chunk} \\(exit -?[1-9][0-9]*\\)",
+            reason,
+        ) is not None
+        require(reason in exact or abnormal_exit,
                 f"{name}: rejection is not from independent decoder")
     else:
         expected = {
@@ -309,9 +317,9 @@ def check_negative_reason(name, reason):
             "middle_index_digest": "original chunk 1 differs from ASCF chunk digest",
             "final_index_digest": "original chunk 2 differs from ASCF chunk digest",
             "truncated_payload": "ASCF index points past EOF",
-            "appended_payload": "ASCF payload has trailing",
+            "appended_payload": "ASCF payload has trailing, overlapping or missing data",
         }[name]
-        require(expected in reason, f"{name}: unexpected parser rejection")
+        require(reason == expected, f"{name}: unexpected parser rejection")
 
 
 def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, bundle=False):
