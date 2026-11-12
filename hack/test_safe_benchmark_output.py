@@ -447,6 +447,36 @@ class SafeOutputTests(unittest.TestCase):
         self.assertEqual(list(self.evidence.glob(".comparison.csv.*.tmp")), [])
         self.assertEqual(self.input.read_text(encoding="utf-8"), "source evidence")
 
+    def test_directory_preflight_close_failure_preserves_original_error(self):
+        # A rejected directory must report the actual preflight failure,
+        # even if closing its descriptor also raises an injected I/O error.
+        real_close = os.close
+        closed = []
+
+        def close_then_fail(fd):
+            closed.append(fd)
+            real_close(fd)
+            raise OSError("injected preflight descriptor close failure")
+
+        # The opened output directory is rejected because another user can
+        # mutate it; inject that rejection without changing filesystem owners.
+        real_fstat = os.fstat
+
+        def reject_directory(fd):
+            info = real_fstat(fd)
+            raise ValueError("injected directory preflight rejection")
+
+        with patch("safe_benchmark_output.os.fstat", side_effect=reject_directory):
+            with patch("safe_benchmark_output.os.close", side_effect=close_then_fail):
+                with self.assertRaisesRegex(ValueError, "directory preflight rejection"):
+                    with SafeCsvOutput(self.output, (self.input,)):
+                        pass
+        self.assertEqual(len(closed), 1)
+        with self.assertRaises(OSError):
+            os.fstat(closed[0])
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.input.read_text(), "source evidence")
+
     def test_directory_close_failure_preserves_publication_error(self):
         # A secondary descriptor-close error must not mask the real reason
         # the benchmark evidence was rejected.
