@@ -22,11 +22,12 @@ runs the portable negative controls, then collects these macOS system observatio
 
 All scan operations are read-only. This workflow never mounts a disk image,
 sets compression attributes, runs a synthetic kernel payload or changes a
-writer gate. It records OS and script checksums. An unavailable/unparseable
-kernelcache source, divergent binary/table hashes, corrupt report or missing
-mandatory gate causes a failing job. Diagnostic artifacts remain available
-for investigation on job failure. Incomplete evidence must not be treated as a
-negative decoder proof or a release qualification.
+writer gate. It records OS and script checksums. At least one kernelcache source must be inspected successfully. An unavailable
+source is retained by path and status in both binary and table reports; the
+join fails if either probe used a different set of sources, inspection states
+or hashes. Divergent hashes, corrupt reports and missing mandatory write gates
+also fail. Diagnostic artifacts remain available on job failure. Partial
+coverage cannot establish decoder absence or qualify a release.
 
 ## Offline replay
 
@@ -38,10 +39,13 @@ python3 hack/summarize-decmpfs-evidence.py \
 python3 -m unittest discover -s hack -p 'test_summarize_decmpfs_evidence.py' -v
 ```
 
-The join reads bounded, regular, no-follow evidence files, refuses duplicate
-JSON keys and aliased inputs, checks the same inspected kernelcache identities
-and SHA-256s, rejects inconsistent type/count reports, and refuses any input
-claiming positive proof or write permission. The result is deliberately
+The join reads bounded, regular, no-follow evidence files, rejects duplicate
+JSON keys and aliased inputs, reconciles both successful and unavailable
+kernelcache observations, and checks matching SHA-256s for inspected inputs.
+Catalogue candidate types must exactly match their captured declarations,
+including checked declaration kinds and digest-bearing plist records. Stored
+header counts and nested registration entries are checked for consistency.
+Any asserted kernel, framing, cold-remount or native-write proof is rejected. The result is deliberately
 `inconclusive_kernel_codec_mapping` even when a static type or stored-file
 header appears.
 
