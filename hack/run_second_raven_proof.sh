@@ -64,7 +64,7 @@ fi
 git -C "$upstream" diff --quiet HEAD -- || {
   echo 'upstream tracked source is dirty' >&2; exit 1;
 }
-audit_files=(lzraven.c lzraven.h tests/test.c tests/vectors.h)
+audit_files=(lzraven.c lzraven.h lzbitmap.c lzbitmap.h lzmesh.c lzmesh.h tests/test.c tests/vectors.h)
 for path in "${audit_files[@]}"; do
   [[ -f "$upstream/$path" && ! -L "$upstream/$path" ]] || {
     echo "missing regular upstream source: $path" >&2; exit 1;

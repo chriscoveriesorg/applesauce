@@ -8,8 +8,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from validate_second_raven_reports import (FAMILIES, NEGATIVE_CASES, SIZES,
-                                           STATUS, validate)
+from validate_second_raven_reports import (COMMITTED_ARCHIVE_SHA256, FAMILIES,
+                                           NEGATIVE_CASES, SIZES, STATUS,
+                                           expected_clear_sha256, validate)
 
 
 def sha(data):
@@ -28,25 +29,28 @@ class QualificationEvidenceTests(unittest.TestCase):
         self.upstream = self.root / "upstream"
         self.upstream.mkdir()
         (self.upstream / "tests").mkdir()
-        for path in ("lzraven.c", "lzraven.h", "tests/test.c", "tests/vectors.h"):
+        for path in ("lzraven.c", "lzraven.h", "lzbitmap.c", "lzbitmap.h",
+                     "lzmesh.c", "lzmesh.h", "tests/test.c", "tests/vectors.h"):
             (self.upstream / path).write_text("test source")
         self.decoder = self.root / "decoder"
         self.decoder.write_bytes(b"test decoder")
         self.decoder_sha = sha(b"test decoder")
         self.repo = self.root / "repo"
         self.repo.mkdir()
+        self.cli = self.root / "applesauce-cli"
+        self.cli.write_bytes(b"test Apple encoder placeholder")
         self.rows = {}
         for size in SIZES:
-            row = self.positive(size)
-            self.rows[size] = row
             for family in FAMILIES:
+                row = self.positive(size, family)
+                self.rows[family, size] = row
                 self.write(f"fresh/{family}-{size}.json", row)
-        self.write("committed.json", {
-            "schema_version": 1,
-            "vectors": [{k: v for k, v in self.rows[size].items()
-                         if k != "schema_version"}
-                        for size in (65537, 131103)],
-        })
+        committed = []
+        for size in (65537, 131103):
+            row = self.positive(size, "records")
+            row["archive_sha256"] = COMMITTED_ARCHIVE_SHA256[size]
+            committed.append({k: v for k, v in row.items() if k != "schema_version"})
+        self.write("committed.json", {"schema_version": 1, "vectors": committed})
         for family in FAMILIES:
             self.write(f"negative/{family}.json", {
                 "schema_version": 1,
@@ -56,17 +60,17 @@ class QualificationEvidenceTests(unittest.TestCase):
                 "cases": [{"case": name, "archive_sha256": sha(name.encode()),
                            "rejection": "independent decoder failed"}
                           for name in sorted(NEGATIVE_CASES)],
-                "baseline_archive_sha256": self.rows[131103]["archive_sha256"],
-                "baseline_original_sha256": self.rows[131103]["original_sha256"],
+                "baseline_archive_sha256": self.rows[family, 131103]["archive_sha256"],
+                "baseline_original_sha256": self.rows[family, 131103]["original_sha256"],
                 "baseline_decoder_sha256": self.decoder_sha,
             })
 
-    def positive(self, size):
+    def positive(self, size, family):
         return {"schema_version": 1, "codec": "lzraven", "status": STATUS,
                 "logical_size_bytes": size,
                 "chunk_count": (size + 65535) // 65536,
-                "archive_sha256": sha(f"archive:{size}".encode()),
-                "original_sha256": sha(f"original:{size}".encode()),
+                "archive_sha256": sha(f"archive:{family}:{size}".encode()),
+                "original_sha256": expected_clear_sha256(family, size),
                 "decoder_sha256": self.decoder_sha}
 
     def write(self, name, obj):
@@ -79,7 +83,8 @@ class QualificationEvidenceTests(unittest.TestCase):
         with patch("validate_second_raven_reports.git_head",
                    side_effect=["6d97f1ab520821b4d326139fdf48b658f96ee5b9", "a" * 40]):
             return validate(self.reports, self.decoder, self.upstream,
-                            self.repo, fresh=fresh)
+                            self.repo, fresh=fresh,
+                            cli=self.cli if fresh else None)
 
     def test_complete_evidence_passes(self):
         result = self.check()
@@ -100,6 +105,42 @@ class QualificationEvidenceTests(unittest.TestCase):
         self.write("committed.json", data)
         with self.assertRaisesRegex(ValueError, "duplicate committed"):
             self.check()
+
+    def test_committed_archive_digest_forgery_rejected(self):
+        data = self.read("committed.json")
+        data["vectors"][0]["archive_sha256"] = "0" * 64
+        self.write("committed.json", data)
+        with self.assertRaisesRegex(ValueError, "pinned fixture digest mismatch"):
+            self.check(fresh=False)
+
+    def test_committed_original_digest_forgery_rejected(self):
+        data = self.read("committed.json")
+        data["vectors"][1]["original_sha256"] = "f" * 64
+        self.write("committed.json", data)
+        with self.assertRaisesRegex(ValueError, "pinned fixture digest mismatch"):
+            self.check(fresh=False)
+
+    def test_wrong_fresh_content_digest_rejected(self):
+        data = self.read("fresh/records-65535.json")
+        data["original_sha256"] = "0" * 64
+        self.write("fresh/records-65535.json", data)
+        with self.assertRaisesRegex(ValueError, "generated content digest mismatch"):
+            self.check()
+
+    def test_repeated_family_passoff_rejected_even_with_matching_baseline(self):
+        size = 131103
+        self.write(f"fresh/digest-{size}.json", self.read(f"fresh/records-{size}.json"))
+        negative = self.read("negative/digest.json")
+        negative["baseline_archive_sha256"] = self.rows["records", size]["archive_sha256"]
+        negative["baseline_original_sha256"] = self.rows["records", size]["original_sha256"]
+        self.write("negative/digest.json", negative)
+        with self.assertRaisesRegex(ValueError, "generated content digest mismatch"):
+            self.check()
+
+    def test_fresh_requires_apple_encoder_binary(self):
+        with self.assertRaisesRegex(ValueError, "requires the Apple encoder CLI"):
+            validate(self.reports, self.decoder, self.upstream,
+                     self.repo, fresh=True, cli=None)
 
     def test_wrong_decoder_digest_rejected(self):
         data = self.read("fresh/records-65537.json")

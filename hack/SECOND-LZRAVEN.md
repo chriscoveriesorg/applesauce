@@ -84,12 +84,7 @@ Applesauce Git HEAD, exact upstream commit, source-file SHA-256 values,
 independent decoder binary SHA-256, optional Apple encoder CLI SHA-256, report
 hashes and case totals.
 
-`validate_second_raven_reports.py` checks that exactly two committed
-Apple fixtures were independently decoded. For a full run it also requires
-ten correctly sized positive results, eighteen distinct expected corruption
-rejections, consistent decoder hashes and negative-suite baseline hashes
-that match the corresponding fresh positive fixtures. A missing, forged,
-duplicated or mismatched report fails qualification.
+`validate_second_raven_reports.py` also pins both committed archive hashes and their expected clear-content hashes, rather than accepting arbitrary digest strings. For a full run it independently reproduces the two deterministic input families and rejects replay of one family as the other. It requires the actual Apple encoder CLI binary, ten correctly sized positive results, eighteen distinct expected corruption rejections, consistent decoder hashes and negative-suite baselines tied to the corresponding positive fixtures. The manifest hashes all eight upstream C sources/headers used to build and run tests. A missing, forged, duplicated or mismatched report fails qualification.
 
 The manifest describes technical evidence that an independent reviewer
 can inspect. It does **not** prove source independence, binary provenance
