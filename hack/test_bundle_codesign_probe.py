@@ -105,28 +105,66 @@ class SignedBundleProbeTests(unittest.TestCase):
 
     def test_storage_report_requires_real_single_decmpfs_row(self):
         path = Path("/tmp/disposable.app/Contents/Resources/test.bin")
-        good_row = {
-            "path": {"display": str(path)}, "codec": "zlib",
-            "storage": "resource_fork", "source": "decmpfs",
-        }
-        report = {"complete": True, "paths": [good_row]}
-        with patch.object(probe, "run", return_value=json.dumps(report)):
-            probe.require_report("/tmp/applesauce", path, "zlib", "resource_fork")
-        failures = [
-            {"complete": False, "paths": [good_row]},
-            {"complete": True, "paths": []},
-            {"complete": True, "paths": [good_row, good_row]},
-            {"complete": True, "paths": [{**good_row, "source": "none"}]},
-            {"complete": True, "paths": [{**good_row, "codec": "lzvn"}]},
-            {"complete": True, "paths": [{**good_row, "storage": "inline_xattr"}]},
-        ]
-        for invalid in failures:
-            with self.subTest(invalid=invalid):
-                with patch.object(probe, "run", return_value=json.dumps(invalid)):
-                    with self.assertRaises(AssertionError):
-                        probe.require_report(
-                            "/tmp/applesauce", path, "zlib", "resource_fork"
-                        )
+        def row(storage):
+            return {
+                "path": {"display": str(path)}, "entry_type": "file",
+                "error": None, "source": "decmpfs", "codec": "zlib",
+                "storage": storage, "decmpfs_type": 3 if storage == "inline_xattr" else 4,
+                "decmpfs_xattr_bytes": 128 if storage == "inline_xattr" else 16,
+                "resource_fork_bytes": 0 if storage == "inline_xattr" else 4096,
+                "raw_compressed_bytes": 2048, "logical_size_bytes": 8192,
+            }
+        for storage in ("inline_xattr", "resource_fork"):
+            with self.subTest(storage=storage):
+                good_row = row(storage)
+                report = {
+                    "schema_version": 1, "report_kind": "actual_storage",
+                    "complete": True, "paths": [good_row],
+                }
+                with patch.object(probe, "run", return_value=json.dumps(report)):
+                    probe.require_report("/tmp/applesauce", path, "zlib", storage, 8192)
+                bad_rows = [
+                    {**good_row, "entry_type": "directory"},
+                    {**good_row, "error": {"kind": "io_error"}},
+                    {**good_row, "source": "none"},
+                    {**good_row, "codec": "lzvn"},
+                    {**good_row, "storage": "none"},
+                    {**good_row, "decmpfs_type": 99},
+                    {**good_row, "decmpfs_type": True},
+                    {**good_row, "logical_size_bytes": 8191},
+                    {**good_row, "decmpfs_xattr_bytes": 0},
+                    {**good_row, "decmpfs_xattr_bytes": 15},
+                    {**good_row, "resource_fork_bytes": -1},
+                    {**good_row, "raw_compressed_bytes": 0},
+                    {**good_row, "raw_compressed_bytes": None},
+                    {**good_row, "path": {"display": "/wrong/path"}},
+                ]
+                if storage == "inline_xattr":
+                    bad_rows.extend([
+                        {**good_row, "decmpfs_xattr_bytes": 16},
+                        {**good_row, "resource_fork_bytes": 1},
+                    ])
+                else:
+                    bad_rows.extend([
+                        {**good_row, "decmpfs_xattr_bytes": 20},
+                        {**good_row, "resource_fork_bytes": 0},
+                    ])
+                invalid = [
+                    {**report, "complete": False},
+                    {**report, "schema_version": 2},
+                    {**report, "report_kind": "projection"},
+                    {**report, "paths": []},
+                    {**report, "paths": [good_row, good_row]},
+                    {**report, "paths": [good_row, row(storage)]},
+                    *({**report, "paths": [bad]} for bad in bad_rows),
+                ]
+                for malformed in invalid:
+                    with self.subTest(storage=storage, malformed=malformed):
+                        with patch.object(probe, "run", return_value=json.dumps(malformed)):
+                            with self.assertRaises(AssertionError):
+                                probe.require_report(
+                                    "/tmp/applesauce", path, "zlib", storage, 8192
+                                )
 
 
     def test_restoration_requires_absent_decmpfs_metadata(self):

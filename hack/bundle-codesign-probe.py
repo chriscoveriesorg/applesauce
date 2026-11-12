@@ -219,16 +219,61 @@ def fixture(root):
     return app, executable, (small, large), sealed
 
 
-def require_report(output, path, codec, storage):
+def require_report(output, path, codec, storage, expected_size):
+    """Require real compressed APFS storage, including the on-disk type.
+
+    A successful CLI exit or a matching codec label is insufficient: type
+    mismatches, stale forks, missing fields and partial reports must fail the
+    signed-app acceptance gate.
+    """
     report = json.loads(run(output, "info", "--json", path))
-    if report.get("complete") is not True:
+    if (
+        not isinstance(report, dict)
+        or report.get("schema_version") != 1
+        or report.get("report_kind") != "actual_storage"
+        or report.get("complete") is not True
+    ):
         raise AssertionError(f"incomplete actual storage report: {report}")
-    rows = [row for row in report["paths"] if row["path"]["display"] == str(path)]
-    if len(rows) != 1:
+    rows = report.get("paths")
+    if not isinstance(rows, list) or len(rows) != 1:
         raise AssertionError(f"wrong actual storage row count: {rows}")
     row = rows[0]
-    if row["codec"] != codec or row["storage"] != storage or row["source"] != "decmpfs":
-        raise AssertionError(f"unexpected compressed storage: {row}")
+    if (
+        not isinstance(row, dict)
+        or not isinstance(row.get("path"), dict)
+        or row["path"].get("display") != str(path)
+    ):
+        raise AssertionError(f"unexpected actual storage row: {row}")
+    # Applesauce's decmpfs type mapping: Zlib inline=3, fork=4.
+    expected_types = {
+        ("zlib", "inline_xattr"): 3,
+        ("zlib", "resource_fork"): 4,
+    }
+    expected_type = expected_types.get((codec, storage))
+    if expected_type is None:
+        raise AssertionError(f"unsupported signed-app probe codec/storage: {codec}/{storage}")
+    decmpfs_bytes = row.get("decmpfs_xattr_bytes")
+    fork_bytes = row.get("resource_fork_bytes")
+    raw_bytes = row.get("raw_compressed_bytes")
+    if (
+        row.get("entry_type") != "file"
+        or row.get("error") is not None
+        or row.get("source") != "decmpfs"
+        or row.get("codec") != codec
+        or row.get("storage") != storage
+        or type(row.get("decmpfs_type")) is not int
+        or row["decmpfs_type"] != expected_type
+        or type(row.get("logical_size_bytes")) is not int
+        or row["logical_size_bytes"] != expected_size
+        or type(decmpfs_bytes) is not int
+        or type(fork_bytes) is not int
+        or type(raw_bytes) is not int
+        or raw_bytes <= 0
+        or decmpfs_bytes < 16
+        or (storage == "inline_xattr" and (decmpfs_bytes <= 16 or fork_bytes != 0))
+        or (storage == "resource_fork" and (decmpfs_bytes != 16 or fork_bytes <= 0))
+    ):
+        raise AssertionError(f"invalid compressed APFS storage: {row}")
 
 
 
@@ -377,7 +422,7 @@ def main():
             # another resource is compressed, not just its own operation.
             for active_path, active_storage in compressed:
                 verify_readback(active_path, expected_bytes[active_path])
-                require_report(applesauce, active_path, "zlib", active_storage)
+                require_report(applesauce, active_path, "zlib", active_storage, len(expected_bytes[active_path]))
             assert_sealed_paths_unchanged((sealed, executable, info_plist), before)
             signature_and_execution(app, executable)
 
@@ -390,7 +435,7 @@ def main():
             compressed = [entry for entry in compressed if entry[0] != path]
             for active_path, active_storage in compressed:
                 verify_readback(active_path, expected_bytes[active_path])
-                require_report(applesauce, active_path, "zlib", active_storage)
+                require_report(applesauce, active_path, "zlib", active_storage, len(expected_bytes[active_path]))
             assert_sealed_paths_unchanged((sealed, executable, info_plist), before)
             signature_and_execution(app, executable)
         for path in files:
