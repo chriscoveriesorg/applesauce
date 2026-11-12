@@ -276,6 +276,7 @@ def main(argv=None):
             source.unchanged()
             entry["status"] = "inspected"
         except (OSError, probe.EvidenceError, ContainerError) as error:
+            entry.pop("sha256", None)
             entry.update(status="unavailable", error=str(error))
         finally:
             if source:
