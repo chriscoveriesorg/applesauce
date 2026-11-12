@@ -104,6 +104,19 @@ def summarize(*reports):
 
 
 class CrosscheckTest(unittest.TestCase):
+    def test_read_error_fails_closed_without_traceback(self):
+        # A regular file may become unreadable after its descriptor is opened.
+        # Surface a controlled evidence rejection and preserve the OS cause.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            path.write_text('{"kind":"synthetic"}', encoding="utf-8")
+            with mock.patch.object(MODULE.os, "read", side_effect=OSError(5, "I/O error")):
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "cannot read evidence file") as caught:
+                    MODULE.read_evidence(path)
+            self.assertIsInstance(caught.exception.__cause__, OSError)
+
     def test_evidence_requires_utf8_json(self):
         # json.loads(bytes) otherwise accepts UTF-16/32 evidence that the
         # producers never emit. Keep the portable UTF-8 control accepted.
