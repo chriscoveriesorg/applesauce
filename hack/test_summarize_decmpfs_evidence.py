@@ -496,6 +496,17 @@ class CrosscheckTest(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.EvidenceError, expected):
                     summarize(*reports)
 
+    def test_reject_unbounded_registration_table_addresses(self):
+        # A large hexadecimal literal must be rejected before int() parses it.
+        for address in ("0x" + "f" * 500000, "0x" + "0" * 500000,
+                        "0x10000000000000000", "0x03000"):
+            with self.subTest(address=address[:32]):
+                reports = fixtures()
+                reports[1]["inputs"][0]["tables"][0]["table"]["address"] = address
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "invalid registration table address"):
+                    summarize(*reports)
+
     def test_reject_boolean_schema_version(self):
         reports = fixtures()
         reports[0]["schema_version"] = True
