@@ -538,6 +538,49 @@ impl OutputDirectoryGuard {
     }
 }
 
+// Construct the staging inode relative to the already-pinned output directory.
+// A pathname-based tempfile_in(parent) can create its file in a different
+// directory if an ancestor is renamed or a symlink is retargeted after open.
+#[cfg(unix)]
+fn create_pinned_staging(
+    parent: &Path,
+    guard: &OutputDirectoryGuard,
+) -> io::Result<PinnedTempFile> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let temporary = tempfile::Builder::new()
+        .prefix(".applesauce-")
+        .make_in(parent, |candidate| {
+            let basename = candidate
+                .file_name()
+                .ok_or_else(|| invalid("archive staging filename is missing"))?;
+            let name = CString::new(basename.as_bytes())
+                .map_err(|_| invalid("archive staging filename contains NUL"))?;
+            // SAFETY: the directory descriptor stays open through staging and
+            // the candidate filename is NUL-terminated with no path separator.
+            let fd = unsafe {
+                libc::openat(
+                    guard.opened.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_CLOEXEC
+                        | libc::O_NOFOLLOW,
+                    0o600,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: a successful openat returns a uniquely owned file descriptor.
+            Ok(unsafe { File::from_raw_fd(fd) })
+        })?;
+    PinnedTempFile::new(temporary, &guard.opened)
+}
+
 fn staging(output: &Path) -> io::Result<(PinnedTempFile, OutputDirectoryGuard)> {
     unused_output(output)?;
     let parent = output
@@ -545,9 +588,10 @@ fn staging(output: &Path) -> io::Result<(PinnedTempFile, OutputDirectoryGuard)> 
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let guard = OutputDirectoryGuard::open(parent)?;
-    let temporary = NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
-    let temporary = PinnedTempFile::new(temporary, &guard.opened)?;
+    let temporary = create_pinned_staging(parent, &guard)?;
+    #[cfg(not(unix))]
+    let temporary = NamedTempFile::new_in(parent)?;
     guard.ensure_unchanged()?;
     Ok((temporary, guard))
 }
@@ -904,6 +948,28 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_creation_stays_in_pinned_directory_after_parent_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("selected");
+        let moved = root.path().join("original");
+        fs::create_dir(&parent).unwrap();
+        let guard = OutputDirectoryGuard::open(&parent).unwrap();
+
+        fs::rename(&parent, &moved).unwrap();
+        fs::create_dir(&parent).unwrap();
+        let mut temporary = create_pinned_staging(&parent, &guard).unwrap();
+        temporary.write_all(b"private staged contents").unwrap();
+        let name = temporary.path().file_name().unwrap().to_os_string();
+
+        assert!(moved.join(&name).exists());
+        assert!(!parent.join(&name).exists());
+        assert!(guard.ensure_unchanged().is_err());
+        drop(temporary);
+        assert!(!moved.join(&name).exists());
+    }
 
     #[cfg(unix)]
     #[test]
