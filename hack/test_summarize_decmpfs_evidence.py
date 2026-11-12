@@ -98,6 +98,7 @@ class CrosscheckTest(unittest.TestCase):
     def test_reject_missing_source_inspection(self):
         reports = fixtures()
         reports[0]["inputs"][0]["status"] = "unavailable"
+        reports[0]["inputs"][0].pop("sha256")
         with self.assertRaisesRegex(MODULE.EvidenceError, "identical source"):
             summarize(*reports)
 
@@ -222,6 +223,7 @@ class CrosscheckTest(unittest.TestCase):
         reports = fixtures()
         for report in reports[:2]:
             report["inputs"][0]["status"] = "unavailable"
+            report["inputs"][0].pop("sha256")
         with self.assertRaisesRegex(MODULE.EvidenceError, "must inspect identical"):
             summarize(*reports)
 
