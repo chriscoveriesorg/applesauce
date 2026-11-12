@@ -13,6 +13,7 @@ from unittest.mock import patch
 from validate_second_raven_reports import (COMMITTED_ARCHIVE_SHA256, FAMILIES,
                                            NEGATIVE_CASES, SIZES, STATUS,
                                            expected_clear, expected_clear_sha256,
+                                           check_negative_reason,
                                            expected_negative_hashes, validate)
 
 
@@ -215,6 +216,68 @@ class QualificationEvidenceTests(unittest.TestCase):
         self.write("negative/digest.json", row)
         with self.assertRaisesRegex(ValueError, "rejection is not from independent decoder"):
             self.check()
+
+    def test_zero_decoder_exit_cannot_qualify_as_rejection(self):
+        row = self.read("negative/records.json")
+        case = next(c for c in row["cases"] if c["case"] == "payload_one_third")
+        case["rejection"] = "independent decoder failed on chunk 0 (exit 0)"
+        self.write("negative/records.json", row)
+        with self.assertRaisesRegex(ValueError, "rejection is not from independent decoder"):
+            self.check()
+
+    def test_nonnumeric_decoder_exit_rejected(self):
+        row = self.read("negative/digest.json")
+        case = next(c for c in row["cases"] if c["case"] == "payload_middle_chunk")
+        case["rejection"] = "independent decoder failed on chunk 1 (exit unknown)"
+        self.write("negative/digest.json", row)
+        with self.assertRaisesRegex(ValueError, "rejection is not from independent decoder"):
+            self.check()
+
+    def test_decoder_failure_with_unrelated_suffix_rejected(self):
+        row = self.read("negative/digest.json")
+        case = next(c for c in row["cases"] if c["case"] == "payload_final_chunk")
+        case["rejection"] = "independent decoder failed on chunk 2 (exit 1); validation skipped"
+        self.write("negative/digest.json", row)
+        with self.assertRaisesRegex(ValueError, "rejection is not from independent decoder"):
+            self.check()
+
+    def test_omitted_decoder_chunk_with_suffix_rejected(self):
+        row = self.read("negative/records.json")
+        case = next(c for c in row["cases"] if c["case"] == "payload_middle")
+        case["rejection"] = "independent decoder omitted chunk 0, then succeeded"
+        self.write("negative/records.json", row)
+        with self.assertRaisesRegex(ValueError, "rejection is not from independent decoder"):
+            self.check()
+
+    def test_embedded_parser_message_does_not_qualify(self):
+        row = self.read("negative/records.json")
+        case = next(c for c in row["cases"] if c["case"] == "index_digest")
+        case["rejection"] = (
+            "source inaccessible; original chunk 0 differs from ASCF chunk digest"
+        )
+        self.write("negative/records.json", row)
+        with self.assertRaisesRegex(ValueError, "unexpected parser rejection"):
+            self.check()
+
+    def test_parser_message_with_unrelated_suffix_rejected(self):
+        row = self.read("negative/digest.json")
+        case = next(c for c in row["cases"] if c["case"] == "appended_payload")
+        case["rejection"] = (
+            "ASCF payload has trailing, overlapping or missing data; verification skipped"
+        )
+        self.write("negative/digest.json", row)
+        with self.assertRaisesRegex(ValueError, "unexpected parser rejection"):
+            self.check()
+
+    def test_signal_exit_and_exact_decoder_messages_accepted(self):
+        for reason in (
+            "independent decoder failed on chunk 1 (exit -11)",
+            "independent decoder omitted chunk 1",
+            "independent decoder returned incorrect bytes/length at chunk 1",
+            "independent decoder returned wrong digest at chunk 1",
+        ):
+            with self.subTest(reason=reason):
+                check_negative_reason("payload_middle_chunk", reason)
 
     def test_false_parser_rejection_rejected(self):
         row = self.read("negative/records.json")
