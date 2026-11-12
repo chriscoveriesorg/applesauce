@@ -177,7 +177,8 @@ class SignedBundleProbeTests(unittest.TestCase):
             "logical_size_bytes": 4096,
         }
         report = {
-            "complete": True, "report_kind": "actual_storage", "paths": [clean],
+            "schema_version": 1, "complete": True,
+            "report_kind": "actual_storage", "paths": [clean],
         }
         with patch.object(probe, "run", return_value=json.dumps(report)):
             probe.require_restored_report("/tmp/applesauce", path, 4096)
@@ -194,12 +195,22 @@ class SignedBundleProbeTests(unittest.TestCase):
             {**clean, "logical_size_bytes": 4095},
             {**clean, "entry_type": "symlink"},
             {**clean, "error": {"kind": "io_error"}},
+            {**clean, "path": {"display": "/tmp/other-app"}},
+            {**clean, "decmpfs_xattr_bytes": False},
+            {**clean, "resource_fork_bytes": False},
+            {**clean, "logical_size_bytes": True},
+            {**clean, "decmpfs_xattr_bytes": "0"},
+            {**clean, "resource_fork_bytes": -1},
         ]
         bad_reports = [
             {**report, "complete": False},
+            {**report, "schema_version": 2},
+            {**report, "schema_version": True},
             {**report, "report_kind": "projection"},
             {**report, "paths": []},
+            {**report, "paths": {}},
             {**report, "paths": [clean, clean]},
+            {**report, "paths": [clean, {**clean, "path": {"display": "/tmp/another"}}]},
             *({**report, "paths": [bad]} for bad in bad_rows),
         ]
         for invalid in bad_reports:
@@ -240,6 +251,18 @@ class SignedBundleProbeTests(unittest.TestCase):
             {**good, "full_encoding": False},
             {**good, "paths": good["paths"][:-1]},
             {**good, "paths": good["paths"] + [good["paths"][0]]},
+            {**good, "paths": good["paths"] + [
+                row(app / "Contents" / "Frameworks" / "nested", True, "compress")
+            ]},
+            {**good, "paths": good["paths"] + [
+                row(app.parent / "outside-file", True, "compress")
+            ]},
+            {**good, "paths": good["paths"] + [
+                row(app / "Contents" / "Resources" / "extra.txt", 1, "compress")
+            ]},
+            {**good, "paths": good["paths"] + [
+                {"path": {"display": None}, "would_compress": False}
+            ]},
             {**good, "paths": good["paths"] + [
                 row(excluded[1] / "applesauce-probe", False, "bundle_non_resource")
             ]},
