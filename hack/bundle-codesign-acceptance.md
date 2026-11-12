@@ -27,7 +27,15 @@ one inline-xattr and one resource-fork Zlib file coexist inside the signed
 bundle. After every compression and reverse-order restoration, it rereads
 all still-compressed files through the kernel and read-only `mmap`, checks
 their original full SHA-256, and requires `info --json` to show the expected
-Zlib/decmpfs storage attribution. It also checks strict bundle code signing,
+Zlib/decmpfs storage attribution. It also checks actual APFS metadata before
+compression and after each restoration: the restored file must have its original
+logical length, no compressed storage/type, no decmpfs xattr and no resource
+fork. Kernel byte-identity alone cannot prove that decompression occurred.
+The read-only bundle-profile acceptance requires the generated resources to be
+selected while Info.plist, MacOS and _CodeSignature are explicitly excluded;
+it verifies the signed executable and signature directories are pruned before
+their descendants are inspected. The Info.plist is also covered by byte,
+mtime and xattr integrity checks throughout each compression transition. It also checks strict bundle code signing,
 direct executable behavior, and unchanged signature-manifest/executable
 bytes, mtimes and xattrs at every transition. Every restored resource is
 rechecked with both read methods.
@@ -40,7 +48,8 @@ does not expose `os.listxattr`/`os.getxattr`. Missing or unreadable attributes
 fail acceptance. The portable fast gate
 `python3 -m unittest discover -s hack -p 'test_bundle_codesign_probe.py'`
 covers snapshot errors, binary values, mmap/kernel corruption, signed-seal
-mutation and invalid storage reports before macOS execution. It also compiles
+mutation, residual compressed storage, incorrect restoration lengths and
+signed-code audit traversal before macOS execution. It also compiles
 the generated C executable on Linux, then proves that it fails when either
 resource is modified without changing its length or is missing entirely.
 
