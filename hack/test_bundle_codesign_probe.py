@@ -2,6 +2,7 @@
 """Portable regressions for the generated-only macOS signed-bundle probe."""
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -74,6 +75,57 @@ class SignedBundleProbeTests(unittest.TestCase):
             self.assertEqual(probe.mmap_digest(path), hashlib.sha256(payload).hexdigest())
             path.write_bytes(payload + b"more")
             self.assertNotEqual(probe.mmap_digest(path), hashlib.sha256(payload).hexdigest())
+
+
+    def test_readback_rejects_changed_kernel_and_mmap_contents(self):
+        original = b"same-byte-proof" * 500
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "resource.bin"
+            path.write_bytes(original)
+            probe.verify_readback(path, original)
+            path.write_bytes(original + b"corrupt")
+            with self.assertRaisesRegex(AssertionError, "kernel readback changed"):
+                probe.verify_readback(path, original)
+            path.write_bytes(original)
+            with patch.object(probe, "mmap_digest", return_value="0" * 64):
+                with self.assertRaisesRegex(AssertionError, "mmap readback changed"):
+                    probe.verify_readback(path, original)
+
+    def test_sealed_path_mutation_fails_closed(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "CodeResources"
+            path.write_bytes(b"sealed")
+            with patch.object(probe, "xattrs", return_value={}):
+                baseline = {path: (probe.digest(path), path.stat().st_mtime_ns, {})}
+                probe.assert_sealed_paths_unchanged((path,), baseline)
+                path.write_bytes(b"changed")
+                with self.assertRaisesRegex(AssertionError, "seal changed"):
+                    probe.assert_sealed_paths_unchanged((path,), baseline)
+
+    def test_storage_report_requires_real_single_decmpfs_row(self):
+        path = Path("/tmp/disposable.app/Contents/Resources/test.bin")
+        good_row = {
+            "path": {"display": str(path)}, "codec": "zlib",
+            "storage": "resource_fork", "source": "decmpfs",
+        }
+        report = {"complete": True, "paths": [good_row]}
+        with patch.object(probe, "run", return_value=json.dumps(report)):
+            probe.require_report("/tmp/applesauce", path, "zlib", "resource_fork")
+        failures = [
+            {"complete": False, "paths": [good_row]},
+            {"complete": True, "paths": []},
+            {"complete": True, "paths": [good_row, good_row]},
+            {"complete": True, "paths": [{**good_row, "source": "none"}]},
+            {"complete": True, "paths": [{**good_row, "codec": "lzvn"}]},
+            {"complete": True, "paths": [{**good_row, "storage": "inline_xattr"}]},
+        ]
+        for invalid in failures:
+            with self.subTest(invalid=invalid):
+                with patch.object(probe, "run", return_value=json.dumps(invalid)):
+                    with self.assertRaises(AssertionError):
+                        probe.require_report(
+                            "/tmp/applesauce", path, "zlib", "resource_fork"
+                        )
 
 
 if __name__ == "__main__":

@@ -20,13 +20,15 @@ binary. The bundle-profile dry run must select the two data resources and
 preserve resource bytes, mtimes and xattrs, sealed CodeResources and executable
 content exactly.
 
-For each generated resource, the probe invokes explicit `compress -c zlib
---verify`, checks kernel-visible bytes, and requires the `info --json`
-attribution to report Zlib and the expected inline-xattr or resource-fork
-storage. It also checks that ordinary kernel reads and read-only `mmap` return
-the original complete SHA-256 while APFS compression is active and after
-restoration. It then revalidates the strict code signature and executable
-output, performs verified restoration, and rechecks both after restoration.
+The probe compresses **both generated resources before restoring either**:
+one inline-xattr and one resource-fork Zlib file coexist inside the signed
+bundle. After every compression and reverse-order restoration, it rereads
+all still-compressed files through the kernel and read-only `mmap`, checks
+their original full SHA-256, and requires `info --json` to show the expected
+Zlib/decmpfs storage attribution. It also checks strict bundle code signing,
+direct executable behavior, and unchanged signature-manifest/executable
+bytes, mtimes and xattrs at every transition. Every restored resource is
+rechecked with both read methods.
 All temporary files are removed on exit. Only the stable, registered Zlib
 codec is used.
 
@@ -35,7 +37,7 @@ The probe snapshots extended attributes using macOS `/usr/bin/xattr`
 does not expose `os.listxattr`/`os.getxattr`. Missing or unreadable attributes
 fail acceptance. The portable fast gate
 `python3 -m unittest discover -s hack -p 'test_bundle_codesign_probe.py'`
-covers snapshot errors, binary values and mmap reads before macOS execution.
+covers snapshot errors, binary values, mmap/kernel corruption, signed-seal mutation and invalid storage reports before macOS execution.
 
 The stable macOS CI job runs this probe separately from all Raven/Mesh decoder
 research. A failing signature, readback, storage attribution, or executable

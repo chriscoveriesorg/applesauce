@@ -123,6 +123,24 @@ def require_report(output, path, codec, storage):
         raise AssertionError(f"unexpected compressed storage: {row}")
 
 
+
+def verify_readback(path, expected):
+    """Compare complete kernel and mmap reads to the original content hash."""
+    expected_sha256 = hashlib.sha256(expected).hexdigest()
+    if digest(path) != expected_sha256:
+        raise AssertionError(f"kernel readback changed {path}")
+    if mmap_digest(path) != expected_sha256:
+        raise AssertionError(f"mmap readback changed {path}")
+
+
+def assert_sealed_paths_unchanged(paths, baseline):
+    """Neither code-signature manifest nor executable may be modified."""
+    for path in paths:
+        current = (digest(path), path.stat().st_mtime_ns, xattrs(path))
+        if current != baseline[path]:
+            raise AssertionError(f"signed executable or seal changed {path}")
+
+
 def main():
     if sys.platform != "darwin" or len(sys.argv) != 2:
         raise SystemExit("usage: macOS only, bundle-codesign-probe.py /path/to/applesauce")
@@ -158,25 +176,37 @@ def main():
                 raise AssertionError(f"read-only bundle audit modified {path}")
         signature_and_execution(app, executable)
 
-        # Only generated files in the disposable app are ever modified.
+        # Keep both generated resources compressed simultaneously. The
+        # per-file success case alone cannot prove the mixed-storage state.
+        expected_bytes = {path: path.read_bytes() for path in files}
+        compressed = []
         for path, storage in ((small, "inline_xattr"), (large, "resource_fork")):
-            expected = path.read_bytes()
             run(
                 applesauce, "compress", "--compression", "zlib",
                 "--verify", "--minimum-compression-ratio", "0.95", path,
             )
-            if path.read_bytes() != expected:
-                raise AssertionError(f"kernel readback changed {path}")
-            if mmap_digest(path) != hashlib.sha256(expected).hexdigest():
-                raise AssertionError(f"mmap readback changed {path}")
-            require_report(applesauce, path, "zlib", storage)
+            compressed.append((path, storage))
+            # Every existing compressed resource must stay readable after
+            # another resource is compressed, not just its own operation.
+            for active_path, active_storage in compressed:
+                verify_readback(active_path, expected_bytes[active_path])
+                require_report(applesauce, active_path, "zlib", active_storage)
+            assert_sealed_paths_unchanged((sealed, executable), before)
             signature_and_execution(app, executable)
+
+        # Reverse-order restoration also exercises a mixed compressed/plain
+        # bundle. Retain on-disk attribution checks for every survivor.
+        for path, _storage in reversed(tuple(compressed)):
             run(applesauce, "decompress", "--verify", path)
-            if path.read_bytes() != expected:
-                raise AssertionError(f"decompressed bytes changed {path}")
-            if mmap_digest(path) != hashlib.sha256(expected).hexdigest():
-                raise AssertionError(f"restored mmap readback changed {path}")
+            verify_readback(path, expected_bytes[path])
+            compressed = [entry for entry in compressed if entry[0] != path]
+            for active_path, active_storage in compressed:
+                verify_readback(active_path, expected_bytes[active_path])
+                require_report(applesauce, active_path, "zlib", active_storage)
+            assert_sealed_paths_unchanged((sealed, executable), before)
             signature_and_execution(app, executable)
+        for path in files:
+            verify_readback(path, expected_bytes[path])
 
         print(json.dumps({
             "schema_version": 1,
@@ -186,6 +216,9 @@ def main():
             "stable_codec": "zlib",
             "compressed_storage_modes": ["inline_xattr", "resource_fork"],
             "mmap_readback_verified": True,
+            "both_storage_modes_active_together": True,
+            "readback_after_each_transition": True,
+            "sealed_paths_unchanged_during_writes": True,
             "strict_codesign_valid_after_each_step": True,
             "signed_executable_runs_after_each_step": True,
             "launchservices_gate_tested": False,
