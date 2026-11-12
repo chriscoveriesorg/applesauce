@@ -67,8 +67,13 @@ class QualificationEvidenceTests(unittest.TestCase):
         for size in (65537, 131103):
             row = self.positive(size, "records")
             row["archive_sha256"] = COMMITTED_ARCHIVE_SHA256[size]
-            committed.append({k: v for k, v in row.items() if k != "schema_version"})
-        self.write("committed.json", {"schema_version": 1, "vectors": committed})
+            committed.append({k: v for k, v in row.items()
+                          if k not in ("schema_version", "scope", "codec_id")})
+        self.write("committed.json", {
+            "schema_version": 1,
+            "scope": "Apple ASCF buffer codec, not APFS decmpfs",
+            "vectors": committed,
+        })
         for family in FAMILIES:
             archive = (self.reports / f"fresh-archives/{family}-131103.ascf").read_bytes()
             hashes = expected_negative_hashes(archive)
@@ -88,6 +93,7 @@ class QualificationEvidenceTests(unittest.TestCase):
                 "status": "independent_corruptions_rejected",
                 "codec": "lzraven",
                 "case_count": len(NEGATIVE_CASES),
+                "suite_timeout_seconds": 180.0,
                 "cases": [{"case": name, "archive_sha256": hashes[name],
                            "rejection": reasons[name]}
                           for name in sorted(NEGATIVE_CASES)],
@@ -119,6 +125,8 @@ class QualificationEvidenceTests(unittest.TestCase):
 
     def positive(self, size, family):
         return {"schema_version": 1, "codec": "lzraven", "status": STATUS,
+                "scope": "ASCF Apple buffer payload; not native APFS decmpfs",
+                "codec_id": "0xD05",
                 "logical_size_bytes": size,
                 "chunk_count": (size + 65535) // 65536,
                 "archive_sha256": sha(f"archive:{family}:{size}".encode()),
@@ -295,6 +303,72 @@ class QualificationEvidenceTests(unittest.TestCase):
         path.symlink_to(target)
         with self.assertRaisesRegex(ValueError, "missing regular fresh archive"):
             self.check()
+
+    def test_committed_scope_change_rejected(self):
+        row = self.read("committed.json")
+        row["scope"] = "native APFS decmpfs writes verified"
+        self.write("committed.json", row)
+        with self.assertRaisesRegex(ValueError, "committed proof scope mismatch"):
+            self.check(fresh=False)
+
+    def test_committed_extra_native_claim_rejected(self):
+        row = self.read("committed.json")
+        row["native_decmpfs_writable"] = True
+        self.write("committed.json", row)
+        with self.assertRaisesRegex(ValueError, "missing or unexpected evidence fields"):
+            self.check(fresh=False)
+
+    def test_fresh_wrong_codec_id_rejected(self):
+        row = self.read("fresh/records-65537.json")
+        row["codec_id"] = "0xE05"
+        self.write("fresh/records-65537.json", row)
+        with self.assertRaisesRegex(ValueError, "buffer proof provenance mismatch"):
+            self.check()
+
+    def test_fresh_native_scope_claim_rejected(self):
+        row = self.read("fresh/digest-65537.json")
+        row["scope"] = "native kernel decoder verified"
+        self.write("fresh/digest-65537.json", row)
+        with self.assertRaisesRegex(ValueError, "buffer proof provenance mismatch"):
+            self.check()
+
+    def test_fresh_extra_native_claim_rejected(self):
+        row = self.read("fresh/records-65536.json")
+        row["native_writes_enabled"] = True
+        self.write("fresh/records-65536.json", row)
+        with self.assertRaisesRegex(ValueError, "missing or unexpected evidence fields"):
+            self.check()
+
+    def test_negative_extra_native_claim_rejected(self):
+        row = self.read("negative/records.json")
+        row["native_decmpfs_supported"] = True
+        self.write("negative/records.json", row)
+        with self.assertRaisesRegex(ValueError, "missing or unexpected evidence fields"):
+            self.check()
+
+    def test_negative_case_extra_flag_rejected(self):
+        row = self.read("negative/digest.json")
+        row["cases"][0]["decoder_success"] = True
+        self.write("negative/digest.json", row)
+        with self.assertRaisesRegex(ValueError, "missing or unexpected evidence fields"):
+            self.check()
+
+    def test_negative_budget_missing_rejected(self):
+        row = self.read("negative/records.json")
+        del row["suite_timeout_seconds"]
+        self.write("negative/records.json", row)
+        with self.assertRaisesRegex(ValueError, "missing or unexpected evidence fields"):
+            self.check()
+
+    def test_negative_budget_invalid_rejected(self):
+        original = self.read("negative/digest.json")
+        for budget in (0, 3601, -1, True, "180"):
+            with self.subTest(budget=budget):
+                row = copy.deepcopy(original)
+                row["suite_timeout_seconds"] = budget
+                self.write("negative/digest.json", row)
+                with self.assertRaisesRegex(ValueError, "invalid bounded test time budget"):
+                    self.check()
 
     def test_portable_only_counts_only_committed(self):
         result = self.check(fresh=False)
