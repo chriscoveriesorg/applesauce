@@ -328,6 +328,44 @@ class CrosscheckTest(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.EvidenceError, "regular file"):
                     MODULE.read_evidence(fifo)
 
+    def test_read_preserves_invalid_json_when_close_fails(self):
+        # The evidence parser's rejection must not be replaced by a cleanup
+        # error; the descriptor must still receive a close attempt.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "evidence.json"
+            path.write_text('{"a":1,"a":2}')
+            actual_close = os.close
+            closed = []
+
+            def close_then_fail(fd):
+                closed.append(fd)
+                actual_close(fd)
+                raise OSError("injected close failure")
+
+            with mock.patch.object(MODULE.os, "close", side_effect=close_then_fail):
+                with self.assertRaisesRegex(MODULE.EvidenceError, "duplicate JSON"):
+                    MODULE.read_evidence(path)
+            self.assertEqual(len(closed), 1)
+
+    def test_read_reports_close_failure_after_success(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "evidence.json"
+            path.write_text("{}")
+            actual_close = os.close
+            closed = []
+
+            def close_then_fail(fd):
+                closed.append(fd)
+                actual_close(fd)
+                raise OSError("injected close failure")
+
+            with mock.patch.object(MODULE.os, "close", side_effect=close_then_fail):
+                with self.assertRaisesRegex(OSError, "injected close failure"):
+                    MODULE.read_evidence(path)
+            self.assertEqual(len(closed), 1)
+
     def test_read_rejects_duplicate_json_fields_and_empty(self):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "evidence.json"
