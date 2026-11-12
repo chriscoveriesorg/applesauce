@@ -411,7 +411,7 @@ impl OutputDirectoryGuard {
         }
         #[cfg(not(unix))]
         {
-            let _ = (temporary, output);
+            let _ = (temporary, output, verified);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "pinned archive publication requires Unix directory descriptors",
@@ -941,7 +941,10 @@ mod tests {
                 std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12_345),
             )
             .unwrap();
-        assert_eq!(verified.len(), temporary.as_file().metadata().unwrap().len());
+        assert_eq!(
+            verified.len(),
+            temporary.as_file().metadata().unwrap().len()
+        );
         assert_eq!(
             guard
                 .publish_verified(temporary, &output, &verified)
