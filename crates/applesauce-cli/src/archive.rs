@@ -246,6 +246,105 @@ fn unused_output(output: &Path) -> io::Result<()> {
     }
 }
 
+/// Keep the temporary file's cleanup anchored to the opened directory. A
+/// NamedTempFile normally removes its saved *pathname* on Drop. If the parent
+/// was renamed or a symlink retargeted, pathname cleanup could remove another
+/// file and leak the original staging inode.
+#[cfg(unix)]
+struct PinnedTempFile {
+    temporary: Option<NamedTempFile>,
+    directory: File,
+    name: std::ffi::CString,
+}
+
+#[cfg(unix)]
+impl PinnedTempFile {
+    fn new(temporary: NamedTempFile, directory: &File) -> io::Result<Self> {
+        use std::os::unix::ffi::OsStrExt;
+        let name = temporary
+            .path()
+            .file_name()
+            .ok_or_else(|| invalid("archive staging filename is missing"))?;
+        let name = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| invalid("archive staging filename contains NUL"))?;
+        Ok(Self {
+            temporary: Some(temporary),
+            directory: directory.try_clone()?,
+            name,
+        })
+    }
+
+    fn cleanup(&mut self) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let Some(temporary) = self.temporary.take() else {
+            return Ok(());
+        };
+        let original = temporary.as_file().metadata()?;
+        // Disarm the pathname-based destructor before attempting cleanup.
+        // The open file is retained while checking and unlinking its name.
+        let (_file, _path) = temporary.keep().map_err(|error| error.error)?;
+        let mut selected = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the directory descriptor stays owned by self, the name is
+        // NUL-terminated, and the stat buffer is writable.
+        let status = unsafe {
+            libc::fstatat(
+                self.directory.as_raw_fd(),
+                self.name.as_ptr(),
+                selected.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status != 0 {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: fstatat succeeded and initialized the stat buffer.
+        let selected = unsafe { selected.assume_init() };
+        if selected.st_dev as u64 != original.dev() || selected.st_ino != original.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive staging name was replaced before pinned cleanup",
+            ));
+        }
+        // SAFETY: the directory descriptor and name are valid for unlinkat.
+        if unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for PinnedTempFile {
+    type Target = NamedTempFile;
+
+    fn deref(&self) -> &Self::Target {
+        self.temporary.as_ref().expect("staging file already cleaned")
+    }
+}
+
+#[cfg(unix)]
+impl std::ops::DerefMut for PinnedTempFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.temporary.as_mut().expect("staging file already cleaned")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PinnedTempFile {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+#[cfg(not(unix))]
+type PinnedTempFile = NamedTempFile;
+
 /// Pin the directory in which the private staged file was created. A rename
 /// or symlink retarget of the parent while encoding/decoding runs must not
 /// redirect the final publication to a different directory. Directory mtime
@@ -305,7 +404,7 @@ impl OutputDirectoryGuard {
     /// linkat rejects existing files, including symlinks, without clobbering.
     fn publish_verified(
         &self,
-        temporary: NamedTempFile,
+        mut temporary: PinnedTempFile,
         output: &Path,
         verified: &fs::Metadata,
     ) -> io::Result<()> {
@@ -399,13 +498,11 @@ impl OutputDirectoryGuard {
                 ));
             }
 
-            // Disable NamedTempFile's pathname-based Drop: its original parent
-            // could have been renamed. Remove the private name via dirfd instead.
-            let (_file, _staging_path) = temporary.keep().map_err(|error| error.error)?;
-            // SAFETY: directory_fd remains open and source_name is a valid
-            // NUL-terminated filename relative to the pinned directory.
-            if unsafe { libc::unlinkat(directory_fd, source_name.as_ptr(), 0) } != 0 {
-                return Err(io::Error::last_os_error());
+            // Publication has succeeded; a cleanup failure is reported as a
+            // warning rather than a false "publication failed" result. Drop
+            // also uses the pinned descriptor for early-return cleanup.
+            if let Err(error) = temporary.cleanup() {
+                eprintln!("warning: verified archive published but staging cleanup failed: {error}");
             }
             Ok(())
         }
@@ -420,7 +517,7 @@ impl OutputDirectoryGuard {
     }
 }
 
-fn staging(output: &Path) -> io::Result<(NamedTempFile, OutputDirectoryGuard)> {
+fn staging(output: &Path) -> io::Result<(PinnedTempFile, OutputDirectoryGuard)> {
     unused_output(output)?;
     let parent = output
         .parent()
@@ -428,6 +525,8 @@ fn staging(output: &Path) -> io::Result<(NamedTempFile, OutputDirectoryGuard)> {
         .unwrap_or_else(|| Path::new("."));
     let guard = OutputDirectoryGuard::open(parent)?;
     let temporary = NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    let temporary = PinnedTempFile::new(temporary, &guard.opened)?;
     guard.ensure_unchanged()?;
     Ok((temporary, guard))
 }
@@ -784,6 +883,32 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_staging_drop_preserves_retargeted_parent_files() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("selected");
+        let moved = root.path().join("old-selected");
+        fs::create_dir(&parent).unwrap();
+        let (mut temporary, guard) = staging(&parent.join("output.ascf")).unwrap();
+        temporary.write_all(b"private staged contents").unwrap();
+        let stage_name = temporary.path().file_name().unwrap().to_os_string();
+
+        fs::rename(&parent, &moved).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(parent.join(&stage_name), b"unrelated replacement").unwrap();
+
+        // The old pathname now points to an unrelated file. Early-return
+        // cleanup must remove only the original staged inode through dirfd.
+        assert!(guard.ensure_unchanged().is_err());
+        drop(temporary);
+        assert_eq!(
+            fs::read(parent.join(&stage_name)).unwrap(),
+            b"unrelated replacement"
+        );
+        assert!(!moved.join(&stage_name).exists());
+    }
 
     #[cfg(unix)]
     #[test]
