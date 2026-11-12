@@ -396,11 +396,10 @@ def checked_table_bytes(rows: dict, entry: dict, observations: list) -> None:
             char not in "0123456789abcdef" for char in window) or (
             rows.get("loop_window_sha256") != window):
         raise EvidenceError("registration table callsite window digest mismatch")
-    try:
-        address = int(rows["address"], 16)
-    except (KeyError, TypeError, ValueError) as error:
-        raise EvidenceError("invalid registration table address") from error
-    if hex(address) != rows["address"] or not 0 <= address <= (1 << 64) - count * 16:
+    # Parse only canonical bounded u64 addresses. int(..., 16) on an
+    # unbounded attacker-controlled string can consume excessive resources.
+    address = canonical_u64_hex(rows.get("address"), "registration table address")
+    if address > (1 << 64) - count * 16:
         raise EvidenceError("invalid registration table address")
     for index, record in enumerate(observations):
         number, padding, pointer = struct.unpack_from("<IIQ", raw, index * 16)
