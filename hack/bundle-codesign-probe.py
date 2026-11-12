@@ -73,6 +73,113 @@ def signature_and_execution(app, binary):
         raise AssertionError(f"unexpected executable output: {actual!r}")
 
 
+def fnv1a64(payload):
+    """A small, dependency-free expected-byte checksum for the C fixture."""
+    value = 0xcbf29ce484222325
+    for byte in payload:
+        value = ((value ^ byte) * 0x100000001b3) & 0xffffffffffffffff
+    return value
+
+
+def resource_reader_source(small, large):
+    """Build an executable that checks both signed resources via mmap itself.
+
+    This makes launch checks meaningful: the executable must actually consume
+    the compressed file's logical bytes, rather than merely print a constant.
+    """
+    source = r'''#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+struct expected_resource {
+    const char *name;
+    size_t length;
+    uint64_t checksum;
+};
+
+static const struct expected_resource resources[] = {
+    {"small.txt", @SMALL_SIZE@u, UINT64_C(0x@SMALL_HASH@)},
+    {"events.jsonl", @LARGE_SIZE@u, UINT64_C(0x@LARGE_HASH@)}
+};
+
+static uint64_t fnv1a64(const unsigned char *bytes, size_t length) {
+    uint64_t checksum = UINT64_C(0xcbf29ce484222325);
+    for (size_t i = 0; i < length; ++i) {
+        checksum ^= bytes[i];
+        checksum *= UINT64_C(0x100000001b3);
+    }
+    return checksum;
+}
+
+static int check_resource(const char *directory, const struct expected_resource *expected) {
+    char path[4096];
+    int length = snprintf(path, sizeof(path), "%s/../Resources/%s",
+                          directory, expected->name);
+    if (length < 0 || (size_t)length >= sizeof(path)) {
+        fprintf(stderr, "resource path too long\n");
+        return 1;
+    }
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        perror("open resource");
+        return 1;
+    }
+    struct stat metadata;
+    if (fstat(fd, &metadata) != 0 || metadata.st_size < 0 ||
+        (uintmax_t)metadata.st_size != (uintmax_t)expected->length) {
+        fprintf(stderr, "resource length mismatch: %s\n", expected->name);
+        close(fd);
+        return 1;
+    }
+    void *mapping = mmap(NULL, expected->length, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapping == MAP_FAILED) {
+        perror("mmap resource");
+        close(fd);
+        return 1;
+    }
+    uint64_t checksum = fnv1a64((const unsigned char *)mapping, expected->length);
+    int unmap_result = munmap(mapping, expected->length);
+    int close_result = close(fd);
+    if (checksum != expected->checksum || unmap_result || close_result) {
+        fprintf(stderr, "resource readback mismatch: %s\n", expected->name);
+        return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 1 || argv[0] == NULL) {
+        return 2;
+    }
+    const char *slash = strrchr(argv[0], '/');
+    char directory[4096];
+    if (slash == NULL || (size_t)(slash - argv[0]) >= sizeof(directory)) {
+        fprintf(stderr, "executable path unavailable\n");
+        return 2;
+    }
+    size_t prefix_length = (size_t)(slash - argv[0]);
+    memcpy(directory, argv[0], prefix_length);
+    directory[prefix_length] = '\0';
+    for (size_t i = 0; i < sizeof(resources) / sizeof(resources[0]); ++i) {
+        if (check_resource(directory, &resources[i]) != 0) {
+            return 3;
+        }
+    }
+    puts("APPLESauce signed bundle fixture");
+    return 0;
+}
+'''
+    return (source.replace("@SMALL_SIZE@", str(len(small)))
+                  .replace("@SMALL_HASH@", f"{fnv1a64(small):016x}")
+                  .replace("@LARGE_SIZE@", str(len(large)))
+                  .replace("@LARGE_HASH@", f"{fnv1a64(large):016x}"))
+
+
 def fixture(root):
     app = root / "ApplesauceProbe.app"
     executable = app / "Contents" / "MacOS" / "applesauce-probe"
@@ -90,12 +197,6 @@ def fixture(root):
                 "CFBundleShortVersionString": "1.0",
             }, stream,
         )
-    source = root / "probe.c"
-    source.write_text(
-        '#include <stdio.h>\nint main(void) { puts("APPLESauce signed bundle fixture"); return 0; }\n',
-        encoding="utf-8",
-    )
-    run("/usr/bin/xcrun", "clang", "-O2", "-o", executable, source)
     small = resources / "small.txt"
     small.write_bytes(b"A" * 2048)
     large = resources / "events.jsonl"
@@ -104,6 +205,13 @@ def fixture(root):
         for i in range(6000)
     ]
     large.write_bytes("".join(records).encode())
+    source = root / "probe.c"
+    source.write_text(
+        resource_reader_source(small.read_bytes(), large.read_bytes()),
+        encoding="utf-8",
+    )
+    run("/usr/bin/xcrun", "clang", "-std=c11", "-Wall", "-Wextra",
+        "-Werror", "-O2", "-o", executable, source)
     run("/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", app)
     sealed = app / "Contents" / "_CodeSignature" / "CodeResources"
     if not sealed.is_file():
