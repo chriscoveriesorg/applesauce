@@ -117,6 +117,29 @@ class CrosscheckTest(unittest.TestCase):
             self.assertIn("cannot stat evidence descriptor", str(caught.exception))
             self.assertIsInstance(caught.exception.__cause__, OSError)
 
+    def test_descriptor_restat_error_fails_closed(self):
+        # The first fstat succeeds; the post-read metadata check fails.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            path.write_text('{"kind":"synthetic"}', encoding="utf-8")
+            real_fstat = os.fstat
+            calls = 0
+
+            def fail_second_fstat(fd):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError(5, "I/O error")
+                return real_fstat(fd)
+
+            with mock.patch.object(MODULE.os, "fstat", side_effect=fail_second_fstat):
+                with self.assertRaises(MODULE.EvidenceError) as caught:
+                    MODULE.read_evidence(path)
+            self.assertEqual(calls, 2)
+            self.assertIn("cannot restat evidence file", str(caught.exception))
+            self.assertIsInstance(caught.exception.__cause__, OSError)
+
     def test_read_error_fails_closed_without_traceback(self):
         # A regular file may become unreadable after its descriptor is opened.
         # Surface a controlled evidence rejection and preserve the OS cause.
