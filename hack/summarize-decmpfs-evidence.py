@@ -25,6 +25,7 @@ GATES = (
     "kernel_decoder_proven",
     "codec_identity_proven",
     "on_disk_framing_proven",
+    "cold_remount_readback_proven",
     "native_raven_mesh_writes_permitted",
 )
 
@@ -93,7 +94,7 @@ def checked_gate(data: dict, kind: str):
             raise EvidenceError(f"unreviewed positive proof field {kind}.{name}")
 
 
-def source_index(report: dict, kind: str) -> dict[str, str]:
+def source_index(report: dict, kind: str) -> dict[str, str | None]:
     sources = report.get("inputs")
     if not isinstance(sources, list) or not 1 <= len(sources) <= 16:
         raise EvidenceError(f"{kind} has no bounded source list")
@@ -107,13 +108,52 @@ def source_index(report: dict, kind: str) -> dict[str, str]:
         status = item.get("status")
         if status not in ("inspected", "unavailable"):
             raise EvidenceError(f"invalid {kind} source status")
+        digest = None
         if status == "inspected":
             digest = item.get("sha256")
             if not isinstance(digest, str) or len(digest) != 64 or any(
                     ch not in "0123456789abcdef" for ch in digest):
                 raise EvidenceError(f"missing {kind} source SHA-256")
-            result[name] = digest
+        # Preserve failed attempts too: otherwise sources missing on one side
+        # could be silently ignored while the successful subset appears pinned.
+        result[name] = digest
     return result
+
+
+def verified_catalogue_types(catalogue: dict) -> list[int]:
+    """Cross-check type hints against the declarations actually captured."""
+    source = catalogue.get("source")
+    if not isinstance(source, dict):
+        raise EvidenceError("missing catalogue source provenance")
+    unsigned(source.get("plists_scanned"), "catalogue plist count", 257)
+    log_digest = source.get("component_log_sha256")
+    if log_digest is not None and (
+            not isinstance(log_digest, str) or len(log_digest) != 64 or
+            any(ch not in "0123456789abcdef" for ch in log_digest)):
+        raise EvidenceError("invalid catalogue component-log SHA-256")
+    declarations = catalogue.get("candidate_declarations")
+    if not isinstance(declarations, list) or len(declarations) > 16384:
+        raise EvidenceError("invalid catalogue declarations")
+    observed = set()
+    for entry in declarations:
+        if not isinstance(entry, dict):
+            raise EvidenceError("invalid catalogue declaration entry")
+        number = unsigned(entry.get("type"), "catalogue declaration type", 255)
+        if entry.get("resource") not in ("Type", "providesType"):
+            raise EvidenceError("invalid catalogue declaration resource")
+        origin = entry.get("origin")
+        if origin not in ("iokit_personality", "ioreg_text"):
+            raise EvidenceError("invalid catalogue declaration origin")
+        if origin == "iokit_personality":
+            digest = entry.get("plist_sha256")
+            if not isinstance(digest, str) or len(digest) != 64 or any(
+                    ch not in "0123456789abcdef" for ch in digest):
+                raise EvidenceError("missing catalogue plist SHA-256")
+        observed.add(number)
+    declared = sorted(observed)
+    if declared != catalogue.get("candidate_types"):
+        raise EvidenceError("catalogue type hints differ from captured declarations")
+    return declared
 
 
 def collect_types(table: dict) -> tuple[list[int], int]:
@@ -126,21 +166,27 @@ def collect_types(table: dict) -> tuple[list[int], int]:
         if not isinstance(tables, list) or len(tables) > 128:
             raise EvidenceError("malformed registration tables")
         for entry in tables:
-            rows = entry.get("table", {})
+            if not isinstance(entry, dict) or not isinstance(entry.get("table"), dict):
+                raise EvidenceError("malformed registration table")
+            rows = entry["table"]
             observations = rows.get("entries")
             count = rows.get("count")
-            if not isinstance(observations, list) or len(observations) != count \
-                    or not 1 <= len(observations) <= 64:
+            if type(count) is not int or not isinstance(observations, list) or (
+                    len(observations) != count or not 1 <= count <= 64):
                 raise EvidenceError("registration table length mismatch")
             seen = set()
             for record in observations:
+                if not isinstance(record, dict):
+                    raise EvidenceError("malformed registration record")
                 number = unsigned(record.get("type"), "registration type", 255)
                 if number in seen:
                     raise EvidenceError("duplicate type within registration table")
                 seen.add(number)
                 found.add(number)
-                resolved = record.get("pointer_resolution", {})
-                if resolved.get("status") != "chain-verified":
+                resolved = record.get("pointer_resolution")
+                if not isinstance(resolved, dict) or not isinstance(resolved.get("status"), str):
+                    raise EvidenceError("malformed registration pointer resolution")
+                if resolved["status"] != "chain-verified":
                     unresolved += 1
     return sorted(found), unresolved
 
@@ -154,14 +200,10 @@ def summarize(binary: dict, table: dict, catalogue: dict, inventory: dict,
         checked_gate(document, name)
     binary_sources = source_index(binary, "binary")
     table_sources = source_index(table, "table")
-    if not binary_sources or binary_sources != table_sources:
+    if not any(value is not None for value in binary_sources.values()) \
+            or binary_sources != table_sources:
         raise EvidenceError("binary/table inputs must inspect identical source SHA-256s")
-    catalogue_types = catalogue.get("candidate_types")
-    if not isinstance(catalogue_types, list) or len(catalogue_types) > 255:
-        raise EvidenceError("invalid catalogue candidate types")
-    catalogue_numbers = [unsigned(x, "catalogue type", 255) for x in catalogue_types]
-    if catalogue_numbers != sorted(set(catalogue_numbers)):
-        raise EvidenceError("catalogue candidate types are not sorted and unique")
+    catalogue_numbers = verified_catalogue_types(catalogue)
     observed = inventory.get("types")
     if not isinstance(observed, dict) or len(observed) > 255:
         raise EvidenceError("invalid inventory type counts")
@@ -189,8 +231,9 @@ def summarize(binary: dict, table: dict, catalogue: dict, inventory: dict,
         "kind": "read-only-decmpfs-crosscheck",
         "result": "inconclusive_kernel_codec_mapping",
         "source_document_sha256": dict(sorted(digests.items())),
-        "matched_binary_sources": len(binary_sources),
-        "kernelcache_sha256": sorted(set(binary_sources.values())),
+        "matched_binary_sources": sum(x is not None for x in binary_sources.values()),
+        "unavailable_binary_sources": sorted(k for k, v in binary_sources.items() if v is None),
+        "kernelcache_sha256": sorted({x for x in binary_sources.values() if x is not None}),
         "static_registration_type_candidates": static_types,
         "unresolved_static_registration_pointers": unresolved,
         "catalogue_declared_type_hints": catalogue_numbers,
