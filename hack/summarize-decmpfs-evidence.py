@@ -103,7 +103,10 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
     if not getattr(os, "O_NOFOLLOW", 0):
         raise EvidenceError("O_NOFOLLOW is required")
-    fd = os.open(path, flags | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW)
+    except OSError as error:
+        raise EvidenceError(f"cannot open evidence file: {error.strerror}") from error
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_INPUT_BYTES:
