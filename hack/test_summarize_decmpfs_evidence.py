@@ -224,6 +224,14 @@ class CrosscheckTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.EvidenceError, "differ from captured"):
             summarize(*reports)
 
+    def test_reject_oversized_inventory_type_key(self):
+        # JSON object keys are strings. A multi-thousand-digit decimal key
+        # must be rejected as evidence, not crash Python's int parser.
+        reports = fixtures()
+        reports[3]["types"] = {"9" * 5000: {"count": 3}}
+        with self.assertRaisesRegex(MODULE.EvidenceError, "invalid inventory type key"):
+            summarize(*reports)
+
     def test_reject_bad_inventory(self):
         reports = fixtures()
         reports[3]["headers_read"] = 2
