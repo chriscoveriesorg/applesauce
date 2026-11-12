@@ -846,7 +846,9 @@ mod tests {
         let (mut temporary, guard) = staging(&output).unwrap();
         temporary.write_all(b"verified synthetic content").unwrap();
         let verified = temporary.as_file().metadata().unwrap();
-        guard.publish_verified(temporary, &output, &verified).unwrap();
+        guard
+            .publish_verified(temporary, &output, &verified)
+            .unwrap();
         assert_eq!(fs::read(&output).unwrap(), b"verified synthetic content");
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
     }
