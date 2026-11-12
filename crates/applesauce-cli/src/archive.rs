@@ -308,8 +308,10 @@ impl OutputDirectoryGuard {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        if selected_parent != self.path {
-            return Err(invalid("archive output parent differs from pinned directory"));
+        if selected_parent != self.path.as_path() {
+            return Err(invalid(
+                "archive output parent differs from pinned directory",
+            ));
         }
         self.ensure_unchanged()?;
         #[cfg(unix)]
