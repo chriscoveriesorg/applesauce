@@ -108,7 +108,10 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
     except OSError as error:
         raise EvidenceError(f"cannot open evidence file: {error.strerror}") from error
     try:
-        before = os.fstat(fd)
+        try:
+            before = os.fstat(fd)
+        except OSError as error:
+            raise EvidenceError(f"cannot stat evidence descriptor: {error.strerror}") from error
         if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_INPUT_BYTES:
             raise EvidenceError("evidence must be a nonempty regular file <= 32 MiB")
         chunks, remaining = [], before.st_size
