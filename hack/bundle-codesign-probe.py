@@ -264,6 +264,58 @@ def require_restored_report(output, path, expected_size):
         raise AssertionError(f"restoration left compressed or invalid storage: {row}")
 
 
+def require_bundle_audit(report, app, files):
+    """Prove the read-only profile skips signed code and signature subtrees."""
+    if (
+        not isinstance(report, dict) or report.get("complete") is not True
+        or report.get("profile") != "bundles"
+        or report.get("full_encoding") is not True
+    ):
+        raise AssertionError(f"incomplete or incorrect bundle audit: {report}")
+    rows = report.get("paths")
+    if not isinstance(rows, list):
+        raise AssertionError("missing bundle audit path rows")
+
+    def single(path):
+        matches = [
+            row for row in rows
+            if isinstance(row, dict) and isinstance(row.get("path"), dict)
+            and row["path"].get("display") == str(path)
+        ]
+        if len(matches) != 1:
+            raise AssertionError(f"missing or duplicate bundle audit row: {path}")
+        return matches[0]
+
+    for path in files:
+        row = single(path)
+        if row.get("would_compress") is not True or row.get("reason") != "compress":
+            raise AssertionError(f"eligible resource not selected: {path}: {row}")
+
+    excluded = (
+        app / "Contents" / "Info.plist",
+        app / "Contents" / "MacOS",
+        app / "Contents" / "_CodeSignature",
+    )
+    for path in excluded:
+        row = single(path)
+        if (
+            row.get("would_compress") is not False
+            or row.get("reason") != "bundle_non_resource"
+        ):
+            raise AssertionError(f"signed bundle path not excluded: {path}: {row}")
+
+    # Excluded executable and code-signature directories are pruned before
+    # opening descendants, including on case-sensitive APFS volumes.
+    for directory in excluded[1:]:
+        prefix = str(directory) + os.sep
+        for row in rows:
+            if (
+                isinstance(row, dict) and isinstance(row.get("path"), dict)
+                and str(row["path"].get("display", "")).startswith(prefix)
+            ):
+                raise AssertionError(f"audit descended into signed code: {directory}")
+
+
 def verify_readback(path, expected):
     """Compare complete kernel and mmap reads to the original content hash."""
     expected_sha256 = hashlib.sha256(expected).hexdigest()
@@ -293,23 +345,16 @@ def main():
         app, executable, files, sealed = fixture(Path(scratch))
         small, large = files
         signature_and_execution(app, executable)
+        info_plist = app / "Contents" / "Info.plist"
         before = {
             path: (digest(path), path.stat().st_mtime_ns, xattrs(path))
-            for path in (*files, sealed, executable)
+            for path in (*files, sealed, executable, info_plist)
         }
         dry = json.loads(run(
             applesauce, "compress", "--dry-run", "--profile", "bundles",
             "--compression", "zlib", "--json", app,
         ))
-        if dry.get("complete") is not True:
-            raise AssertionError(f"incomplete bundle audit: {dry}")
-        for path in files:
-            rows = [
-                row for row in dry["paths"]
-                if row["path"]["display"] == str(path)
-            ]
-            if len(rows) != 1 or rows[0]["would_compress"] is not True:
-                raise AssertionError(f"eligible bundle resource not selected: {path}: {rows}")
+        require_bundle_audit(dry, app, files)
         for path, original in before.items():
             now = (digest(path), path.stat().st_mtime_ns, xattrs(path))
             if now != original:
@@ -333,7 +378,7 @@ def main():
             for active_path, active_storage in compressed:
                 verify_readback(active_path, expected_bytes[active_path])
                 require_report(applesauce, active_path, "zlib", active_storage)
-            assert_sealed_paths_unchanged((sealed, executable), before)
+            assert_sealed_paths_unchanged((sealed, executable, info_plist), before)
             signature_and_execution(app, executable)
 
         # Reverse-order restoration also exercises a mixed compressed/plain
@@ -346,7 +391,7 @@ def main():
             for active_path, active_storage in compressed:
                 verify_readback(active_path, expected_bytes[active_path])
                 require_report(applesauce, active_path, "zlib", active_storage)
-            assert_sealed_paths_unchanged((sealed, executable), before)
+            assert_sealed_paths_unchanged((sealed, executable, info_plist), before)
             signature_and_execution(app, executable)
         for path in files:
             verify_readback(path, expected_bytes[path])
@@ -363,6 +408,7 @@ def main():
             "both_storage_modes_active_together": True,
             "readback_after_each_transition": True,
             "restored_storage_absent_after_each_transition": True,
+            "signed_code_and_signature_pruned_from_audit": True,
             "sealed_paths_unchanged_during_writes": True,
             "strict_codesign_valid_after_each_step": True,
             "signed_executable_runs_after_each_step": True,
