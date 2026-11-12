@@ -349,7 +349,7 @@ class CrosscheckTest(unittest.TestCase):
                 elif mutation == "wrong-stride":
                     rows["stride"] = 8
                 elif mutation == "altered-bytes":
-                    rows["bytes_hex"] = "0" + rows["bytes_hex"][1:]
+                    rows["bytes_hex"] = "7" + rows["bytes_hex"][1:]
                 elif mutation == "missing-digest":
                     rows.pop("sha256")
                 elif mutation == "forged-record-type":
