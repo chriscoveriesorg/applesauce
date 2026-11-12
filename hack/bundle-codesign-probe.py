@@ -5,6 +5,7 @@ Runs only on macOS, with an executable generated in a temporary checkout-local
 .app bundle. This does not authorize mutation of installed or user apps.
 """
 import hashlib
+import mmap
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,13 @@ def run(*command, timeout=90):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def mmap_digest(path):
+    """Prove compressed resources remain directly memory-mappable."""
+    with path.open("rb") as stream:
+        with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            return hashlib.sha256(data).hexdigest()
 
 
 def xattrs(path):
@@ -159,11 +167,15 @@ def main():
             )
             if path.read_bytes() != expected:
                 raise AssertionError(f"kernel readback changed {path}")
+            if mmap_digest(path) != hashlib.sha256(expected).hexdigest():
+                raise AssertionError(f"mmap readback changed {path}")
             require_report(applesauce, path, "zlib", storage)
             signature_and_execution(app, executable)
             run(applesauce, "decompress", "--verify", path)
             if path.read_bytes() != expected:
                 raise AssertionError(f"decompressed bytes changed {path}")
+            if mmap_digest(path) != hashlib.sha256(expected).hexdigest():
+                raise AssertionError(f"restored mmap readback changed {path}")
             signature_and_execution(app, executable)
 
         print(json.dumps({
@@ -173,6 +185,7 @@ def main():
             "profile_audit_unchanged": True,
             "stable_codec": "zlib",
             "compressed_storage_modes": ["inline_xattr", "resource_fork"],
+            "mmap_readback_verified": True,
             "strict_codesign_valid_after_each_step": True,
             "signed_executable_runs_after_each_step": True,
             "launchservices_gate_tested": False,
