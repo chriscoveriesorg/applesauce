@@ -113,7 +113,10 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
             raise EvidenceError("evidence must be a nonempty regular file <= 32 MiB")
         chunks, remaining = [], before.st_size
         while remaining:
-            chunk = os.read(fd, min(remaining, 1 << 20))
+            try:
+                chunk = os.read(fd, min(remaining, 1 << 20))
+            except OSError as error:
+                raise EvidenceError(f"cannot read evidence file: {error.strerror}") from error
             if not chunk:
                 raise EvidenceError("evidence was truncated")
             chunks.append(chunk)
