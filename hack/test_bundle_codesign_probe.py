@@ -129,6 +129,49 @@ class SignedBundleProbeTests(unittest.TestCase):
                         )
 
 
+    def test_restoration_requires_absent_decmpfs_metadata(self):
+        path = Path("/tmp/Fixture.app/Contents/Resources/original.dat")
+        clean = {
+            "path": {"display": str(path)}, "entry_type": "file",
+            "error": None, "source": "none", "codec": "none",
+            "storage": None, "decmpfs_type": None,
+            "decmpfs_xattr_bytes": 0, "resource_fork_bytes": 0,
+            "logical_size_bytes": 4096,
+        }
+        report = {
+            "complete": True, "report_kind": "actual_storage", "paths": [clean],
+        }
+        with patch.object(probe, "run", return_value=json.dumps(report)):
+            probe.require_restored_report("/tmp/applesauce", path, 4096)
+
+        # A successful decompression exit code and matching logical bytes
+        # must not conceal a residual decmpfs header or resource fork.
+        bad_rows = [
+            {**clean, "source": "decmpfs"},
+            {**clean, "codec": "zlib"},
+            {**clean, "storage": "resource_fork"},
+            {**clean, "decmpfs_type": 4},
+            {**clean, "decmpfs_xattr_bytes": 16},
+            {**clean, "resource_fork_bytes": 128},
+            {**clean, "logical_size_bytes": 4095},
+            {**clean, "entry_type": "symlink"},
+            {**clean, "error": {"kind": "io_error"}},
+        ]
+        bad_reports = [
+            {**report, "complete": False},
+            {**report, "report_kind": "projection"},
+            {**report, "paths": []},
+            {**report, "paths": [clean, clean]},
+            *({**report, "paths": [bad]} for bad in bad_rows),
+        ]
+        for invalid in bad_reports:
+            with self.subTest(invalid=invalid):
+                with patch.object(probe, "run", return_value=json.dumps(invalid)):
+                    with self.assertRaises(AssertionError):
+                        probe.require_restored_report(
+                            "/tmp/applesauce", path, 4096
+                        )
+
     def test_executable_consumes_both_signed_resources_via_mmap(self):
         """The launch gate must detect same-length corruption in either resource."""
         compiler = shutil.which("cc")
