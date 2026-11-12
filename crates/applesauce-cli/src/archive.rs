@@ -550,34 +550,35 @@ fn create_pinned_staging(
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
 
-    let temporary = tempfile::Builder::new()
-        .prefix(".applesauce-")
-        .make_in(parent, |candidate| {
-            let basename = candidate
-                .file_name()
-                .ok_or_else(|| invalid("archive staging filename is missing"))?;
-            let name = CString::new(basename.as_bytes())
-                .map_err(|_| invalid("archive staging filename contains NUL"))?;
-            // SAFETY: the directory descriptor stays open through staging and
-            // the candidate filename is NUL-terminated with no path separator.
-            let fd = unsafe {
-                libc::openat(
-                    guard.opened.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDWR
-                        | libc::O_CREAT
-                        | libc::O_EXCL
-                        | libc::O_CLOEXEC
-                        | libc::O_NOFOLLOW,
-                    0o600,
-                )
-            };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: a successful openat returns a uniquely owned file descriptor.
-            Ok(unsafe { File::from_raw_fd(fd) })
-        })?;
+    let temporary =
+        tempfile::Builder::new()
+            .prefix(".applesauce-")
+            .make_in(parent, |candidate| {
+                let basename = candidate
+                    .file_name()
+                    .ok_or_else(|| invalid("archive staging filename is missing"))?;
+                let name = CString::new(basename.as_bytes())
+                    .map_err(|_| invalid("archive staging filename contains NUL"))?;
+                // SAFETY: the directory descriptor stays open through staging and
+                // the candidate filename is NUL-terminated with no path separator.
+                let fd = unsafe {
+                    libc::openat(
+                        guard.opened.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::O_RDWR
+                            | libc::O_CREAT
+                            | libc::O_EXCL
+                            | libc::O_CLOEXEC
+                            | libc::O_NOFOLLOW,
+                        0o600,
+                    )
+                };
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: a successful openat returns a uniquely owned file descriptor.
+                Ok(unsafe { File::from_raw_fd(fd) })
+            })?;
     PinnedTempFile::new(temporary, &guard.opened)
 }
 
