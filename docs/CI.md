@@ -1,12 +1,14 @@
-# ci-way v1 (2026-11-12)
+# ci-way v1.1 (2026-11-12)
 
 How CI works in this repository. Same text in every repo the CI maintainer
 manages; the values below are read from the live system, not from a plan.
 
 ## 1. Where CI runs
 
-GitHub Actions on GARM runners. Nothing runs on a host: no ssh builds or tests
-on claw, webclip, firestar or the Mac, and no "claw run" evidence.
+All CI goes through our own runners. GitHub Actions on GARM runners, nothing
+else: no GitHub-hosted runners. Linux jobs use the GARM labels below; macOS jobs
+use the Mac set once it is live. Nothing runs on a host either: no ssh builds or
+tests on claw, webclip, firestar or the Mac, and no "claw run" evidence.
 
 Live labels (2026-11-12):
 
