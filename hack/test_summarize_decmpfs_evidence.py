@@ -21,6 +21,18 @@ SPEC.loader.exec_module(MODULE)
 def fixtures():
     raw_table = (struct.pack("<IIQ", 3, 0, 0x5000)
                  + struct.pack("<IIQ", 13, 0, 0x6000))
+    # ARM64 BL at 0x1000 branches to 0x2000, with four bytes of trailing code.
+    code = struct.pack("<8I", *([0xD503201F] * 8))
+    code += struct.pack("<II", 0x94000400, 0xD503201F)
+    callsite = {
+        "call_address": "0x1000", "target_address": "0x2000",
+        "target_symbol": "_register_decmpfs_decompressor",
+        "section": "__text", "file_offset": 4096,
+        "window_address": "0xfe0", "instruction_window_hex": code.hex(),
+        "window_sha256": hashlib.sha256(code).hexdigest(),
+        "type_constant_candidate": None, "registration_pointer_candidate": None,
+        "registration_record_candidate": None,
+    }
     binary = {
         "schema_version": 1,
         "kind": "read-only-decmpfs-binary-evidence",
@@ -28,11 +40,7 @@ def fixtures():
                     "sha256": "a" * 64,
                     "images": [{"image": "AppleFSCompressionTypeZlib",
                                 "uuid": "generated-test-image",
-                                "registration_calls": [{
-                                    "call_address": "0x1000",
-                                    "target_address": "0x2000",
-                                    "window_sha256": "c" * 64,
-                                }]}]}],
+                                "registration_calls": [copy.deepcopy(callsite)]}]}],
         "kernel_decoder_proven": False,
         "codec_identity_proven": False,
         "native_raven_mesh_writes_permitted": False,
@@ -44,17 +52,13 @@ def fixtures():
                     "sha256": "a" * 64,
                     "tables": [{"image": "AppleFSCompressionTypeZlib",
                                 "uuid": "generated-test-image",
-                                "callsite": {
-                                    "call_address": "0x1000",
-                                    "target_address": "0x2000",
-                                    "window_sha256": "c" * 64,
-                                },
+                                "callsite": copy.deepcopy(callsite),
                                 "table": {
                         "address": "0x3000", "file_offset": 0,
                         "stride": 16, "count": 2,
                         "bytes_hex": raw_table.hex(),
                         "sha256": hashlib.sha256(raw_table).hexdigest(),
-                        "loop_window_sha256": "c" * 64,
+                        "loop_window_sha256": callsite["window_sha256"],
                         "entries": [
                             {"type": 3, "raw_registration_pointer": "0x5000",
                              "pointer_resolution": {"status": "chain-verified",
@@ -165,6 +169,53 @@ class CrosscheckTest(unittest.TestCase):
                 reports = fixtures()
                 reports[0]["inputs"][0]["images"][0]["registration_calls"] = malformed
                 with self.assertRaisesRegex(MODULE.EvidenceError, "malformed binary registration"):
+                    summarize(*reports)
+
+    def test_reject_corrupted_callsite_attestation_in_both_probes(self):
+        # A matching copy of a forged callsite in both probe reports must fail.
+        variants = (
+            "stale_digest", "forged_digest", "branch_target", "not_a_bl",
+            "missing_instruction", "oversized_instruction", "misaligned_call",
+            "wrong_window", "bad_file_offset", "boolean_file_offset",
+            "missing_symbol", "noncanonical_target", "bad_type", "bad_pointer",
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                reports = fixtures()
+                call = reports[0]["inputs"][0]["images"][0]["registration_calls"][0]
+                if variant == "stale_digest":
+                    call["instruction_window_hex"] = "00" + call["instruction_window_hex"][2:]
+                elif variant == "forged_digest":
+                    call["window_sha256"] = "f" * 64
+                elif variant in ("branch_target", "not_a_bl"):
+                    raw = bytearray.fromhex(call["instruction_window_hex"])
+                    struct.pack_into("<I", raw, 32, 0x94000401 if variant == "branch_target"
+                                     else 0xD503201F)
+                    call["instruction_window_hex"] = raw.hex()
+                    call["window_sha256"] = hashlib.sha256(raw).hexdigest()
+                elif variant == "missing_instruction":
+                    call.pop("instruction_window_hex")
+                elif variant == "oversized_instruction":
+                    call["instruction_window_hex"] = "00" * 100
+                elif variant == "misaligned_call":
+                    call["call_address"] = "0x1001"
+                elif variant == "wrong_window":
+                    call["window_address"] = "0xeff"
+                elif variant == "bad_file_offset":
+                    call["file_offset"] = -1
+                elif variant == "boolean_file_offset":
+                    call["file_offset"] = True
+                elif variant == "missing_symbol":
+                    call["target_symbol"] = ""
+                elif variant == "noncanonical_target":
+                    call["target_address"] = "0X2000"
+                elif variant == "bad_type":
+                    call["type_constant_candidate"] = True
+                elif variant == "bad_pointer":
+                    call["registration_pointer_candidate"] = "0x" + "f" * 5000
+                reports[1]["inputs"][0]["tables"][0]["callsite"] = copy.deepcopy(call)
+                reports[1]["inputs"][0]["tables"][0]["table"]["loop_window_sha256"] = call["window_sha256"]
+                with self.assertRaises(MODULE.EvidenceError):
                     summarize(*reports)
 
     def test_reject_mismatched_source(self):
