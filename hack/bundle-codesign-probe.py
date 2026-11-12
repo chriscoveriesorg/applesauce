@@ -32,7 +32,30 @@ def digest(path):
 
 
 def xattrs(path):
-    return {name: os.getxattr(path, name) for name in os.listxattr(path)}
+    """Snapshot macOS extended attributes as raw bytes.
+
+    The macOS Python shipped by the runner does not expose os.listxattr or
+    os.getxattr. The system xattr command supports both binary-safe hex
+    output and native macOS metadata semantics. Any failed read aborts the
+    acceptance probe rather than treating an attribute as absent.
+    """
+    names = subprocess.run(
+        ["/usr/bin/xattr", str(path)],
+        capture_output=True, check=True,
+    ).stdout.splitlines()
+    found = {}
+    for raw_name in names:
+        if not raw_name:
+            raise AssertionError(f"empty extended attribute name on {path}")
+        name = os.fsdecode(raw_name)
+        if name in found:
+            raise AssertionError(f"duplicate extended attribute name on {path}: {name}")
+        encoded = subprocess.run(
+            ["/usr/bin/xattr", "-px", name, str(path)],
+            capture_output=True, check=True,
+        ).stdout
+        found[name] = bytes.fromhex(encoded.decode("ascii"))
+    return found
 
 
 def signature_and_execution(app, binary):
