@@ -23,10 +23,19 @@ content exactly.
 For each generated resource, the probe invokes explicit `compress -c zlib
 --verify`, checks kernel-visible bytes, and requires the `info --json`
 attribution to report Zlib and the expected inline-xattr or resource-fork
-storage. It then revalidates the strict code signature and executable output,
-performs verified restoration, and rechecks both after restoration. All
-temporary files are removed on exit. Only the stable, registered Zlib codec is
-used.
+storage. It also checks that ordinary kernel reads and read-only `mmap` return
+the original complete SHA-256 while APFS compression is active and after
+restoration. It then revalidates the strict code signature and executable
+output, performs verified restoration, and rechecks both after restoration.
+All temporary files are removed on exit. Only the stable, registered Zlib
+codec is used.
+
+The probe snapshots extended attributes using macOS `/usr/bin/xattr`
+(including hex-encoded binary values), because the macOS Python runtime
+does not expose `os.listxattr`/`os.getxattr`. Missing or unreadable attributes
+fail acceptance. The portable fast gate
+`python3 -m unittest discover -s hack -p 'test_bundle_codesign_probe.py'`
+covers snapshot errors, binary values and mmap reads before macOS execution.
 
 The stable macOS CI job runs this probe separately from all Raven/Mesh decoder
 research. A failing signature, readback, storage attribution, or executable
