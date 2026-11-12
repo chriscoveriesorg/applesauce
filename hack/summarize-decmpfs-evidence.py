@@ -103,7 +103,7 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
         raw = b"".join(chunks)
         reject_excessive_json_nesting(raw)
         try:
-            document = json.loads(raw, object_pairs_hook=unique_pairs)
+            document = json.loads(\n                raw, object_pairs_hook=unique_pairs,\n                parse_constant=lambda value: (_ for _ in ()).throw(\n                    EvidenceError(f"invalid JSON evidence: non-finite {value}")\n                ),\n            )
         except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
             raise EvidenceError(f"invalid JSON evidence: {error}") from error
         if not isinstance(document, dict):
