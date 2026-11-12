@@ -299,6 +299,101 @@ impl OutputDirectoryGuard {
         }
         Ok(())
     }
+
+    /// Atomically publish through the *opened directory*, not a pathname which
+    /// can resolve to a different directory between validation and publication.
+    /// linkat rejects existing files, including symlinks, without clobbering.
+    fn publish_verified(&self, temporary: NamedTempFile, output: &Path) -> io::Result<()> {
+        self.ensure_unchanged()?;
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::fs::MetadataExt;
+
+            let source_name = temporary
+                .path()
+                .file_name()
+                .ok_or_else(|| invalid("archive staging filename is missing"))?;
+            let target_name = output
+                .file_name()
+                .ok_or_else(|| invalid("archive output filename is missing"))?;
+            let source_name = CString::new(source_name.as_bytes())
+                .map_err(|_| invalid("archive staging filename contains NUL"))?;
+            let target_name = CString::new(target_name.as_bytes())
+                .map_err(|_| invalid("archive output filename contains NUL"))?;
+
+            // Verify the selected stage still names the open, verified inode.
+            // The caller also checks a content snapshot immediately before this.
+            let opened = temporary.as_file().metadata()?;
+            ensure_unchanged_staging_output(&temporary, &opened)?;
+            let directory_fd = self.opened.as_raw_fd();
+            let linked = unsafe {
+                libc::linkat(
+                    directory_fd,
+                    source_name.as_ptr(),
+                    directory_fd,
+                    target_name.as_ptr(),
+                    0,
+                )
+            };
+            if linked != 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            // An attacker may replace the staged pathname between its last
+            // identity check and linkat. Check the published hardlink against
+            // the descriptor, then recheck that the requested parent still
+            // resolves to this directory.
+            let mut published = std::mem::MaybeUninit::<libc::stat>::uninit();
+            let stat_result = unsafe {
+                libc::fstatat(
+                    directory_fd,
+                    target_name.as_ptr(),
+                    published.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            let identity_ok = if stat_result == 0 {
+                let published = unsafe { published.assume_init() };
+                opened.dev() == published.st_dev as u64
+                    && opened.ino() == published.st_ino as u64
+                    && opened.len() == published.st_size as u64
+            } else {
+                false
+            };
+            let parent_ok = self.ensure_unchanged();
+            if !identity_ok || parent_ok.is_err() {
+                // Best-effort rollback is confined to the pinned directory.
+                // A malicious actor with write access to that directory can
+                // still race the final name, so don't claim a universal lock.
+                unsafe {
+                    libc::unlinkat(directory_fd, target_name.as_ptr(), 0);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive publication lost staging or destination identity",
+                ));
+            }
+
+            // Disable NamedTempFile's pathname-based Drop: its original parent
+            // could have been renamed. Remove the private name via dirfd instead.
+            let (_file, _staging_path) = temporary.keep().map_err(|error| error.error)?;
+            if unsafe { libc::unlinkat(directory_fd, source_name.as_ptr(), 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (temporary, output);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "pinned archive publication requires Unix directory descriptors",
+            ))
+        }
+    }
 }
 
 fn staging(output: &Path) -> io::Result<(NamedTempFile, OutputDirectoryGuard)> {
@@ -515,10 +610,7 @@ fn create(
     // the earlier source hash check.
     ensure_unchanged_regular_input(source_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
-    output_parent.ensure_unchanged()?;
-    temporary
-        .persist_noclobber(output)
-        .map_err(|error| error.error)?;
+    output_parent.publish_verified(temporary, output)?;
     println!(
         "{} archive: {} -> {} bytes ({:.1}% saved); original unchanged",
         codec.name(),
@@ -607,10 +699,7 @@ fn extract(archive_path: &Path, output: &Path) -> io::Result<()> {
     }
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
-    output_parent.ensure_unchanged()?;
-    temporary
-        .persist_noclobber(output)
-        .map_err(|error| error.error)?;
+    output_parent.publish_verified(temporary, output)?;
     println!("Restored {} verified bytes into a new file", logical_size);
     Ok(())
 }
@@ -657,10 +746,7 @@ fn extract_range(archive_path: &Path, output: &Path, range: (u64, u64)) -> io::R
     }
     ensure_unchanged_regular_input(archive_path, &source, &before)?;
     ensure_unchanged_staging_output(&temporary, &verified_staging)?;
-    output_parent.ensure_unchanged()?;
-    temporary
-        .persist_noclobber(output)
-        .map_err(|error| error.error)?;
+    output_parent.publish_verified(temporary, output)?;
     println!(
         "Restored verified logical range {}:{} into a new file; range SHA-256 {}",
         start,
@@ -724,6 +810,77 @@ mod tests {
             io::ErrorKind::InvalidData
         );
         assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_publish_creates_only_verified_output_and_cleans_stage() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("destination");
+        fs::create_dir(&parent).unwrap();
+        let output = parent.join("résumé restored.bin");
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"verified synthetic content").unwrap();
+        guard.publish_verified(temporary, &output).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"verified synthetic content");
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_publish_refuses_existing_target_including_symlink() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path();
+        let output = parent.join("target");
+        let protected = parent.join("protected");
+        fs::write(&protected, b"do not overwrite").unwrap();
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"verified bytes").unwrap();
+        symlink(&protected, &output).unwrap();
+        assert_eq!(
+            guard.publish_verified(temporary, &output).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&protected).unwrap(), b"do not overwrite");
+        assert!(fs::symlink_metadata(&output).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_publish_refuses_changed_staging_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("verified");
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"verified bytes").unwrap();
+        let moved = root.path().join("moved-stage");
+        fs::rename(temporary.path(), &moved).unwrap();
+        fs::write(temporary.path(), b"attacker bytes").unwrap();
+        assert_eq!(
+            guard.publish_verified(temporary, &output).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_publish_refuses_replaced_parent_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("output");
+        let moved = root.path().join("moved");
+        fs::create_dir(&parent).unwrap();
+        let output = parent.join("restored.bin");
+        let (mut temporary, guard) = staging(&output).unwrap();
+        temporary.write_all(b"verified bytes").unwrap();
+        fs::rename(&parent, &moved).unwrap();
+        fs::create_dir(&parent).unwrap();
+        assert_eq!(
+            guard.publish_verified(temporary, &output).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!output.exists());
+        assert!(!moved.join("restored.bin").exists());
     }
 
     #[test]
