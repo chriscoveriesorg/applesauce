@@ -109,7 +109,19 @@ The writer rereads and hashes the original, verifies every staged chunk and
 rechecks input path identity immediately before publishing to reject a replaced
 source (including same-sized inode swaps on macOS/Linux). Full and ranged
 restoration apply the same pathname check before publishing their new output.
-A concurrent rename after the final check remains a normal filesystem race.
+ASCF output staging pins the destination directory's device/inode. On Unix,
+publication uses an atomic, no-clobber hard link relative to the **opened
+directory descriptor** rather than resolving the parent pathname again.
+The published inode is checked against the verified staged descriptor; the
+private staging name is removed relative to the same directory descriptor.
+Staging uses cryptographically random names and `openat(O_EXCL)`. Its file
+lifetime and cleanup are managed by the pinned descriptor, including early
+error paths, without a pathname-based tempfile destructor.
+If publication fails after linking, rollback only unlinks a final name that
+still identifies the staged inode, preserving a replacement file or symlink.
+A replaced parent or retargeted symlink is rejected, while normal sibling
+creations are allowed. Directory write access by an adversary still permits
+races against staging or final names; choose a trusted output directory.
 Archives that cannot save space
 are refused unless you set `--allow-expansion`. Use `--chunk-bytes 1048576`
 to select a power-of-two chunk size between 64 KiB and 8 MiB. Keep the original
