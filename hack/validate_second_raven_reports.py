@@ -99,8 +99,22 @@ def check_digest(value, field):
             f"invalid SHA-256 in {field}")
 
 
+def check_fields(row, expected, label):
+    # Reject contradictory extra claims (especially native/APFS support), as
+    # well as omitted provenance, instead of silently ignoring them.
+    require(set(row) == expected, f"{label}: missing or unexpected evidence fields")
+
+
 def check_positive(row, *, size, decoder_digest, label, has_schema=True):
+    fields = {"codec", "status", "logical_size_bytes", "chunk_count",
+              "archive_sha256", "original_sha256", "decoder_sha256"}
     if has_schema:
+        fields.update({"schema_version", "scope", "codec_id"})
+    check_fields(row, fields, label)
+    if has_schema:
+        require(row["scope"] == "ASCF Apple buffer payload; not native APFS decmpfs"
+                and row["codec_id"] == "0xD05",
+                f"{label}: buffer proof provenance mismatch")
         require(row.get("schema_version") == 1 and type(row.get("schema_version")) is int,
                 f"{label}: unsupported evidence schema")
     require(row.get("codec") == "lzraven" and row.get("status") == STATUS,
@@ -327,6 +341,10 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, b
     report_digests = {}
     decoder_digest = digest_file(decoder)
     committed = read_report(reports, Path("committed.json"), report_digests)
+    check_fields(committed, {"schema_version", "scope", "vectors"},
+                 "committed proof")
+    require(committed["scope"] == "Apple ASCF buffer codec, not APFS decmpfs",
+            "committed proof scope mismatch")
     require(committed.get("schema_version") == 1 and
             type(committed.get("schema_version")) is int,
             "committed proof schema mismatch")
@@ -375,6 +393,14 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, b
             negative = read_report(reports, Path("negative") / f"{family}.json",
                                    report_digests)
             label = f"negative-{family}"
+            check_fields(negative, {
+                "schema_version", "status", "codec", "case_count", "cases",
+                "baseline_archive_sha256", "baseline_original_sha256",
+                "baseline_decoder_sha256", "suite_timeout_seconds",
+            }, label)
+            budget = negative["suite_timeout_seconds"]
+            require(type(budget) in (int, float) and 0 < budget <= 3600,
+                    f"{label}: invalid bounded test time budget")
             require(negative.get("schema_version") == 1 and
                     type(negative.get("schema_version")) is int and
                     negative.get("status") == "independent_corruptions_rejected" and
@@ -389,6 +415,9 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, b
             require(all(isinstance(c.get("case"), str) for c in cases)
                     and {c["case"] for c in cases} == NEGATIVE_CASES,
                     f"{label}: missing or duplicate corruption cases")
+            for case in cases:
+                check_fields(case, {"case", "archive_sha256", "rejection"},
+                             f"{label}.{case['case']}")
             expected_hashes = expected_negative_hashes(negative_fixture)
             for case in cases:
                 name = case["case"]
