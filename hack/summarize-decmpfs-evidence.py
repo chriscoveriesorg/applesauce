@@ -44,6 +44,39 @@ def unique_pairs(pairs):
     return result
 
 
+MAX_JSON_NESTING = 128
+
+
+def reject_excessive_json_nesting(raw: bytes) -> None:
+    """Bound structural JSON nesting consistently across Python versions.
+
+    Count delimiters only outside quoted strings, respecting escapes. The JSON
+    decoder is responsible for validating malformed syntax and string escapes.
+    """
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 0x5c:  # backslash
+                escaped = True
+            elif byte == 0x22:  # double quote
+                quoted = False
+        elif byte == 0x22:
+            quoted = True
+        elif byte in (0x5b, 0x7b):  # [ or {
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                raise EvidenceError("invalid JSON evidence: excessive nesting")
+        elif byte in (0x5d, 0x7d):  # ] or }
+            depth -= 1
+            if depth < 0:
+                # Let json.loads provide the syntax error for unmatched closes.
+                return
+
+
 def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
     """Read one bounded regular-file descriptor; reject name swaps and links."""
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -68,6 +101,7 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
                for item in (after, named) for field in fields):
             raise EvidenceError("evidence changed or was replaced during read")
         raw = b"".join(chunks)
+        reject_excessive_json_nesting(raw)
         try:
             document = json.loads(raw, object_pairs_hook=unique_pairs)
         except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
