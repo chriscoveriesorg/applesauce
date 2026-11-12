@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import struct
 import sys
 
 MAX_INPUT_BYTES = 32 << 20
@@ -92,7 +93,7 @@ def unsigned(value, what: str, max_value: int = 1 << 32) -> int:
 
 
 def checked_gate(data: dict, kind: str):
-    if data.get("kind") != EXPECTED[kind] or data.get("schema_version") != 1:
+    if data.get("kind") != EXPECTED[kind] or type(data.get("schema_version")) is not int or data["schema_version"] != 1:
         raise EvidenceError(f"unexpected {kind} evidence kind/schema")
     if data.get("native_raven_mesh_writes_permitted") is not False:
         raise EvidenceError(f"{kind} evidence improperly permits native writes")
@@ -236,6 +237,47 @@ def verified_catalogue_types(catalogue: dict) -> list[int]:
     return declared
 
 
+def checked_table_bytes(rows: dict, entry: dict, observations: list) -> None:
+    """Verify every summarized type and pointer against captured table bytes.
+
+    A matching kernelcache digest only pins the source file. The table probe
+    also emits its exact registration bytes, so reported types, pointers and
+    callsite linkage must agree with that bounded byte sequence. This is
+    internal consistency evidence, not independent runtime decoder proof.
+    """
+    count = rows["count"]
+    if type(rows.get("stride")) is not int or rows["stride"] != 16:
+        raise EvidenceError("invalid registration table stride")
+    encoded = rows.get("bytes_hex")
+    if not isinstance(encoded, str) or len(encoded) != count * 32 or any(
+            char not in "0123456789abcdef" for char in encoded):
+        raise EvidenceError("invalid registration table raw bytes")
+    raw = bytes.fromhex(encoded)
+    if rows.get("sha256") != hashlib.sha256(raw).hexdigest():
+        raise EvidenceError("registration table raw byte digest mismatch")
+    callsite = entry.get("callsite")
+    window = callsite.get("window_sha256") if isinstance(callsite, dict) else None
+    if not isinstance(window, str) or len(window) != 64 or any(
+            char not in "0123456789abcdef" for char in window) or (
+            rows.get("loop_window_sha256") != window):
+        raise EvidenceError("registration table callsite window digest mismatch")
+    try:
+        address = int(rows["address"], 16)
+    except (KeyError, TypeError, ValueError) as error:
+        raise EvidenceError("invalid registration table address") from error
+    if hex(address) != rows["address"] or not 0 <= address <= (1 << 64) - count * 16:
+        raise EvidenceError("invalid registration table address")
+    for index, record in enumerate(observations):
+        number, padding, pointer = struct.unpack_from("<IIQ", raw, index * 16)
+        if padding != 0 or number >= 255 or number != record["type"]:
+            raise EvidenceError("registration table type or padding differs from raw bytes")
+        if record.get("raw_registration_pointer") != hex(pointer):
+            raise EvidenceError("registration pointer differs from raw bytes")
+        resolution = record["pointer_resolution"]
+        if resolution.get("address") != hex(address + index * 16 + 8):
+            raise EvidenceError("registration pointer resolution address mismatch")
+
+
 def collect_types(table: dict) -> tuple[list[int], int]:
     found = set()
     unresolved = 0
@@ -268,6 +310,7 @@ def collect_types(table: dict) -> tuple[list[int], int]:
                     raise EvidenceError("malformed registration pointer resolution")
                 if resolved["status"] != "chain-verified":
                     unresolved += 1
+            checked_table_bytes(rows, entry, observations)
     return sorted(found), unresolved
 
 
