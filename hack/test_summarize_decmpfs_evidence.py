@@ -104,6 +104,22 @@ def summarize(*reports):
 
 
 class CrosscheckTest(unittest.TestCase):
+    def test_evidence_requires_utf8_json(self):
+        # json.loads(bytes) otherwise accepts UTF-16/32 evidence that the
+        # producers never emit. Keep the portable UTF-8 control accepted.
+        document = {"kind": "synthetic", "schema_version": 1}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            for encoding in ("utf-16", "utf-32"):
+                with self.subTest(encoding=encoding):
+                    path.write_bytes(json.dumps(document).encode(encoding))
+                    with self.assertRaisesRegex(MODULE.EvidenceError,
+                                                "invalid JSON evidence"):
+                        MODULE.read_evidence(path)
+            path.write_bytes(json.dumps(document).encode("utf-8"))
+            parsed, _, _ = MODULE.read_evidence(path)
+            self.assertEqual(parsed, document)
+
     def test_valid_join_stays_inconclusive(self):
         result = summarize(*fixtures())
         self.assertEqual(result["static_registration_type_candidates"], [3, 13])
