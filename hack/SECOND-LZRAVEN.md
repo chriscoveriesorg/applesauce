@@ -97,6 +97,15 @@ gate. A copied or invented negative report cannot substitute arbitrary digest
 strings. The retained archive bytes make these checks independently replayable;
 only authorised macOS qualification proves their Apple encoder provenance. The manifest hashes all eight upstream C sources/headers used to build and run tests. A missing, forged, duplicated or mismatched report fails qualification.
 
+The qualification validator requires exact fields for the committed, fresh and
+negative reports. Fresh reports must retain the LZRAVEN codec ID `0xD05` and
+the buffer-only scope emitted by the independent proof harness. Extra claims
+about kernel decmpfs support or native-write permission are rejected. Negative
+suite time budgets must be numeric, positive and no greater than 3,600 seconds.
+Corruption reasons must match the exact parser error or a specific independent
+decoder failure, including a nonzero numeric exit status. A report that labels
+exit status zero as a rejected corruption is invalid.
+
 All JSON reports are read from bounded, pinned regular-file descriptors, with nonblocking opens and symlink refusal. The validator rejects duplicate JSON keys at any depth, non-finite JSON literals, and oversized or replaced reports. Decoder/CLI binaries and upstream source hashes now use the same bounded no-follow file-identity checks. These controls protect evidence intake on a shared runner; they do not replace independent review or exact-head execution of the Python regression suite.
 
 The proof bundle also includes `second-raven-decoder`, the exact built
