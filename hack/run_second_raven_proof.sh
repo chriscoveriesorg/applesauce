@@ -60,8 +60,8 @@ done
 
 cc -std=c11 -O2 -Wall -Wextra -Werror \
   "$upstream/lzbitmap.c" "$upstream/lzmesh.c" "$upstream/lzraven.c" \
-  "$upstream/tests/test.c" -o "$work/upstream-tests" > "$evidence/upstream-tests.log" 2>&1
-"$work/upstream-tests"
+  "$upstream/tests/test.c" -o "$work/upstream-tests"
+"$work/upstream-tests" > "$evidence/upstream-tests.log" 2>&1
 cc -std=c11 -O2 -Wall -Wextra -Werror -I "$upstream" \
   "$upstream/lzraven.c" "$repo_root/hack/retrowave3_lzraven_decode.c" \
   -o "$work/raven-second"
@@ -89,7 +89,6 @@ python3 -m unittest discover -s "$repo_root/hack" \
 # codec ID, two- and three-chunk geometry and decoded bytes.
 python3 "$repo_root/hack/prove_committed_vectors.py" \
   --codec lzraven --decoder "$work/raven-second" > "$evidence/committed.json"
-echo 'PASS: second decoder restored two committed Apple LZRAVEN vectors'
 echo 'PASS: second decoder restored two committed Apple LZRAVEN vectors'
 
 fresh_option=()
