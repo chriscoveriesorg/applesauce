@@ -44,6 +44,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Reset generated Criterion evidence from earlier runner invocations
+        run: python3 hack/prepare_benchmark_evidence.py
       - name: Capture exact software and hardware provenance
         run: |
           set -euo pipefail
@@ -85,10 +87,18 @@ jobs:
           printf 'Criterion: %s warmup=%ss measurement=%ss samples=%s\n' \
             "$APPLESAUCE_BENCH_SUITE" "$warmup" "$measurement" "$samples" \
             | tee "$BENCH_RESULTS/config.txt"
-          cargo bench --locked -p applesauce-core --bench modern_buffer -- \
+          # macOS time -l adds suite-level user/system CPU time and peak RSS.
+          # This is whole-invocation telemetry, not a per-codec allocation count.
+          /usr/bin/time -l cargo bench --locked -p applesauce-core --bench modern_buffer -- \
             --noplot --warm-up-time "$warmup" \
             --measurement-time "$measurement" --sample-size "$samples" \
             2>&1 | tee "$BENCH_RESULTS/criterion.log"
+      - name: Capture whole-invocation CPU and peak RSS (not per-codec allocations)
+        run: |
+          set -euo pipefail
+          python3 hack/parse-benchmark-resources.py \
+            "$BENCH_RESULTS/criterion.log" "$BENCH_RESULTS/resource-usage.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Produce complete per-case CSV and concise comparison
         run: |
           set -euo pipefail
@@ -99,10 +109,22 @@ jobs:
             "$APPLESAUCE_BENCH_MANIFEST" target/criterion \
             "$BENCH_RESULTS/summary.csv" \
             | tee "$BENCH_RESULTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 hack/criterion-confidence.py \
+            "$APPLESAUCE_BENCH_MANIFEST" "$BENCH_RESULTS/summary.csv" \
+            target/criterion "$BENCH_RESULTS/confidence.csv" "$APPLESAUCE_BENCH_SUITE" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 hack/compare-codec-evidence.py \
+            "$BENCH_RESULTS/confidence.csv" "$APPLESAUCE_BENCH_SUITE" \
+            "$BENCH_RESULTS/raven-mesh-comparison.csv" \
+            | tee "$BENCH_RESULTS/raven-mesh-comparison.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 hack/rank-codec-evidence.py \
+            "$BENCH_RESULTS/confidence.csv" "$APPLESAUCE_BENCH_SUITE" \
+            "$BENCH_RESULTS/all-codecs-ranking.csv" \
+            | tee "$BENCH_RESULTS/all-codecs-ranking.md" >> "$GITHUB_STEP_SUMMARY"
           printf '\nRaw Criterion estimates and samples are available in the downloadable artifact.\n' \
             >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain raw evidence even on failure
-        if: always()
+      - name: Retain fully qualified benchmark evidence
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: applesauce-criterion-${{ github.event_name == 'issue_comment' && 'standard' || inputs.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -110,4 +132,22 @@ jobs:
             target/applesauce-bench/**
             target/criterion/**
           retention-days: 90
+          if-no-files-found: warn
+      # An exporter or fsync may fail after a CSV pathname becomes visible.
+      # Keep raw diagnostics for investigation while refusing to upload any
+      # derived CSV whose validation/durability may have failed.
+      - name: Retain unqualified raw diagnostics after failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: applesauce-criterion-unqualified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/criterion/**
+            target/applesauce-bench/manifest.csv
+            target/applesauce-bench/environment.txt
+            target/applesauce-bench/config.txt
+            target/applesauce-bench/criterion.log
+            target/applesauce-bench/resource-usage.json
+            target/applesauce-bench/matrix-check.txt
+          retention-days: 30
           if-no-files-found: warn

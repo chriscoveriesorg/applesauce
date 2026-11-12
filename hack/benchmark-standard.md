@@ -89,8 +89,31 @@ Artifacts include:
 | `matrix-check.txt` | Independent fail-closed check that every expected codec, workload, size, layout and scratch mode was actually measured |
 | `criterion/**/new/estimates.json` and `sample.json` | Raw Criterion timing estimates, confidence intervals and samples for encode and decode |
 | `summary.csv` | Full-case median ns and derived encode/decode MiB/s joined by exact case key |
+| `confidence.csv` | Every case's validated 95% median-time interval and correctly inverted encode/decode MiB/s bounds; `summary.csv` schema unchanged |
+| `raven-mesh-comparison.csv` | Same-host matched-fixture Raven/Mesh payload savings and encode/decode median speedup, with bounds derived from marginal timing intervals |
+| `raven-mesh-comparison.md` | Concise mixed-JSONL/representative paired comparison for operator review |
+| `all-codecs-ranking.csv` | Each codec's relative payload, encode and decode rank and slowdown against the fastest in the same-host, same-fixture five-codec cohort |
+| `all-codecs-ranking.md` | Compact mixed-JSONL ranking for all five codecs at 1 MiB and 8 MiB, whole and independent 64 KiB |
 | `summary.md` | Small same-host Chat JSONL vs entropy comparison |
-| `criterion.log` | Complete runner output, including measurement warnings and skips |
+| `criterion.log` | Complete runner output, including measurement warnings/skips and macOS `/usr/bin/time -l` suite-level user/system CPU and peak resident memory statistics; these aggregate figures do not attribute allocations to individual codecs |
+| `resource-usage.json` | Machine-readable whole-command wall/user/system seconds and peak RSS bytes, tied to the SHA-256 of `criterion.log`; includes Cargo/build overhead and does not measure codec allocations |
+
+**Artifact qualification:** a successful benchmark run uploads the complete
+table above. If any benchmark, parser, publication or durability check fails,
+the workflow uploads an explicitly `unqualified` diagnostic artifact instead:
+raw `criterion/**` samples/estimates, fixture manifest and available logs.
+It omits every derived CSV and comparison report from failed-run uploads.
+A visible CSV on the failed runner is not a qualified result and must not be
+published or compared.
+
+The derived-CSV publisher requires a freshly reset evidence directory. It
+refuses an existing output filename and uses an exclusive hard-link publish,
+so a second writer cannot silently replace a newly introduced entry.
+After publication, a failed directory fsync or directory identity check
+fails the workflow without truncating or deleting the published inode.
+This protects hardlinks created by other processes. The workflow's
+success-only artifact gate is mandatory because a durability failure after
+a visible publish cannot safely roll back an uncooperative same-UID writer.
 
 The pure-Python
 [`hack/summarize-benchmarks.py`](summarize-benchmarks.py) exits nonzero when
@@ -106,16 +129,34 @@ an apparently complete benchmark.
 From the checkout root:
 
 ```sh
+# This deletes only generated target/criterion and target/applesauce-bench
+# under the selected checkout, preserving Cargo build caches.
+export GITHUB_WORKSPACE="$PWD"
+python3 hack/prepare_benchmark_evidence.py
 mkdir -p target/applesauce-bench
 export APPLESAUCE_BENCH_SUITE=standard
 export APPLESAUCE_BENCH_MANIFEST="$PWD/target/applesauce-bench/manifest.csv"
-cargo bench --locked -p applesauce-core --bench modern_buffer -- \
-  --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30
+set -o pipefail
+/usr/bin/time -l cargo bench --locked -p applesauce-core --bench modern_buffer -- \
+  --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30 \
+  2>&1 | tee target/applesauce-bench/criterion.log
+python3 hack/parse-benchmark-resources.py \
+  target/applesauce-bench/criterion.log target/applesauce-bench/resource-usage.json
 python3 hack/validate-benchmark-matrix.py \
   "$APPLESAUCE_BENCH_MANIFEST" "$APPLESAUCE_BENCH_SUITE"
 python3 hack/summarize-benchmarks.py \
   "$APPLESAUCE_BENCH_MANIFEST" target/criterion \
   target/applesauce-bench/summary.csv
+python3 hack/criterion-confidence.py \
+  "$APPLESAUCE_BENCH_MANIFEST" target/applesauce-bench/summary.csv \
+  target/criterion target/applesauce-bench/confidence.csv \
+  "$APPLESAUCE_BENCH_SUITE"
+python3 hack/compare-codec-evidence.py \
+  target/applesauce-bench/confidence.csv "$APPLESAUCE_BENCH_SUITE" \
+  target/applesauce-bench/raven-mesh-comparison.csv
+python3 hack/rank-codec-evidence.py \
+  target/applesauce-bench/confidence.csv "$APPLESAUCE_BENCH_SUITE" \
+  target/applesauce-bench/all-codecs-ranking.csv
 ```
 
 If modifying a codec or its build flags, capture exact commit/runner metadata
@@ -127,6 +168,10 @@ small changes. Report the regression/improvement only after independently
 reproducing it on a controlled host. The public hosted workflow intentionally
 **does not fail CI on percentage speed changes**. It fails on broken builds,
 round trips, missing reports or invalid contracts.
+
+The CPU/RSS report parses Darwin's `/usr/bin/time -l` trailer from the timed `cargo bench` command. It rejects missing or repeated fields and nonregular, altered or oversized logs; the report is only emitted on successful complete telemetry. This summarizes the whole command, including build, process launches and the benchmark harness. Per-codec allocation counts need a separate allocator profiler. Earlier artifacts without a time trailer cannot be retroactively assigned resource numbers.
+
+Confidence intervals are the Criterion bootstrap **95% intervals for median execution time**, not cross-host uncertainty bounds. Throughput is the reciprocal of elapsed time, so its lower bound uses the **upper time bound** and its upper bound uses the **lower time bound**. The separate exporter independently validates the full golden-fixture matrix and every manifest field against the summary. It then refuses malformed estimates, missing cases, summary/estimate disagreement and non-95% bounds. It does not claim CPU utilization, allocation counts, or a speedup from one hosted run. Those require additional instrumentation and controlled repeats.
 
 The everyday command `applesauce benchmark-codecs --json` remains a quick
 diagnostic and schema-v1 capability contract for `compress-agent-sessions` and
