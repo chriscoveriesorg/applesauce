@@ -75,7 +75,14 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
             raise EvidenceError("evidence root must be an object")
         return document, hashlib.sha256(raw).hexdigest(), (before.st_dev, before.st_ino)
     finally:
-        os.close(fd)
+        # Do not mask the original evidence rejection if descriptor cleanup fails.
+        if sys.exc_info()[0] is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        else:
+            os.close(fd)
 
 
 def unsigned(value, what: str, max_value: int = 1 << 32) -> int:
