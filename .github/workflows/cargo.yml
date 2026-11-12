@@ -33,6 +33,8 @@ jobs:
         run: python3 -m unittest discover -s hack -p 'test_benchmark_summary.py'
       - name: Validate offline benchmark matrix contract
         run: python3 -m unittest discover -s hack -p 'test_benchmark_matrix.py'
+      - name: Validate signed-bundle probe metadata and mmap helpers
+        run: python3 -m unittest discover -s hack -p 'test_bundle_codesign_probe.py' -v
 
   ci:
     needs: preflight
@@ -74,6 +76,13 @@ jobs:
       - name: Run tests with only zlib
         if: matrix.rust == 'stable'
         run: cargo test --workspace --no-default-features --features zlib --all-targets
+
+      - name: Validate disposable signed .app compression and restoration (#93)
+        if: matrix.rust == 'stable'
+        run: |
+          set -euo pipefail
+          cargo build --locked -p applesauce-cli
+          python3 hack/bundle-codesign-probe.py target/debug/applesauce
 
       - name: Check for clippy warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
