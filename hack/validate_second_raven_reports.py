@@ -193,7 +193,7 @@ def expected_negative_hashes(raw):
         damaged[at] ^= 0x01 if name.endswith("digest") else 0x40
         mutations[name] = hashlib.sha256(damaged).hexdigest()
     mutations["truncated_payload"] = hashlib.sha256(raw[:-1]).hexdigest()
-    mutations["appended_payload"] = hashlib.sha256(raw + b"\\x00").hexdigest()
+    mutations["appended_payload"] = hashlib.sha256(raw + b"\x00").hexdigest()
     return mutations
 
 
