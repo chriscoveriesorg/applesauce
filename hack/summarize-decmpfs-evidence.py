@@ -155,6 +155,8 @@ def checked_binary_callsite(call: dict) -> None:
     pc = canonical_u64_hex(call.get("call_address"), "binary callsite address")
     target = canonical_u64_hex(call.get("target_address"), "binary callsite target")
     origin = canonical_u64_hex(call.get("window_address"), "binary callsite window")
+    if pc % 4 or target % 4 or origin % 4:
+        raise EvidenceError("unaligned ARM64 callsite address")
     offset = call.get("file_offset")
     if type(offset) is not int or not 0 <= offset < (1 << 48):
         raise EvidenceError("invalid binary callsite file offset")
