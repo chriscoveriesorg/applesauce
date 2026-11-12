@@ -104,6 +104,19 @@ def summarize(*reports):
 
 
 class CrosscheckTest(unittest.TestCase):
+    def test_descriptor_stat_error_fails_closed(self):
+        # Descriptor metadata may fail even after a successful open.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            path.write_text('{"kind":"synthetic"}', encoding="utf-8")
+            with mock.patch.object(MODULE.os, "fstat",
+                                   side_effect=OSError(5, "I/O error")):
+                with self.assertRaises(MODULE.EvidenceError) as caught:
+                    MODULE.read_evidence(path)
+            self.assertIn("cannot stat evidence descriptor", str(caught.exception))
+            self.assertIsInstance(caught.exception.__cause__, OSError)
+
     def test_read_error_fails_closed_without_traceback(self):
         # A regular file may become unreadable after its descriptor is opened.
         # Surface a controlled evidence rejection and preserve the OS cause.
