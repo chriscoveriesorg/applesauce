@@ -378,10 +378,25 @@ fn same_directory_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 impl OutputDirectoryGuard {
     fn open(path: &Path) -> io::Result<Self> {
         let original = fs::metadata(path)?;
+        Self::open_checked(path, original)
+    }
+
+    // Separate the pathname preflight from open so tests can force a swap.
+    // O_DIRECTORY prevents a replaced FIFO from blocking in open(2), while
+    // the inode check below catches a replaced directory. Allow a symlink
+    // parent when its resolved directory identity remains unchanged.
+    fn open_checked(path: &Path, original: fs::Metadata) -> io::Result<Self> {
         if !original.is_dir() {
             return Err(invalid("archive output parent must be a directory"));
         }
-        let opened = OpenOptions::new().read(true).open(path)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK);
+        }
+        let opened = options.open(path)?;
         let guard = Self {
             path: path.to_owned(),
             opened,
@@ -914,6 +929,34 @@ mod tests {
             b"unrelated replacement"
         );
         assert!(!moved.join(&stage_name).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_parent_fifo_swap_after_preflight_cannot_block() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("selected-output");
+        let moved = root.path().join("original-output");
+        fs::create_dir(&parent).unwrap();
+        let original = fs::metadata(&parent).unwrap();
+        fs::rename(&parent, &moved).unwrap();
+        let name = CString::new(parent.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is NUL-terminated and refers to an isolated tempdir.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let outcome = OutputDirectoryGuard::open_checked(&parent, original)
+                .map(|_| ());
+            let _ = sender.send(outcome);
+        });
+        assert!(receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("archive output parent blocked while opening a swapped FIFO")
+            .is_err());
     }
 
     #[cfg(unix)]
