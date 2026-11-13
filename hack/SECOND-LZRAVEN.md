@@ -128,7 +128,10 @@ all eighteen corruption cases through the bounded independent harness and
 compares its actual failures with the retained negative reports. A
 self-consistent JSON report cannot substitute for a successful replay.
 The manifest records `replayed_decoder_vectors` (2 on portable runs, 12
-with fresh macOS evidence) and `replayed_corruptions` (0 or 18). Pure
+with fresh macOS evidence) and `replayed_corruptions` (0 or 18). The
+manifest status distinguishes replayed evidence from parsed-only reports, so
+reviewers must require `second_decoder_evidence_replayed_pending_independent_review`.
+Pure
 evidence-parser unit tests use `validate(..., replay=False)` with synthetic
 non-Raven fixtures; those tests do not qualify a decoder. The runner's
 Python suite must pass before either replay or evidence publication.
