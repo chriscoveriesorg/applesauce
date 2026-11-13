@@ -211,6 +211,34 @@ class CrosscheckTest(unittest.TestCase):
                     MODULE.read_evidence(path)
             self.assertTrue(changed)
 
+    def test_read_rejects_same_size_path_replacement_during_read(self):
+        # A pathname can be swapped while its original descriptor remains
+        # readable. Matching file sizes must not make that replacement valid.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            replacement = Path(directory) / "replacement.json"
+            original = '{"kind":"synthetic"}'
+            path.write_text(original, encoding="utf-8")
+            replacement.write_text('{"kind":"different"}', encoding="utf-8")
+            self.assertEqual(path.stat().st_size, replacement.stat().st_size)
+            real_read = os.read
+            swapped = False
+
+            def replace_after_read(fd, size):
+                nonlocal swapped
+                chunk = real_read(fd, size)
+                if not swapped:
+                    swapped = True
+                    os.replace(replacement, path)
+                return chunk
+
+            with mock.patch.object(MODULE.os, "read", side_effect=replace_after_read):
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "evidence changed or was replaced"):
+                    MODULE.read_evidence(path)
+            self.assertTrue(swapped)
+
     def test_evidence_requires_utf8_json(self):
         # json.loads(bytes) otherwise accepts UTF-16/32 evidence that the
         # producers never emit. Keep the portable UTF-8 control accepted.
