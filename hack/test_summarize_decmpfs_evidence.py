@@ -239,6 +239,33 @@ class CrosscheckTest(unittest.TestCase):
                     MODULE.read_evidence(path)
             self.assertTrue(swapped)
 
+    def test_read_rejects_path_swapped_to_symlink_during_read(self):
+        # Replacing a path with a symlink to the *same opened inode* must
+        # still fail: the final pathname is no longer a regular file.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            original = Path(directory) / "original.json"
+            path.write_text('{"kind":"synthetic"}', encoding="utf-8")
+            real_read = os.read
+            swapped = False
+
+            def replace_with_symlink(fd, size):
+                nonlocal swapped
+                chunk = real_read(fd, size)
+                if not swapped:
+                    swapped = True
+                    os.replace(path, original)
+                    path.symlink_to(original)
+                return chunk
+
+            with mock.patch.object(MODULE.os, "read",
+                                   side_effect=replace_with_symlink):
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "evidence changed or was replaced"):
+                    MODULE.read_evidence(path)
+            self.assertTrue(swapped)
+
     def test_evidence_requires_utf8_json(self):
         # json.loads(bytes) otherwise accepts UTF-16/32 evidence that the
         # producers never emit. Keep the portable UTF-8 control accepted.
