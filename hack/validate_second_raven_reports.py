@@ -15,6 +15,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 
 SIZES = (65535, 65536, 65537, 131103, 262151)
 FAMILIES = ("records", "digest")
@@ -336,7 +337,64 @@ def check_negative_reason(name, reason):
         require(reason == expected, f"{name}: unexpected parser rejection")
 
 
-def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, bundle=False):
+def replay_decodes(reports, repository, decoder, committed_rows, fresh_rows,
+                   negative_rows):
+    """Re-execute retained C11 decoder on both pinned and fresh evidence.
+
+    Hashes and self-consistent JSON cannot prove that the claimed decoder ever
+    ran. Independently verify the exact archive bytes and reference plaintext,
+    then rerun all recorded mutations with the same bounded proof harness.
+    This remains a buffer-level check, not a source-independence certification.
+    """
+    from verify_independent_lzmesh import verify
+    from prove_independent_corruptions import check_corruptions
+
+    verified = 0
+    rejected = 0
+    with tempfile.TemporaryDirectory(prefix="ascf-second-raven-replay-") as tmp:
+        clear_path = Path(tmp) / "original.bin"
+
+        def replay_one(archive, data, report, label):
+            nonlocal verified
+            clear_path.write_bytes(data)
+            observed = verify(archive, clear_path, decoder, codec="lzraven")
+            for field, value in report.items():
+                require(field in observed and observed[field] == value,
+                        f"{label}: independent decoder replay differs at {field}")
+            verified += 1
+
+        for size, row in committed_rows.items():
+            archive = repository / "tests" / "fixtures" / "codec-crossdecode" / (
+                f"lzraven-records-{size}.ascf")
+            replay_one(archive, expected_clear("records", size),
+                       row, f"committed-{size}")
+
+        for family in FAMILIES:
+            for size in SIZES:
+                key = (family, size)
+                if key not in fresh_rows:
+                    continue
+                archive = reports / "fresh-archives" / f"{family}-{size}.ascf"
+                replay_one(archive, expected_clear(family, size),
+                           fresh_rows[key], f"fresh-{family}-{size}")
+
+            if family in negative_rows:
+                archive = reports / "fresh-archives" / f"{family}-131103.ascf"
+                clear_path.write_bytes(expected_clear(family, 131103))
+                claimed = negative_rows[family]
+                observed = check_corruptions(
+                    archive, clear_path, decoder, codec="lzraven",
+                    total_timeout_seconds=claimed["suite_timeout_seconds"],
+                )
+                require(observed == claimed,
+                        f"negative-{family}: independently replayed corruption results differ")
+                rejected += len(observed["cases"])
+
+    return verified, rejected
+
+
+def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None,
+             bundle=False, replay=False):
     reports = Path(reports)
     report_digests = {}
     decoder_digest = digest_file(decoder)
@@ -369,6 +427,8 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, b
     fresh_count = 0
     negative_count = 0
     fresh_archive_hashes = {}
+    fresh_rows = {}
+    negative_rows = {}
     if fresh:
         require(cli is not None, "fresh proof requires the Apple encoder CLI binary")
         for family in FAMILIES:
@@ -387,6 +447,7 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, b
                         f"{label}: retained archive digest mismatch")
                 check_archive(archive, family, size)
                 fresh_archive_hashes[label] = row["archive_sha256"]
+                fresh_rows[(family, size)] = row
                 if size == 131103:
                     negative_fixture = archive
                 fresh_count += 1
@@ -434,6 +495,7 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, b
                     negative.get("baseline_decoder_sha256") == decoder_digest,
                     f"{label}: negative baseline differs from accepted fresh proof")
             negative_count += len(cases)
+            negative_rows[family] = negative
 
     upstream = Path(upstream)
     repository = Path(repository)
@@ -447,6 +509,16 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, b
             "upstream source is not pinned to reviewed commit")
     retained_hashes = (check_retained_bundle(reports, decoder_digest, upstream_hashes)
                        if bundle else {})
+    replayed_vectors, replayed_corruptions = (0, 0)
+    if replay:
+        # Replay only a fully retained, identity-checked bundle. A standalone
+        # collection of JSON claims must never satisfy this executable gate.
+        require(bundle, "independent replay requires the retained evidence bundle")
+        replayed_vectors, replayed_corruptions = replay_decodes(
+            reports, repository, decoder, actual, fresh_rows, negative_rows)
+        require(replayed_vectors == len(actual) + fresh_count and
+                replayed_corruptions == negative_count,
+                "independent replay did not cover every reported vector or corruption")
     manifest = {
         "schema_version": 1,
         "status": "second_decoder_evidence_consistent_pending_independent_review",
@@ -459,6 +531,8 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None, b
         "fresh_vectors_verified": fresh_count,
         "fresh_archive_sha256": dict(sorted(fresh_archive_hashes.items())),
         "corruptions_rejected": negative_count,
+        "replayed_decoder_vectors": replayed_vectors,
+        "replayed_corruptions": replayed_corruptions,
         "report_sha256": dict(sorted(report_digests.items())),
         "retained_artifacts_sha256": retained_hashes,
         "apple_encoder_cli_sha256": digest_file(cli) if cli is not None else None,
@@ -474,12 +548,13 @@ def main(argv=None):
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--bundle", action="store_true")
+    parser.add_argument("--replay", action="store_true")
     parser.add_argument("--cli", type=Path)
     args = parser.parse_args(argv)
     try:
         manifest = validate(args.reports, args.decoder, args.upstream,
                             args.repository, fresh=args.fresh, cli=args.cli,
-                            bundle=args.bundle)
+                            bundle=args.bundle, replay=args.replay)
     except (OSError, ValueError, json.JSONDecodeError,
             subprocess.CalledProcessError) as exc:
         print(f"second Raven qualification evidence rejected: {exc}", file=sys.stderr)
