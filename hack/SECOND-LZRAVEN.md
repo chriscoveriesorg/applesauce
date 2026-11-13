@@ -149,10 +149,28 @@ On a POSIX development host, test the wrapper itself with:
 
     python3 -m unittest discover -s hack -p 'test_retrowave3_lzraven_cli.py' -v
 
-The eight cases exercise exact output, short/long decoded counts, symlink and
-FIFO refusal, output no-clobber, invalid caps and oversized input. This
-establishes adapter behavior only. The upstream build and Apple-vector
-cross-decoding must run separately with access to the pinned source.
+The fourteen cases exercise the original eight adapter checks plus private
+0600 staging, staging cleanup after a no-clobber collision, preservation of an
+existing output symlink, output-parent symlink refusal, directory-path refusal
+and a deterministic Linux `LD_PRELOAD` parent-rename test at the exact
+`linkat` publication call. On other POSIX systems the Linux-only injection
+test is skipped.
+
+The adapter now writes and synchronizes a private, 128-bit-random stage
+through an opened output-parent directory, then uses descriptor-relative
+`linkat` to publish the complete output without overwriting a destination.
+It checks the staged inode and output-parent identity before publication,
+rechecks both the published inode and parent afterward, unlinks the verified
+staging name through the pinned directory and synchronizes the directory.
+Failure after publication leaves the output for inspection, avoiding deletion
+of an unrelated file. An actor with write access to the output directory can
+still race individual stage and destination names; this is a best-effort
+defense, not a hostile-directory transaction.
+
+These tests use an identity stub, so they establish adapter behavior only.
+The pinned upstream C build, full evidence regressions, Apple-vector
+cross-decoding, independent source-lineage review and macOS compatibility
+still require authorised exact-head execution.
 
 This remains **ASCF buffer-format interoperability**. It cannot establish
 a native macOS APFS decmpfs type/handler mapping. Native Raven/Mesh APFS writes
