@@ -156,6 +156,13 @@ and a deterministic Linux `LD_PRELOAD` parent-rename test at the exact
 `linkat` publication call. On other POSIX systems the Linux-only injection
 test is skipped.
 
+The adapter checks the opened compressed-input descriptor against its
+original pathname after the bounded read, including device/inode, file length,
+and nanosecond modification/change times. Same-length in-place rewrites and
+same-length path replacements now fail before decoding or output publication.
+This is a final-read snapshot check; mutations after that point still require
+the caller's whole-archive SHA-256 and independent proof validation.
+
 The adapter now writes and synchronizes a private, 128-bit-random stage
 through an opened output-parent directory, then uses descriptor-relative
 `linkat` to publish the complete output without overwriting a destination.
