@@ -152,6 +152,10 @@ class QualificationEvidenceTests(unittest.TestCase):
         self.assertEqual(result["committed_vectors_verified"], 2)
         self.assertEqual(result["fresh_vectors_verified"], 10)
         self.assertEqual(result["corruptions_rejected"], 18)
+        self.assertEqual(result["replayed_decoder_vectors"], 0)
+        self.assertEqual(result["replayed_corruptions"], 0)
+        self.assertEqual(result["status"],
+                         "second_decoder_reports_parsed_without_decoder_replay")
         self.assertEqual(len(result["report_sha256"]), 13)
         self.assertEqual(len(result["fresh_archive_sha256"]), 10)
         self.assertEqual(len(result["retained_artifacts_sha256"]), 13)
@@ -232,6 +236,22 @@ class QualificationEvidenceTests(unittest.TestCase):
                                         "independent replay requires"):
                 validate(self.reports, self.decoder, self.upstream,
                          self.repo, fresh=False, replay=True, bundle=False)
+
+
+    def test_successful_replay_is_distinctly_attested(self):
+        with patch("validate_second_raven_reports.git_head",
+                   side_effect=["6d97f1ab520821b4d326139fdf48b658f96ee5b9",
+                                "a" * 40]):
+            with patch("validate_second_raven_reports.replay_decodes",
+                       return_value=(2, 0)):
+                manifest = validate(
+                    self.reports, self.decoder, self.upstream, self.repo,
+                    fresh=False, bundle=True, replay=True,
+                )
+        self.assertEqual(manifest["status"],
+                         "second_decoder_evidence_replayed_pending_independent_review")
+        self.assertEqual(manifest["replayed_decoder_vectors"], 2)
+        self.assertEqual(manifest["replayed_corruptions"], 0)
 
     def test_replay_requires_complete_test_coverage(self):
         with patch("validate_second_raven_reports.git_head",
