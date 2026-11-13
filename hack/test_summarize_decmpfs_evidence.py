@@ -172,6 +172,45 @@ class CrosscheckTest(unittest.TestCase):
                     MODULE.read_evidence(path)
             self.assertIsInstance(caught.exception.__cause__, OSError)
 
+    def test_read_rejects_truncated_descriptor(self):
+        # A regular file may shrink after the initial fstat. Never parse a
+        # partial evidence document or treat an early EOF as success.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            path.write_text('{"kind":"synthetic"}', encoding="utf-8")
+            with mock.patch.object(MODULE.os, "read", return_value=b""):
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "evidence was truncated"):
+                    MODULE.read_evidence(path)
+
+    def test_read_rejects_in_place_mutation_during_read(self):
+        # Even same-inode modifications must fail the metadata attestation.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            path.write_text('{"kind":"synthetic"}', encoding="utf-8")
+            real_read = os.read
+            changed = False
+
+            def mutate_after_read(fd, size):
+                nonlocal changed
+                chunk = real_read(fd, size)
+                if not changed:
+                    changed = True
+                    with path.open("r+b") as writer:
+                        writer.seek(0)
+                        writer.write(b"!")
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                return chunk
+
+            with mock.patch.object(MODULE.os, "read", side_effect=mutate_after_read):
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "evidence changed or was replaced"):
+                    MODULE.read_evidence(path)
+            self.assertTrue(changed)
+
     def test_evidence_requires_utf8_json(self):
         # json.loads(bytes) otherwise accepts UTF-16/32 evidence that the
         # producers never emit. Keep the portable UTF-8 control accepted.
