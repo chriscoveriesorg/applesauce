@@ -104,6 +104,25 @@ def summarize(*reports):
 
 
 class CrosscheckTest(unittest.TestCase):
+    def test_descriptor_close_error_fails_closed(self):
+        # Closing an otherwise valid evidence descriptor must not silently
+        # succeed if the OS reports a close failure.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            path.write_text('{"kind":"synthetic"}', encoding="utf-8")
+            real_close = os.close
+
+            def close_then_fail(fd):
+                real_close(fd)
+                raise OSError(5, "I/O error")
+
+            with mock.patch.object(MODULE.os, "close", side_effect=close_then_fail):
+                with self.assertRaisesRegex(MODULE.EvidenceError,
+                                            "cannot close evidence descriptor") as caught:
+                    MODULE.read_evidence(path)
+            self.assertIsInstance(caught.exception.__cause__, OSError)
+
     def test_descriptor_stat_error_fails_closed(self):
         # Descriptor metadata may fail even after a successful open.
         from unittest import mock
