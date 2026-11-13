@@ -120,6 +120,19 @@ Reviewers can therefore inspect the precise executable and source snapshot
 after the ephemeral job has exited. They must still assess independent source
 lineage and test results; a self-consistent bundle cannot authenticate itself.
 
+The proof runner requires `--bundle --replay` on its final validation pass.
+Replay executes the retained C decoder again against both pinned committed
+archives and every retained fresh archive, regenerating the deterministic
+reference bytes and comparing the full observed positive reports. It reruns
+all eighteen corruption cases through the bounded independent harness and
+compares its actual failures with the retained negative reports. A
+self-consistent JSON report cannot substitute for a successful replay.
+The manifest records `replayed_decoder_vectors` (2 on portable runs, 12
+with fresh macOS evidence) and `replayed_corruptions` (0 or 18). Pure
+evidence-parser unit tests use `validate(..., replay=False)` with synthetic
+non-Raven fixtures; those tests do not qualify a decoder. The runner's
+Python suite must pass before either replay or evidence publication.
+
 The manifest describes technical evidence that an independent reviewer
 can inspect. It does **not** prove source independence, binary provenance
 beyond the recorded hashes, or a working native APFS handler. Native writes
