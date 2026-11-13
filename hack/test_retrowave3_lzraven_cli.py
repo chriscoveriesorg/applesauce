@@ -105,5 +105,46 @@ class DecoderAdapterTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
 
+    def test_output_stage_is_private_and_cleaned(self):
+        self.assertEqual(self.run_decoder(5).returncode, 0)
+        self.assertEqual(self.output.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()),
+                         ["compressed.bin", "decoded.bin"])
+
+    def test_collision_leaves_no_private_stage(self):
+        self.output.write_bytes(b"existing")
+        self.assertNotEqual(self.run_decoder(5).returncode, 0)
+        self.assertEqual(self.output.read_bytes(), b"existing")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()),
+                         ["compressed.bin", "decoded.bin"])
+
+    def test_output_symlink_is_preserved(self):
+        protected = self.root / "protected"
+        protected.write_bytes(b"keep")
+        self.output.symlink_to(protected)
+        self.assertNotEqual(self.run_decoder(5).returncode, 0)
+        self.assertTrue(self.output.is_symlink())
+        self.assertEqual(protected.read_bytes(), b"keep")
+        self.assertFalse(any(p.name.startswith(".raven-alt-") for p in self.root.iterdir()))
+
+    def test_symlink_output_parent_is_refused(self):
+        alias = self.root / "alias"
+        target = self.root / "target"
+        target.mkdir()
+        alias.symlink_to(target, target_is_directory=True)
+        self.output = alias / "decoded.bin"
+        self.assertNotEqual(self.run_decoder(5).returncode, 0)
+        self.assertFalse((target / "decoded.bin").exists())
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_output_directory_path_is_refused(self):
+        self.output = self.root / "directory"
+        self.output.mkdir()
+        self.assertNotEqual(self.run_decoder(5).returncode, 0)
+        self.assertTrue(self.output.is_dir())
+        self.assertEqual(list(self.output.iterdir()), [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
