@@ -162,7 +162,10 @@ def read_evidence(path: Path) -> tuple[dict, str, tuple[int, int]]:
             except OSError:
                 pass
         else:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError as error:
+                raise EvidenceError(f"cannot close evidence descriptor: {error.strerror}") from error
 
 
 def unsigned(value, what: str, max_value: int = 1 << 32) -> int:
