@@ -521,7 +521,8 @@ def validate(reports, decoder, upstream, repository, *, fresh=False, cli=None,
                 "independent replay did not cover every reported vector or corruption")
     manifest = {
         "schema_version": 1,
-        "status": "second_decoder_evidence_consistent_pending_independent_review",
+        "status": ("second_decoder_evidence_replayed_pending_independent_review"
+                   if replay else "second_decoder_reports_parsed_without_decoder_replay"),
         "scope": "Apple ASCF LZRAVEN buffer only; APFS native writes prohibited",
         "applesauce_head": git_head(repository),
         "upstream_commit": head,
