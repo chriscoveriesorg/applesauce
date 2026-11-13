@@ -14,7 +14,8 @@ from validate_second_raven_reports import (COMMITTED_ARCHIVE_SHA256, FAMILIES,
                                            NEGATIVE_CASES, SIZES, STATUS,
                                            expected_clear, expected_clear_sha256,
                                            check_negative_reason,
-                                           expected_negative_hashes, validate)
+                                           expected_negative_hashes, replay_decodes,
+                                           validate)
 
 
 def sha(data):
@@ -86,7 +87,7 @@ class QualificationEvidenceTests(unittest.TestCase):
                 "middle_index_digest": "original chunk 1 differs from ASCF chunk digest",
                 "final_index_digest": "original chunk 2 differs from ASCF chunk digest",
                 "truncated_payload": "ASCF index points past EOF",
-                "appended_payload": "ASCF payload has trailing bytes",
+                "appended_payload": "ASCF payload has trailing, overlapping or missing data",
             }
             self.write(f"negative/{family}.json", {
                 "schema_version": 1,
@@ -156,6 +157,92 @@ class QualificationEvidenceTests(unittest.TestCase):
         self.assertEqual(len(result["retained_artifacts_sha256"]), 13)
         self.assertEqual(result["retained_artifacts_sha256"]["second-raven-decoder"],
                          self.decoder_sha)
+
+
+    def replay_rows(self):
+        committed = self.read("committed.json")
+        committed_rows = {row["logical_size_bytes"]: row
+                          for row in committed["vectors"]}
+        fresh_rows = {(family, size): self.read(f"fresh/{family}-{size}.json")
+                      for family in FAMILIES for size in SIZES}
+        negative_rows = {family: self.read(f"negative/{family}.json")
+                         for family in FAMILIES}
+        return committed_rows, fresh_rows, negative_rows
+
+    def test_replay_calls_decoder_for_every_retained_archive(self):
+        committed, fresh, negative = self.replay_rows()
+        def fake_verify(archive, original, decoder, *, codec):
+            self.assertEqual(codec, "lzraven")
+            name = Path(archive).stem
+            if name.startswith("lzraven-records-"):
+                size = int(name.rsplit("-", 1)[1])
+                return committed[size]
+            family, size = name.rsplit("-", 1)
+            return fresh[family, int(size)]
+
+        def fake_corruption(archive, original, decoder, *, codec,
+                            total_timeout_seconds):
+            family = Path(archive).stem.split("-", 1)[0]
+            self.assertEqual(total_timeout_seconds, 180)
+            return negative[family]
+
+        with patch("verify_independent_lzmesh.verify", side_effect=fake_verify) as v:
+            with patch("prove_independent_corruptions.check_corruptions",
+                       side_effect=fake_corruption) as c:
+                self.assertEqual(replay_decodes(
+                    self.reports, self.repo, self.decoder,
+                    committed, fresh, negative), (12, 18))
+                self.assertEqual(v.call_count, 12)
+                self.assertEqual(c.call_count, 2)
+
+    def test_replay_rejects_forged_positive_decoder_report(self):
+        committed, _, _ = self.replay_rows()
+        report = copy.deepcopy(committed[65537])
+        report["archive_sha256"] = "0" * 64
+        with patch("verify_independent_lzmesh.verify", return_value=report):
+            with self.assertRaisesRegex(ValueError,
+                                        "independent decoder replay differs"):
+                replay_decodes(self.reports, self.repo, self.decoder,
+                               {65537: committed[65537]}, {}, {})
+
+    def test_replay_rejects_forged_negative_decoder_rejections(self):
+        committed, fresh, negative = self.replay_rows()
+        def fake_verify(archive, original, decoder, *, codec):
+            name = Path(archive).stem
+            if name.startswith("lzraven-records-"):
+                return committed[int(name.rsplit("-", 1)[1])]
+            family, size = name.rsplit("-", 1)
+            return fresh[family, int(size)]
+
+        forged = copy.deepcopy(negative["records"])
+        forged["cases"][0]["rejection"] = "independent decoder omitted chunk 0"
+        with patch("verify_independent_lzmesh.verify", side_effect=fake_verify):
+            with patch("prove_independent_corruptions.check_corruptions",
+                       return_value=forged):
+                with self.assertRaisesRegex(ValueError,
+                                            "replayed corruption results differ"):
+                    replay_decodes(self.reports, self.repo, self.decoder,
+                                   committed, fresh, negative)
+
+    def test_replay_requires_retained_evidence_bundle(self):
+        with patch("validate_second_raven_reports.git_head",
+                   side_effect=["6d97f1ab520821b4d326139fdf48b658f96ee5b9",
+                                "a" * 40]):
+            with self.assertRaisesRegex(ValueError,
+                                        "independent replay requires"):
+                validate(self.reports, self.decoder, self.upstream,
+                         self.repo, fresh=False, replay=True, bundle=False)
+
+    def test_replay_requires_complete_test_coverage(self):
+        with patch("validate_second_raven_reports.git_head",
+                   side_effect=["6d97f1ab520821b4d326139fdf48b658f96ee5b9",
+                                "a" * 40]):
+            with patch("validate_second_raven_reports.replay_decodes",
+                       return_value=(1, 0)):
+                with self.assertRaisesRegex(ValueError,
+                                            "did not cover every"):
+                    validate(self.reports, self.decoder, self.upstream,
+                             self.repo, fresh=False, replay=True, bundle=True)
 
     def test_retained_decoder_mutation_rejected(self):
         (self.reports / "second-raven-decoder").write_bytes(b"imposter decoder")
