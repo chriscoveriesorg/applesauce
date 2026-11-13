@@ -51,6 +51,30 @@ class DecoderAdapterTests(unittest.TestCase):
                 "  const char *to = getenv(\"RAVEN_SWAP_TO\");\n"
                 "  if (from && to && (rename(from, to) || mkdir(from, 0700))) return -1;\n"
                 "  return real_link(a, b, c, d, e);\n}\n"
+                "#include <unistd.h>\n"
+                "#include <fcntl.h>\n"
+                "#include <time.h>\n"
+                "ssize_t read(int fd, void *buf, size_t length) {\n"
+                "  ssize_t (*real_read)(int, void *, size_t) = dlsym(RTLD_NEXT, \"read\");\n"
+                "  const char *from = getenv(\"RAVEN_REPLACE_INPUT\");\n"
+                "  const char *to = getenv(\"RAVEN_MOVE_INPUT\");\n"
+                "  const char *rewrite = getenv(\"RAVEN_REWRITE_INPUT\");\n"
+                "  struct stat opened, named;\n"
+                "  if (from && to && !fstat(fd, &opened) && !stat(from, &named)\n"
+                "      && opened.st_dev == named.st_dev && opened.st_ino == named.st_ino\n"
+                "      && !rename(from, to)) {\n"
+                "    int out = open(from, O_CREAT | O_EXCL | O_WRONLY, 0600);\n"
+                "    if (out >= 0) { (void)write(out, \"world\", 5); close(out); }\n"
+                "  }\n"
+                "  if (rewrite && !fstat(fd, &opened) && !stat(rewrite, &named)\n"
+                "      && opened.st_dev == named.st_dev && opened.st_ino == named.st_ino) {\n"
+                "    int out = open(rewrite, O_WRONLY);\n"
+                "    if (out >= 0) { (void)write(out, \"world\", 5); close(out); }\n"
+                "    struct timespec changed[2] = {{1000000000, 0}, {1000000001, 0}};\n"
+                "    (void)utimensat(AT_FDCWD, rewrite, changed, 0);\n"
+                "  }\n"
+                "  return real_read(fd, buf, length);\n"
+                "}\n"
             )
             cls.swap_hook = root / "swap_parent.so"
             subprocess.run(
@@ -173,6 +197,29 @@ class DecoderAdapterTests(unittest.TestCase):
         self.assertEqual(list(parent.iterdir()), [])
         self.assertEqual((moved / "decoded.bin").read_bytes(), b"hello")
         self.assertFalse(any(p.name.startswith(".raven-alt-") for p in moved.iterdir()))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux injection test")
+    def test_input_path_replacement_during_read_rejected(self):
+        self.input.write_bytes(b"hello")
+        moved = self.root / "previous-input"
+        env = {**os.environ, "LD_PRELOAD": str(self.swap_hook),
+               "RAVEN_REPLACE_INPUT": str(self.input),
+               "RAVEN_MOVE_INPUT": str(moved)}
+        result = self.run_decoder(5, source=self.input, env=env)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.input.read_bytes(), b"world")
+        self.assertEqual(moved.read_bytes(), b"hello")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux injection test")
+    def test_in_place_same_size_rewrite_during_read_rejected(self):
+        self.input.write_bytes(b"hello")
+        env = {**os.environ, "LD_PRELOAD": str(self.swap_hook),
+               "RAVEN_REWRITE_INPUT": str(self.input)}
+        result = self.run_decoder(5, source=self.input, env=env)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.input.read_bytes(), b"world")
 
     def test_output_directory_path_is_refused(self):
         self.output = self.root / "directory"
