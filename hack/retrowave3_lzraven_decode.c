@@ -56,6 +56,27 @@ static int same_inode(const struct stat *a, const struct stat *b)
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
 }
 
+/* The input path and opened file must still refer to the same byte snapshot.
+ * Inode and size alone permit same-sized rewrites, even with restored mtime.
+ * Use the platform's nanosecond timestamps to detect such mutations. */
+#if defined(__APPLE__)
+#define SNAP_MTIME(st) ((st)->st_mtimespec)
+#define SNAP_CTIME(st) ((st)->st_ctimespec)
+#else
+#define SNAP_MTIME(st) ((st)->st_mtim)
+#define SNAP_CTIME(st) ((st)->st_ctim)
+#endif
+
+static int same_input_snapshot(const struct stat *a, const struct stat *b)
+{
+    return S_ISREG(b->st_mode) && same_inode(a, b)
+        && a->st_size == b->st_size
+        && SNAP_MTIME(a).tv_sec == SNAP_MTIME(b).tv_sec
+        && SNAP_MTIME(a).tv_nsec == SNAP_MTIME(b).tv_nsec
+        && SNAP_CTIME(a).tv_sec == SNAP_CTIME(b).tv_sec
+        && SNAP_CTIME(a).tv_nsec == SNAP_CTIME(b).tv_nsec;
+}
+
 /* Stage privately, then publish with atomic, descriptor-relative no-clobber.
  * On any failure after publication, leave the destination for inspection.
  * This does not protect against continuous writers in the output directory. */
@@ -168,9 +189,11 @@ int main(int argc, char **argv)
         return 1;
     }
     int invalid_input = exact_read(input, encoded, encoded_size);
-    struct stat after;
-    if (fstat(input, &after) || before.st_dev != after.st_dev
-        || before.st_ino != after.st_ino || before.st_size != after.st_size) {
+    struct stat after, path_now;
+    if (fstat(input, &after)
+        || fstatat(AT_FDCWD, argv[3], &path_now, AT_SYMLINK_NOFOLLOW)
+        || !same_input_snapshot(&before, &after)
+        || !same_input_snapshot(&before, &path_now)) {
         invalid_input = -1;
     }
     close(input);
