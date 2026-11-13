@@ -193,7 +193,7 @@ done
 python3 "$repo_root/hack/validate_second_raven_reports.py" \
   --reports "$evidence" --decoder "$work/raven-second" \
   --upstream "$upstream" --repository "$repo_root" \
-  --bundle "${fresh_option[@]}" "${cli_option[@]}"
+  --bundle --replay "${fresh_option[@]}" "${cli_option[@]}"
 
 if [[ -n "$evidence_target" ]]; then
   # The output parent must be trusted. A new directory avoids overwriting
