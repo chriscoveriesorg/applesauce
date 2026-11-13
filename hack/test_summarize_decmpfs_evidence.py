@@ -639,9 +639,10 @@ class CrosscheckTest(unittest.TestCase):
                 raise OSError("injected close failure")
 
             with mock.patch.object(MODULE.os, "close", side_effect=close_then_fail):
-                with self.assertRaisesRegex(OSError, "injected close failure"):
+                with self.assertRaisesRegex(MODULE.EvidenceError, "cannot close evidence descriptor") as caught:
                     MODULE.read_evidence(path)
             self.assertEqual(len(closed), 1)
+            self.assertIsInstance(caught.exception.__cause__, OSError)
 
     def test_read_rejects_excessively_nested_json(self):
         # The bounded input size alone does not bound parser recursion depth.
