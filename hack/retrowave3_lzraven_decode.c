@@ -51,6 +51,93 @@ static int parse_capacity(const char *value, size_t *result)
     return 0;
 }
 
+static int same_inode(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
+}
+
+/* Stage privately, then publish with atomic, descriptor-relative no-clobber.
+ * On any failure after publication, leave the destination for inspection.
+ * This does not protect against continuous writers in the output directory. */
+static int publish_noclobber(const char *path, const unsigned char *bytes, size_t length)
+{
+    const char *slash = strrchr(path, '/');
+    const char *name = slash ? slash + 1 : path;
+    if (!*name || !strcmp(name, ".") || !strcmp(name, "..")) {
+        fputs("invalid output filename\n", stderr);
+        return -1;
+    }
+    char *parent = slash ? strndup(path, slash == path ? 1 : (size_t)(slash - path))
+                         : strdup(".");
+    if (!parent) return -1;
+    int dir = open(parent, O_RDONLY | O_DIRECTORY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (dir < 0) {
+        perror("opening output parent");
+        free(parent);
+        return -1;
+    }
+    struct stat parent_inode;
+    if (fstat(dir, &parent_inode) || !S_ISDIR(parent_inode.st_mode)) {
+        close(dir);
+        free(parent);
+        return -1;
+    }
+    enum { STAGE_PREFIX_LEN = sizeof(".raven-alt-") - 1 };
+    char stage_name[STAGE_PREFIX_LEN + 32 + sizeof(".tmp")];
+    int stage = -1;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        unsigned char random_bytes[16];
+        int entropy = open("/dev/urandom", O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (entropy < 0) break;
+        int entropy_error = exact_read(entropy, random_bytes, sizeof(random_bytes));
+        if (close(entropy) || entropy_error) break;
+        static const char hex[] = "0123456789abcdef";
+        memcpy(stage_name, ".raven-alt-", STAGE_PREFIX_LEN);
+        for (size_t i = 0; i < sizeof(random_bytes); ++i) {
+            stage_name[STAGE_PREFIX_LEN + 2 * i] = hex[random_bytes[i] >> 4];
+            stage_name[STAGE_PREFIX_LEN + 2 * i + 1] = hex[random_bytes[i] & 15];
+        }
+        memcpy(stage_name + STAGE_PREFIX_LEN + 32, ".tmp", sizeof(".tmp"));
+        stage = openat(dir, stage_name,
+                       O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (stage >= 0 || errno != EEXIST) break;
+    }
+    if (stage < 0) {
+        perror("creating private output stage");
+        close(dir);
+        free(parent);
+        return -1;
+    }
+
+    int failed = 0;
+    struct stat owned, actual, current_parent;
+    int owned_valid = fstat(stage, &owned) == 0 && S_ISREG(owned.st_mode);
+    if (!owned_valid) failed = 1;
+    if (!failed && (exact_write(stage, bytes, length) || fsync(stage))) failed = 1;
+    if (!failed && (fstatat(dir, stage_name, &actual, AT_SYMLINK_NOFOLLOW)
+                    || !same_inode(&owned, &actual))) failed = 1;
+    if (!failed && (stat(parent, &current_parent)
+                    || !same_inode(&parent_inode, &current_parent))) failed = 1;
+    if (!failed && linkat(dir, stage_name, dir, name, 0)) failed = 1;
+    if (!failed && (fstatat(dir, name, &actual, AT_SYMLINK_NOFOLLOW)
+                    || !same_inode(&owned, &actual))) failed = 1;
+    if (!failed && (stat(parent, &current_parent)
+                    || !same_inode(&parent_inode, &current_parent))) failed = 1;
+    if (close(stage)) failed = 1;
+    /* An attacker may replace the stage name; preserve any replacement. */
+    if (owned_valid && !fstatat(dir, stage_name, &actual, AT_SYMLINK_NOFOLLOW)
+        && same_inode(&owned, &actual)) {
+        if (unlinkat(dir, stage_name, 0)) failed = 1;
+    } else {
+        failed = 1;
+    }
+    if (!failed && fsync(dir)) failed = 1;
+    if (close(dir)) failed = 1;
+    free(parent);
+    if (failed) fputs("atomic decoded output publication failed\n", stderr);
+    return failed ? -1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 5 || strcmp(argv[1], "--cap") != 0) {
@@ -99,19 +186,7 @@ int main(int argc, char **argv)
         free(decoded);
         return 1;
     }
-    int output = open(argv[4], O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (output < 0) {
-        perror("opening decoded output");
-        free(decoded);
-        return 1;
-    }
-    int failed = exact_write(output, decoded, capacity) || fsync(output);
-    if (close(output)) failed = 1;
+    int published = publish_noclobber(argv[4], decoded, capacity);
     free(decoded);
-    if (failed) {
-        fputs("writing decoded output failed\n", stderr);
-        unlink(argv[4]);
-        return 1;
-    }
-    return 0;
+    return published ? 1 : 0;
 }
