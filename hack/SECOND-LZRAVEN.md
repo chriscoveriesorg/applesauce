@@ -149,12 +149,13 @@ On a POSIX development host, test the wrapper itself with:
 
     python3 -m unittest discover -s hack -p 'test_retrowave3_lzraven_cli.py' -v
 
-The fourteen cases exercise the original eight adapter checks plus private
+The sixteen cases exercise the original eight adapter checks plus private
 0600 staging, staging cleanup after a no-clobber collision, preservation of an
-existing output symlink, output-parent symlink refusal, directory-path refusal
-and a deterministic Linux `LD_PRELOAD` parent-rename test at the exact
-`linkat` publication call. On other POSIX systems the Linux-only injection
-test is skipped.
+existing output symlink, output-parent symlink refusal, directory-path refusal,
+a deterministic Linux `LD_PRELOAD` parent-rename test at the exact `linkat`
+publication call, and two Linux read-time input mutation controls: an atomic
+path replacement and a same-length in-place rewrite. On other POSIX systems
+the Linux-only injection tests are skipped.
 
 The adapter checks the opened compressed-input descriptor against its
 original pathname after the bounded read, including device/inode, file length,
